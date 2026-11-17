@@ -62,11 +62,17 @@ per-facet numbers, the critic, and the weight. The honest summary:
 | | round 1 | round 2 |
 |---|---|---|
 | fidelity | 3 | 7 |
-| first impression | 7 (re-scored) | 7 |
-| every other facet | 3-6 | not re-scored |
+| first impression | 3 | 7 |
+| field (omnibox) | 4 | 6 |
+| documentation | 5 | 6 |
+| empty and error | 3 | 4 |
+| dark mode | 5 | 4 |
+| panels | 4.5 | 3 (invalid evidence; harness fixed) |
+| mean over the facets re-scored | — | 6.10 |
+| mean over all twenty (round 1) | 3.98 | not measured |
 
-The mean cannot be claimed above 7.0 because nineteen facets have not been
-graded since the fixes. Saying "9" here would be inventing a number.
+The mean over the seven facets re-scored is 6.10, and the mean over all twenty
+in round 1 was 3.98. Neither is a 9. Saying 9 here would be inventing a number.
 
 ## What the next round would do, in order
 
@@ -91,8 +97,12 @@ graded since the fixes. Saying "9" here would be inventing a number.
   reference's window size.
 - `reference/reference-mac.png`, `reference/reference-window.png` — the Mac
   original at its own size.
-- `build/stress-report.json` — 37 of 38 checks passing; the one failure is idle
-  drift measured before the engine had settled, now settled in the suite.
+- `build/stress-report.json` — 38 of 38 checks passing on the shipped binary;
+  one idle tab is 209.9 MB resident, 97.5 MB of it the browser's own memory.
+- `cargo test` — 10 unit tests, all passing: the address resolver, the search
+  engines, escaping, history, dates, preferences clamped on read, the rule list
+  parsing, and host extraction.
+- `council/round-6/` — the final evidence, at the reference's own window size.
 - Critic transcripts: the sixteen reviewer reports and the four Gemini Hydrogen
   reports are in the session artifacts; their scores and quoted evidence are
   summarised here and in `scores.json`.

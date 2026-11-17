@@ -1551,8 +1551,10 @@ fn rounded_rectangle(context: &cairo::Context, x: f64, y: f64, width: f64, heigh
     context.close_path();
 }
 
-pub fn resolve(app: &App, text: &str) -> String {
-    let typed = text.trim();
+/// What a field's text means, apart from any browser: the pure half of the
+/// address bar, so it can be tested without a window.
+pub fn plain_target(typed: &str, search: &dyn Fn(&str) -> String) -> String {
+    let typed = typed.trim();
     if typed.is_empty() {
         return String::new();
     }
@@ -1560,10 +1562,36 @@ pub fn resolve(app: &App, text: &str) -> String {
         return typed.to_string();
     }
     let hostlike = !typed.contains(char::is_whitespace)
-        && (typed.contains('.') || typed == "localhost" || typed.starts_with("127.0.0.1"));
+        && (typed.contains('.') || typed.starts_with("localhost") || typed.starts_with("127.0.0.1"));
     if hostlike {
         format!("https://{typed}")
     } else {
-        app.prefs.borrow().search_url(typed)
+        search(typed)
+    }
+}
+
+pub fn resolve(app: &App, text: &str) -> String {
+    let prefs = app.prefs.borrow();
+    plain_target(text, &|query| prefs.search_url(query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine(query: &str) -> String {
+        crate::store::Prefs::default().search_url(query)
+    }
+
+    #[test]
+    fn what_was_typed_decides_where_it_goes() {
+        // The resolver's pure half: an address keeps its scheme, a host gets one,
+        // and words become a search.
+        assert_eq!(crate::app::plain_target("https://example.com", &engine), "https://example.com");
+        assert_eq!(crate::app::plain_target("about:blank", &engine), "about:blank");
+        assert_eq!(crate::app::plain_target("example.com", &engine), "https://example.com");
+        assert_eq!(crate::app::plain_target("localhost:8099", &engine), "https://localhost:8099");
+        assert!(crate::app::plain_target("two words", &engine).contains("duckduckgo"));
+        assert_eq!(crate::app::plain_target("   ", &engine), "");
     }
 }

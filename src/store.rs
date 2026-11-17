@@ -78,7 +78,7 @@ impl Prefs {
         files::read_json(&Prefs::path()).map(|p: Prefs| p.sanitised()).unwrap_or_default()
     }
 
-    fn sanitised(mut self) -> Prefs {
+    pub fn sanitised(mut self) -> Prefs {
         self.side_width = self.side_width.clamp(176.0, 440.0);
         if self.search_engine.trim().is_empty() {
             self.search_engine = "DuckDuckGo".into();
@@ -229,5 +229,68 @@ pub fn ago(at: u64, now: u64) -> String {
         3600..=86399 => format!("{} hr ago", s / 3600),
         86400..=172799 => "yesterday".into(),
         _ => format!("{} days ago", s / 86400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_become_a_search() {
+        let prefs = Prefs::default();
+        assert!(prefs.search_url("two words").starts_with("https://duckduckgo.com/?q=two+words"));
+    }
+
+    #[test]
+    fn another_engine_is_another_address() {
+        let mut prefs = Prefs::default();
+        prefs.search_engine = "Google".into();
+        assert_eq!(prefs.search_url("rust gtk"), "https://www.google.com/search?q=rust+gtk");
+    }
+
+    #[test]
+    fn a_query_is_escaped() {
+        assert_eq!(urlencode("a b&c"), "a+b%26c");
+        assert_eq!(urlencode("ünïcode"), "%C3%BCn%C3%AFcode");
+    }
+
+    #[test]
+    fn visits_are_kept_once_newest_first() {
+        let mut history = Vec::new();
+        Records::record_visit(&mut history, "https://a.example", "A");
+        Records::record_visit(&mut history, "https://b.example", "B");
+        Records::record_visit(&mut history, "https://a.example", "A again");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].url, "https://a.example");
+        assert_eq!(history[0].title, "A again");
+    }
+
+    #[test]
+    fn about_pages_are_not_history() {
+        let mut history = Vec::new();
+        Records::record_visit(&mut history, "about:blank", "");
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn a_date_is_said_the_way_a_person_says_it() {
+        let now = 1_000_000;
+        assert_eq!(ago(now, now), "just now");
+        assert_eq!(ago(now - 90, now), "1 min ago");
+        assert_eq!(ago(now - 7200, now), "2 hr ago");
+        assert_eq!(ago(now - 90_000, now), "yesterday");
+        assert_eq!(ago(now - 300_000, now), "3 days ago");
+    }
+
+    #[test]
+    fn preferences_are_clamped_when_they_are_read() {
+        let mut prefs = Prefs::default();
+        prefs.side_width = 5000.0;
+        let text = serde_json::to_string(&prefs).unwrap();
+        let loaded: Prefs = serde_json::from_str(&text).unwrap();
+        let fixed = loaded.sanitised();
+        assert!((176.0..=440.0).contains(&fixed.side_width));
+        assert_eq!(fixed.side_width, 440.0);
     }
 }

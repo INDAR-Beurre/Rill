@@ -145,3 +145,23 @@ pub fn host_of(url: &str) -> String {
 
 #[allow(dead_code)]
 fn unused(_: *mut c_char) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rule_list_is_a_json_array() {
+        let json = rules_json();
+        let rules: serde_json::Value = serde_json::from_str(&json).expect("rules must parse");
+        assert!(rules.as_array().expect("rules are an array").len() > 40);
+    }
+
+    #[test]
+    fn a_host_is_a_host() {
+        assert_eq!(host_of("https://news.ycombinator.com/item?id=1"), "news.ycombinator.com");
+        assert_eq!(host_of("http://127.0.0.1:8099/plain?x=1"), "127.0.0.1");
+        assert_eq!(host_of("https://user:pw@example.com:443/x"), "example.com");
+        assert_eq!(host_of("example.com/path"), "example.com");
+    }
+}

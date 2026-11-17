@@ -1,0 +1,28 @@
+[package]
+name = "search"
+version = "1.0.0"
+edition = "2021"
+description = "A small, fast, quiet web browser for Linux"
+license = "MIT"
+repository = "https://github.com/INDAR-Beurre/search-linux"
+
+[[bin]]
+name = "search"
+path = "src/main.rs"
+
+[dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+glib = "0.18"
+gdk = "0.18"
+cairo-rs = { version = "0.18", features = ["png"] }
+javascriptcore-rs = "1.1"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

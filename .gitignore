@@ -1,0 +1,11 @@
+# build products
+/target/
+/build/
+
+# local evidence that is not part of the product
+council/*/raw*
+*.tmp
+*.log
+
+# nothing else: the screenshots and reports under council/ are the evidence
+# the scores refer to, so they stay in the repository.

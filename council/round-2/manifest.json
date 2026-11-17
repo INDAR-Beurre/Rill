@@ -1,0 +1,74 @@
+[
+  {
+    "name": "01-default",
+    "path": "council/round-2/01-default.png",
+    "ok": true,
+    "note": "one tab, the studio page"
+  },
+  {
+    "name": "02-pins",
+    "path": "council/round-2/02-pins.png",
+    "ok": true,
+    "note": "four pins and a live row"
+  },
+  {
+    "name": "03-tabs",
+    "path": "council/round-2/03-tabs.png",
+    "ok": true,
+    "note": "a row of open tabs"
+  },
+  {
+    "name": "04-omni",
+    "path": "council/round-2/04-omni.png",
+    "ok": true,
+    "note": "the field with suggestions"
+  },
+  {
+    "name": "05-panel-settings",
+    "path": "council/round-2/05-panel-settings.png",
+    "ok": true,
+    "note": "settings"
+  },
+  {
+    "name": "05-panel-history",
+    "path": "council/round-2/05-panel-history.png",
+    "ok": true,
+    "note": "history"
+  },
+  {
+    "name": "05-panel-bookmarks",
+    "path": "council/round-2/05-panel-bookmarks.png",
+    "ok": true,
+    "note": "bookmarks"
+  },
+  {
+    "name": "05-panel-downloads",
+    "path": "council/round-2/05-panel-downloads.png",
+    "ok": true,
+    "note": "downloads"
+  },
+  {
+    "name": "06-find",
+    "path": "council/round-2/06-find.png",
+    "ok": true,
+    "note": "find over a page"
+  },
+  {
+    "name": "07-reading",
+    "path": "council/round-2/07-reading.png",
+    "ok": true,
+    "note": "reading mode"
+  },
+  {
+    "name": "08-empty",
+    "path": "council/round-2/08-empty.png",
+    "ok": true,
+    "note": "an empty tab"
+  },
+  {
+    "name": "09-missing",
+    "path": "council/round-2/09-missing.png",
+    "ok": true,
+    "note": "a 404"
+  }
+]

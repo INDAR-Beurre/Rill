@@ -132,6 +132,10 @@ impl Panels {
     }
 
     pub fn layout_with_column(&self, width: i32, height: i32) {
+        // The column stays readable while a panel is up: the scrim covers the
+        // page, not the tabs.
+        let column = 232;
+        self.layer.place(&self.scrim, column, 0, (width - column).max(0), height);
         self.layout_card(width, height);
     }
 
@@ -140,8 +144,8 @@ impl Panels {
         let card_width = 680.min(width - 48);
         // The card is as tall as what it holds, within reason: a panel with
         // one line in it should not be a window with one line in it.
-        let wanted = self.card.preferred_height_for_width(card_width).0 + 8;
-        let card_height = wanted.clamp(260, 620).min(height - 80);
+        let wanted = self.body.preferred_height_for_width(card_width - 32).0 + 132;
+        let card_height = wanted.clamp(300, 640).min(height - 80);
         self.layer.place(
             &self.card,
             (width - card_width) / 2,
@@ -412,7 +416,9 @@ impl Panels {
         about.set_margin_top(16);
         list.add(&about);
 
-        self.body.add(&self.body_scroll(&list));
+        // Settings is a list of rows, not a document: give it to the body
+        // directly so the card can measure it and be as tall as it.
+        self.body.add(&list);
         self.body.show_all();
     }
 

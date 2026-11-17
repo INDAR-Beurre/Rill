@@ -1214,10 +1214,18 @@ impl App {
         while gtk::events_pending() {
             gtk::main_iteration_do(false);
         }
+        // Everything is drawn in the overlay's own coordinates: the window's
+        // client area starts a pixel below the top of the frame, and a picture
+        // should not have a transparent line where a window edge is.
+        let offset = self
+            .ui
+            .overlay
+            .translate_coordinates(&self.ui.window, 0, 0)
+            .unwrap_or((0, 0));
         let page = match self.view(self.active_id()) {
             Some(view) => {
                 let surface = self.page_snapshot(&view);
-                let origin = view.translate_coordinates(&self.ui.window, 0, 0).unwrap_or((0, 0));
+                let origin = view.translate_coordinates(&self.ui.overlay, 0, 0).unwrap_or((0, 0));
                 surface.map(|surface| (surface, origin.0, origin.1, view.allocated_width(), view.allocated_height()))
             }
             None => None,
@@ -1245,6 +1253,7 @@ impl App {
             rounded_rectangle(&context, 0.0, 0.0, width as f64, height as f64, radius);
             let _ = context.clip();
             context.set_operator(cairo::Operator::Over);
+            let _ = context.translate(offset.0 as f64, offset.1 as f64);
 
             // 1. the frame and the column. The whole overlay is drawn, so
             // every windowed row and light comes with it.

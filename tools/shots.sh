@@ -16,6 +16,8 @@ PORT="${FIXTURE_PORT:-8099}"
 BIN="$ROOT/target/release/search"
 
 mkdir -p "$OUT"
+# A round's evidence is one run, not an accumulation of three: start clean.
+rm -f "$OUT"/*.png "$OUT"/manifest.json
 [[ -x "$BIN" ]] || { echo "build first: cargo build --release" >&2; exit 2; }
 
 # Fixtures, unless one is already answering.
@@ -74,7 +76,9 @@ wait_bench.ping = bench.must("ping")
 manifest = []
 
 def shot(name, note=""):
-    if not name.startswith("04"):
+    # States that are *about* something being open must not be settled first:
+    # settling puts away the very panel or field the shot is evidence for.
+    if not name.startswith(("04", "05", "06", "07")):
         settle()
     path = out / f"{name}.png"
     answer = bench.command(f"shot {path}")

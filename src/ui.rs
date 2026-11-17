@@ -74,7 +74,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
 
     // The lights and the page's own doors, in the band they share.
     let top = widget_box(gtk::Orientation::Horizontal, 0);
-    top.set_size_request(-1, 52);
+    top.set_size_request(-1, 40);
     let lights = widget_box(gtk::Orientation::Horizontal, 9);
     lights.set_margin_start(8);
     lights.set_margin_top(8);
@@ -107,7 +107,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     let pins_holder = widget_box(gtk::Orientation::Vertical, 0);
     pins_holder.set_margin_start(10);
     pins_holder.set_margin_end(10);
-    pins_holder.set_margin_top(10);
+    pins_holder.set_margin_top(2);
     let pins = gtk::Grid::new();
     pins.set_column_spacing(4);
     pins.set_row_spacing(4);
@@ -120,7 +120,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     let rows = widget_box(gtk::Orientation::Vertical, 2);
     rows.set_margin_start(10);
     rows.set_margin_end(10);
-    rows.set_margin_top(8);
+    rows.set_margin_top(4);
     let rows_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     rows_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     rows_scroll.set_vexpand(true);

@@ -53,7 +53,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .row:hover {{ background-color: {hover}; }}
 .row.live {{ background-color: {wash}; }}
 .rowtitle {{ font-family: {font}; font-size: 13px; font-weight: normal; color: {rowfg}; }}
-.row.live .rowtitle {{ color: {ink}; font-weight: bold; }}
+.row.live .rowtitle {{ color: {ink}; font-weight: normal; }}
 .tile {{ border-radius: 4px; background-color: {tilebg}; }}
 .tileletter {{ font-family: {font}; font-size: 11px; font-weight: bold; color: {tilefg}; }}
 .panel switch, .panel switch slider {{ min-width: 34px; min-height: 20px; border-radius: 10px; }}

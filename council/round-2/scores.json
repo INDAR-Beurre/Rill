@@ -1,0 +1,21 @@
+{
+  "round": 2,
+  "target": 9.0,
+  "bar_met": false,
+  "note": "Re-scored after the capture fix, the pinned row, the empty state, panel sizing, monochrome switches, bright dark-mode lights and the page background following the appearance.",
+  "facets": [
+    {
+      "facet": "fidelity",
+      "score": 7.0,
+      "weight": 0.15,
+      "critic": "gemini-4-hydrogen"
+    },
+    {
+      "facet": "first impression",
+      "score": 7.0,
+      "weight": 0.0231,
+      "critic": "gemini-4-hydrogen"
+    }
+  ],
+  "mean": 7.0
+}

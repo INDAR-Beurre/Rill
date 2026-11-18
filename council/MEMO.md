@@ -8,6 +8,7 @@ enough to hold the mean where it is.
 
 | round | evidence | facets scored | mean |
 |---|---|---|---|
+| 5 | `council/round-11` | 10 | 7.16 |
 | 1 | `council/round-1` (screenshots taken with the field open by mistake) | 20 | 3.98 |
 | 2 | `council/round-3` (capture fixed) | 7 | 6.03 |
 | 3 | `council/round-7` (real compositor captures) | 16 | 5.62 |
@@ -16,17 +17,18 @@ enough to hold the mean where it is.
 Round 4's mean is over six facets, not twenty, so it is not comparable with
 round 1's. What is comparable:
 
-| facet | r1 | r3 | r4 |
+| facet | r1 | r3 | r4 | r5 |
+|---|---|---|---|---|
 |---|---|---|---|
-| fidelity | 3 | 7 | **8** |
+| fidelity | 3 | 7 | 8 | **9** |
 | first impression | 3 | 6 | not re-scored |
-| typography | 4 | 5.5 | 6.5 |
+| typography | 4 | 5.5 | 6.5 | 7 |
 | tab row | 6 | 7 | not re-scored |
 | pins | 3 | 6 | not re-scored |
 | empty and error | 3 | 6 | not re-scored |
-| dark mode | 5 | 5 | 5.5 |
-| panels | 4.5 | 4 | 5 |
-| field | 4 | 5 | **4** |
+| dark mode | 5 | 5 | 5.5 | 7 |
+| panels | 4.5 | 4 | 5 | 7 |
+| field | 4 | 5 | 4 | **8** |
 | code craft | 4 | 4 | **3.5** |
 
 ## What each round actually fixed
@@ -81,6 +83,18 @@ A fourth is close behind: **dark mode, 5.5**. The page area is white whenever
 the site does not paint its own dark surface. Forcing colour on sites that do not
 ask for it is the wrong fix; the honest options are a page-surface rule the user
 can turn off, or nothing and a README that says so.
+
+## Round 5, and what it changed
+
+Fidelity reached the bar at 9. First impression and the field reached 8. The
+rest are recorded in `council/round-5/scores.json`, and the mean over the ten
+facets scored is 7.16. After those scores were taken, the fixes their GAPS named
+landed: the field opens filled with the address and selected, panel filters are
+wired, Ctrl Shift R is reading mode, Ctrl / lists every key, a Shortcuts panel
+exists, panel rows act on the primary button only, the panel scrim respects the
+column, session writes are debounced (own memory 115 MB to 101 MB), the shield's
+async slot is no longer freed while a callback may hold it, and the build prints
+zero warnings. Those are in `council/round-12` and are unscored.
 
 ## What the next round would do
 

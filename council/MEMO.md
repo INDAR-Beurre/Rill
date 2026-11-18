@@ -119,3 +119,29 @@ zero warnings. Those are in `council/round-12` and are unscored.
 - `cargo test` — 10 tests, all passing.
 - `council/MEMO.md` and the per-round `scores.json` files carry the numbers the
   critics gave, facet by facet.
+
+## Round 7 (code, not pictures)
+
+Two critics, both 6/10, both found things worth having:
+
+- **A pop-up took the screen.** Every `window.open` and Duplicate Tab went through
+  `navigate`, which always made the new view the visible child. The tab bar
+  still highlighted the old tab, so <kbd>Ctrl</kbd>+<kbd>W</kbd> closed the tab
+  the user was not looking at. The view is now made visible only if its tab is
+  the active one, and the suite compares `visibleChild` against `active`.
+- **An error belonged to the window, not the tab.** A 404 in a background tab
+  painted over the page being read, and a clean finish anywhere dismissed an
+  unrelated error. Errors are keyed by tab and painted only for the active one.
+- **Reopening a closed tab deleted history.** `reopen_closed` removed the entry
+  instead of reading it.
+- **A panel cut its last row in half.** The card asked the scroller how tall it
+  wanted to be; a scroller answers with the space it was given. It now asks the
+  list inside it, so the panel is exactly as tall as its rows.
+- **Panels sat 115px left of centre.** The card was centred on the window while
+  the page it covers starts after the column.
+- **Find printed 4294967295 matches.** `found-text` reports the text found, not
+  the total, and answers `-1` until counted. The bar reads `counted-matches`
+  now, and says "no matches" when there are none.
+
+Round 7 facet scores: browser loop 6.0 (was 4.0 in round 3), field 8.0,
+panels 7.0. Not a pass; the loop is the facet to push next.

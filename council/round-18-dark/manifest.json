@@ -1,0 +1,80 @@
+[
+  {
+    "name": "01-default",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/01-default.png",
+    "ok": true,
+    "note": "one tab, the studio page"
+  },
+  {
+    "name": "02-pins",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/02-pins.png",
+    "ok": true,
+    "note": "four pins and a live row"
+  },
+  {
+    "name": "03-tabs",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/03-tabs.png",
+    "ok": true,
+    "note": "a row of open tabs"
+  },
+  {
+    "name": "04-omni",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/04-omni.png",
+    "ok": true,
+    "note": "the field with suggestions"
+  },
+  {
+    "name": "04b-omni-picked",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/04b-omni-picked.png",
+    "ok": true,
+    "note": "a suggestion picked by keyboard"
+  },
+  {
+    "name": "05-panel-settings",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/05-panel-settings.png",
+    "ok": true,
+    "note": "settings"
+  },
+  {
+    "name": "05-panel-history",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/05-panel-history.png",
+    "ok": true,
+    "note": "history"
+  },
+  {
+    "name": "05-panel-bookmarks",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/05-panel-bookmarks.png",
+    "ok": true,
+    "note": "bookmarks"
+  },
+  {
+    "name": "05-panel-downloads",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/05-panel-downloads.png",
+    "ok": true,
+    "note": "downloads"
+  },
+  {
+    "name": "06-find",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/06-find.png",
+    "ok": true,
+    "note": "find over a page"
+  },
+  {
+    "name": "07-reading",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/07-reading.png",
+    "ok": true,
+    "note": "reading mode"
+  },
+  {
+    "name": "08-empty",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/08-empty.png",
+    "ok": true,
+    "note": "an empty tab"
+  },
+  {
+    "name": "09-missing",
+    "path": "/home/alex/.t3/scratch/2026-11-17-build-this-browser-https-github-b500011a/search-linux/council/round-18-dark/09-missing.png",
+    "ok": true,
+    "note": "a 404"
+  }
+]

@@ -51,6 +51,9 @@ fn main() {
     if std::env::var_os("SEARCH_LOW_MEMORY").is_some() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        // Fewer malloc arenas means less memory the allocator never gives back.
+        // It also means more contention between the threads that use them.
+        std::env::set_var("MALLOC_ARENA_MAX", "2");
     }
 
     // A page's light or dark comes from the toolkit's own preference, so the

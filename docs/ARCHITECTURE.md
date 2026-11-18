@@ -72,8 +72,8 @@ The frame is GTK and the browser's own widgets; the other two belong to WebKit,
 as in any browser on this engine.
 
 `tools/stress.py` measures PSS and Pss_Anon for the whole tree. With one tab open
-and idle, the browser's own memory is about 100 MB and the resident total about
-200 MB; the difference is the shared GTK and WebKit libraries, which the desktop
+and idle, the browser's own memory is about 101 MB and the resident total about
+210 MB; the difference is the shared GTK and WebKit libraries, which the desktop
 has in memory anyway.
 
 `SEARCH_LOW_MEMORY=1` turns off the DMA-BUF renderer and shares one malloc

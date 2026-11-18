@@ -76,8 +76,8 @@ under 200 ms, one idle tab under 260 MB resident, no growth over an idle minute.
 ## 4. Pictures
 
 ```sh
-tools/shots.sh council/latest          # every state, as PNGs
-tools/shots.sh council/latest          # with SHOT_DARK=1 for dark
+tools/shots.sh council/latest                      # every state, light
+SHOT_DARK=1 tools/shots.sh council/dark            # the same states, dark
 ```
 
 Drives a browser through the default state, pins, a column of tabs, the field,

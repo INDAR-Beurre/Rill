@@ -8,6 +8,7 @@ Honest limits, with the measurement that shows each one.
 |---|---|---|
 | one idle tab, resident (PSS) | about 210 MB | three processes: frame, page, network |
 | one idle tab, the browser's own (Pss_Anon) | 101 MB | `build/stress-report.json` |
+| every figure on this page | the last run of `tools/stress.py` | re-run it and these change |
 | the difference | the shared GTK and WebKit libraries | counted once per process, shared with the desktop |
 
 There is no configuration of this browser that puts three WebKit processes with
@@ -35,12 +36,11 @@ checked by hand.
 
 | case | resident | own |
 |---|---|---|
-| 8 tabs | 497 MB | 234 MB |
-| 22 tabs | 997 MB | - |
-| a page that allocates without limit | 1444 MB at its peak, 711 MB once it settles | 1312 MB |
+| 8 tabs | 515 MB | 332 MB |
+| a page that allocates without limit | 1504 MB at its peak, 763 MB once it settles | 1368 MB |
 
-Closing tabs gives memory back, but not all at once: eight tabs went from 497 MB
-to 221 MB after they were closed. The browser itself does not grow when a page
+Closing tabs gives memory back, but not all at once: eight tabs went from 515 MB
+to 228 MB after they were closed. The browser itself does not grow when a page
 sprays memory; that tab does, and closing it is the way back.
 
 ## The one number that is not a claim

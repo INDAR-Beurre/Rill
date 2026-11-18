@@ -1526,7 +1526,7 @@ impl App {
             rounded_rectangle(&context, 0.0, 0.0, width as f64, height as f64, radius);
             context.clip();
             context.set_operator(cairo::Operator::Over);
-            let _ = context.translate(offset.0 as f64, offset.1 as f64);
+            context.translate(offset.0 as f64, offset.1 as f64);
 
             // 1. the frame and the column. The whole overlay is drawn, so
             // every windowed row and light comes with it.

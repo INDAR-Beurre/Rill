@@ -207,6 +207,9 @@ for kind in ("settings", "history", "bookmarks", "downloads"):
 bench.must("closeall")
 time.sleep(0.4)
 open_page("/long")
+# A new tab comes up with the field open, so settle before evidence of anything
+# else: a picture of find with the address field over it shows neither.
+settle()
 bench.must("find ipsum")
 time.sleep(0.6)
 shot("06-find", "find over a page")
@@ -214,6 +217,7 @@ bench.must("escape")
 
 # 7. reading mode on a long page
 open_page("/long")
+settle()
 time.sleep(0.8)
 bench.must("key reader")
 time.sleep(1.2)

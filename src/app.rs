@@ -739,6 +739,11 @@ impl App {
             view.grab_focus();
         }
         self.update_row_title(id);
+        // Nothing is being typed at a page that just arrived: a field left open
+        // over it hides the very page that was just asked for.
+        if self.omni.visible.get() && self.omni.entry.text() != url {
+            self.close_omni();
+        }
         self.save_session();
     }
 

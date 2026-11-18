@@ -440,10 +440,19 @@ class Run:
             bench.wait_loaded(tab, timeout=20)
             probe = bench.probe()
             print(f"    [popup] tab={tab} active={probe.get('active')} url={probe.get('url')}")
+            before = bench.probe()
             bench.must("js document.getElementById('go').click()")
             time.sleep(1.5)
             probe = bench.probe()
             self.check("a pop-up becomes a tab", len(probe["tabs"]) >= 2, f"{len(probe['tabs'])} tabs")
+            # A tab opening in the background must not take the screen: the tab
+            # bar and the page have to name the same tab, or Ctrl+W closes the
+            # one the user is not looking at.
+            self.check(
+                "and the tab bar still names the page on screen",
+                probe["active"] == before["active"] and probe["visibleChild"] == f"tab-{before['active']}",
+                f"active {before['active']} -> {probe['active']}, showing {probe['visibleChild']}",
+            )
 
             bench.open(self.url("/download"))
             for _ in range(30):

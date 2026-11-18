@@ -117,11 +117,19 @@ impl FindBar {
     pub fn attach(&self, view: &WebView) {
         let count = self.count.clone();
         let Some(controller) = view.find_controller() else { return };
-        controller.connect_found_text(move |_, matches| {
-            count.set_text(&if matches == 0 {
-                "no matches".to_string()
+        // The count comes from counted-matches, not from found-text: the latter
+        // reports the text it found, so its number is meaningless as a total.
+        controller.connect_counted_matches(move |_, matches| {
+            // The engine reports -1 (as u32) until it has counted: printing
+            // 4294967295 matches is worse than printing nothing.
+            count.set_text(&if matches > 1_000_000 {
+                String::new()
             } else {
-                format!("{matches}")
+                match matches {
+                    0 => "no matches".to_string(),
+                    1 => "1 match".to_string(),
+                    n => format!("{n} matches"),
+                }
             });
         });
     }

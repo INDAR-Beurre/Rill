@@ -37,6 +37,7 @@ impl PanelKind {
 
 pub struct Panels {
     pub wanted_height: std::cell::Cell<i32>,
+
     column: std::cell::Cell<i32>,
     pub filter: std::cell::RefCell<String>,
     pub holder: gtk::Fixed,
@@ -156,7 +157,7 @@ impl Panels {
             }
         };
         let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
-        let wanted = self.body.preferred_height_for_width(card_width - 32).0 + 132;
+        let wanted = self.measure_content(card_width - 40).max(self.body.preferred_height_for_width(card_width - 32).0) + 140;
         self.wanted_height.set(wanted.clamp(300, 640));
         self.layer.show();
         self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
@@ -179,10 +180,9 @@ impl Panels {
         self.layout_card(width, height);
     }
 
-    pub fn layout_with_column(&self, width: i32, height: i32) {
+    pub fn layout_with_column(&self, width: i32, height: i32, column: i32) {
         // The column stays readable while a panel is up: the scrim covers the
         // page, not the tabs.
-        let column = 232;
         self.column.set(column);
         self.layout_card(width, height);
     }
@@ -194,9 +194,12 @@ impl Panels {
         // The card is as tall as what it holds, within reason: a panel with
         // one line in it should not be a window with one line in it.
         let card_height = self.wanted_height.get().min(height - 80).max(240);
+        // Centred on the page the panel covers. Centring on the window would
+        // put the card half a column left of what it is talking about.
+        let page = (width - column).max(0);
         self.layer.place(
             &self.card,
-            (width - card_width) / 2,
+            column + ((page - card_width) / 2).max(12),
             (height - card_height) / 2,
             card_width,
             card_height,
@@ -237,6 +240,21 @@ impl Panels {
         for child in self.body.children() {
             self.body.remove(&child);
         }
+    }
+
+    /// How tall the rows want to be. A scroller asked for its preferred height
+    /// answers with what the window gives it, not with what it holds, so the
+    /// height the card asks for has to come from the list inside it: otherwise
+    /// a panel opens around two rows and cuts the third in half.
+    fn measure_content(&self, width: i32) -> i32 {
+        for child in self.body.children() {
+            if let Ok(scroll) = child.downcast::<gtk::ScrolledWindow>() {
+                if let Some(inner) = scroll.child() {
+                    return inner.preferred_height_for_width(width).0 + 4;
+                }
+            }
+        }
+        0
     }
 
     fn body_scroll(&self, content: &gtk::Box) -> gtk::ScrolledWindow {

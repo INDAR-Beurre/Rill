@@ -210,7 +210,7 @@ open_page("/long")
 # A new tab comes up with the field open, so settle before evidence of anything
 # else: a picture of find with the address field over it shows neither.
 settle()
-bench.must("find ipsum")
+bench.must("find Paragraph")
 time.sleep(0.6)
 shot("06-find", "find over a page")
 bench.must("escape")

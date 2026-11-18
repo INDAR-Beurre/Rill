@@ -409,7 +409,11 @@ impl App {
         let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
         self.ui.stack.add_named(&view, &format!("tab-{id}"));
         view.show_all();
-        self.ui.stack.set_visible_child(&view);
+        // A view made for a tab in the background is made off screen: adding it
+        // to the stack would otherwise put it on top of the page being read.
+        if id == self.active_id() {
+            self.ui.stack.set_visible_child(&view);
+        }
         if !url.is_empty() {
             web::load(&view, &url);
         }
@@ -735,8 +739,12 @@ impl App {
         curtain::apply_for_tab(self, id);
         if let Some(view) = self.view(id) {
             web::load(&view, &url);
-            self.ui.stack.set_visible_child_name(&format!("tab-{id}"));
-            view.grab_focus();
+            // A background tab loads without taking the screen: the tab bar
+            // says which tab is on top, and it must agree with what is shown.
+            if id == self.active_id() {
+                self.ui.stack.set_visible_child_name(&format!("tab-{id}"));
+                view.grab_focus();
+            }
         }
         self.update_row_title(id);
         // Nothing is being typed at a page that just arrived: a field left open
@@ -827,10 +835,12 @@ impl App {
 
     pub fn reopen_closed(&self) {
         let entry = {
-            let mut state = self.state.borrow_mut();
+            let state = self.state.borrow();
             let open: Vec<String> = state.tabs.iter().map(|t| t.url.clone()).collect();
+            // Read, not taken: bringing a tab back is not a reason to forget
+            // that the page was ever visited.
             let index = state.history.iter().position(|e| !open.contains(&e.url));
-            index.map(|i| state.history.remove(i))
+            index.map(|i| state.history[i].clone())
         };
         match entry {
             Some(entry) => {
@@ -1021,7 +1031,7 @@ impl App {
         }
         let column = self.ui.side.allocated_width().max(0);
         self.omni.layout_with_column(width, height, column);
-        self.panels.borrow().layout_with_column(width, height);
+        self.panels.borrow().layout_with_column(width, height, column);
         self.find.borrow().layout(width);
     }
 
@@ -1106,8 +1116,11 @@ impl App {
         let Some(controller) = view.find_controller() else { return };
         if text.is_empty() {
             controller.search("", 0, 0);
+            controller.count_matches("", 0, 0);
         } else {
-            controller.search(text, webkit2gtk::FindOptions::CASE_INSENSITIVE.bits(), 200);
+            let options = webkit2gtk::FindOptions::CASE_INSENSITIVE.bits();
+            controller.search(text, options, 200);
+            controller.count_matches(text, options, 20_000);
         }
     }
 
@@ -1374,6 +1387,12 @@ impl App {
                 }
             }
         }
+        if id != self.active_id() {
+            // Not the page being looked at: the error is remembered above and
+            // shows when its tab is selected.
+            self.render_rows();
+            return;
+        }
         self.ui.error_title.set_text("That page did not open");
         self.ui.error_reason.set_text(reason);
         self.ui.error_address.set_text(url);
@@ -1388,7 +1407,7 @@ impl App {
     pub fn load_finished(&self, id: TabId) {
         let failed = self.state.borrow().tab(id).map(|tab| tab.failed).unwrap_or(false);
         if !failed {
-            self.clear_error();
+            self.clear_error(id);
         }
     }
 
@@ -1398,8 +1417,7 @@ impl App {
         }
     }
 
-    pub fn clear_error(&self) {
-        let id = self.active_id();
+    pub fn clear_error(&self, id: TabId) {
         let had = {
             let mut state = self.state.borrow_mut();
             state.errors.remove(&id).is_some()

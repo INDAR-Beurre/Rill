@@ -80,7 +80,7 @@ pages that never finish, pages that eat memory, pages that redirect in a loop,
 opens and closes every panel, hides things, uses find and reading mode, resizes
 the window, and watches the memory the whole time. It writes
 `build/stress-report.json` and exits non-zero if anything fails. It currently
-reports 38 of 38 checks passing.
+reports 44 of 44 checks passing.
 
 It has already earned its keep: it caught a panel that wedged the whole UI
 because the card asked for a preferred size inside an allocation pass, and a

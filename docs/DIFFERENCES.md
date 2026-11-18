@@ -6,6 +6,11 @@ difference is a platform fact, a decision, or something simply missing.
 
 ## The window
 
+The window buttons are drawn here: a plain close, minimise and maximise mark on
+a wash, not the three coloured circles macOS uses. Copying another operating
+system's buttons onto this desktop was the loudest wrong note in the first
+builds, and a browser that looks like a Mac on Linux looks like a port.
+
 The Mac window is an `NSWindow` with real traffic lights, a real titlebar, and
 the system's own window shadows and corners. On Linux the browser draws its own:
 a `GtkWindow` with no desktop titlebar, a zero-height client-side `HeaderBar`
@@ -62,6 +67,6 @@ and scripts that the page relies on to keep running do not keep running.
 - A bench socket (`$XDG_RUNTIME_DIR/search-bench.sock`) and `tools/bench.py`,
   so the browser can be driven and measured while it runs. The Mac build has a
   bench tool as well; this one is not a port of it, and its commands are its own.
-- `tools/stress.py`, 48 checks, which measures memory and timing per scenario.
+- `tools/stress.py`, 60 checks, which measures memory and timing per scenario,
 - `--shot`, `--size`, `--appearance`, `--fresh` and `--bench` flags, for taking
   pictures of the browser and for reproducing a failure on a clean profile.

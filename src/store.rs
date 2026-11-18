@@ -196,6 +196,18 @@ impl Records {
         history.truncate(4000);
     }
 
+    /// A visit is written before the page has said its name, so the address
+    /// field used to offer four rows called "127.0.0.1". When the title does
+    /// arrive, it goes onto the newest entry for that address.
+    pub fn name_visit(history: &mut Vec<HistoryEntry>, url: &str, title: &str) {
+        if title.is_empty() {
+            return;
+        }
+        if let Some(entry) = history.iter_mut().find(|e| e.url == url) {
+            entry.title = title.to_string();
+        }
+    }
+
     pub fn load_bookmarks() -> Vec<Bookmark> {
         files::read_json(&Self::file("bookmarks.json")).unwrap_or_default()
     }
@@ -292,5 +304,32 @@ mod tests {
         let fixed = loaded.sanitised();
         assert!((176.0..=440.0).contains(&fixed.side_width));
         assert_eq!(fixed.side_width, 440.0);
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+
+    fn entry(url: &str, title: &str) -> HistoryEntry {
+        HistoryEntry {
+            url: url.to_string(),
+            title: title.to_string(),
+            at: 0,
+        }
+    }
+
+    #[test]
+    fn a_visit_takes_its_name_when_the_page_gives_one() {
+        let mut history = vec![entry("https://a.test/", "a.test")];
+        Records::name_visit(&mut history, "https://a.test/", "A page");
+        assert_eq!(history[0].title, "A page");
+    }
+
+    #[test]
+    fn a_visit_does_not_get_a_blank_name() {
+        let mut history = vec![entry("https://a.test/", "a.test")];
+        Records::name_visit(&mut history, "https://a.test/", "");
+        assert_eq!(history[0].title, "a.test");
     }
 }

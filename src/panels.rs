@@ -158,7 +158,9 @@ impl Panels {
         };
         let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
         let wanted = self.measure_content(card_width - 40).max(self.body.preferred_height_for_width(card_width - 32).0) + 140;
-        self.wanted_height.set(wanted.clamp(300, 640));
+        // An empty panel should be a note, not a slab: the floor used to be
+        // 300px of nothing under one line of text.
+        self.wanted_height.set(wanted.clamp(200, 640));
         self.layer.show();
         self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
         field
@@ -278,7 +280,7 @@ impl Panels {
         self.clear_body();
         let bookmarks = app.state.borrow().bookmarks.clone();
         if bookmarks.is_empty() {
-            self.body.add(&self.empty_state("Nothing kept yet. ⌘D, or Ctrl+D, keeps the page you are on."));
+            self.body.add(&self.empty_state("Nothing kept yet. Ctrl D keeps the page you are on."));
             self.body.show_all();
             return None;
         }
@@ -467,7 +469,7 @@ impl Panels {
             },
         ));
 
-        list.add(&self.setting_switch(app, "Roomy tabs", "Taller rows, as the Mac build offers.", prefs.roomy_tabs, |app, on| {
+        list.add(&self.setting_switch(app, "Roomy tabs", "Taller rows, easier to hit with a mouse.", prefs.roomy_tabs, |app, on| {
             app.prefs.borrow_mut().roomy_tabs = on;
             app.prefs.borrow().save();
             app.apply_style();
@@ -573,38 +575,10 @@ impl Panels {
     /// keys is a browser whose keys nobody learns.
     fn build_shortcuts(&self) {
         self.clear_body();
-        let keys: [(&str, &str); 28] = [
-            ("Ctrl /", "This list"),
-            ("Ctrl L", "The field"),
-            ("Ctrl T", "New tab"),
-            ("Ctrl W", "Close tab"),
-            ("Ctrl Shift T", "Reopen the last closed tab"),
-            ("Ctrl Tab", "Next tab"),
-            ("Ctrl 1 to 9", "Jump to a tab"),
-            ("Ctrl [ ]", "Back and forward"),
-            ("Ctrl R", "Reload"),
-            ("Ctrl F", "Find in the page"),
-            ("Ctrl D", "Keep this page"),
-            ("Ctrl Y", "History"),
-            ("Ctrl Shift B", "Bookmarks"),
-            ("Ctrl J", "Downloads"),
-            ("Ctrl Shift R", "Reading mode (again to leave)"),
-            ("Ctrl Shift H", "Hide something on this site"),
-            ("Ctrl Shift U", "Show what is hidden here"),
-            ("Ctrl ,", "Settings"),
-            ("Ctrl Shift I", "The inspector"),
-            ("Ctrl N", "New tab (Ctrl Shift N: private)"),
-            ("Ctrl Shift Tab", "Previous tab"),
-            ("Ctrl Page Up Down", "Move between tabs"),
-            ("Ctrl Shift C", "Copy the address"),
-            ("Ctrl + - 0", "Zoom in, out, reset"),
-            ("F5", "Reload (Ctrl F5 skips the cache)"),
-            ("F12", "The inspector"),
-            ("Alt Left Right", "Back and forward"),
-            ("Escape", "Close the field, find, a panel, or reading mode"),
-        ];
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        for (key, what) in keys {
+        // The sheet is `keys::SHEET`: the same table the bench presses and the
+        // tests check, so what is drawn here cannot advertise a dead key.
+        for (_, key, what, ..) in crate::keys::SHEET {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
             row.set_margin_top(4);
             row.set_margin_bottom(4);
@@ -666,7 +640,8 @@ impl Panels {
         let label = gtk::Label::new(Some(text));
         crate::ui::class(&label, "empty");
         label.set_line_wrap(true);
-        label.set_margin_top(40);
+        label.set_margin_top(22);
+        label.set_margin_bottom(22);
         label.set_justify(gtk::Justification::Center);
         label
     }

@@ -132,6 +132,10 @@ pub struct App {
     /// Reading mode is a state of the tab, not of the page, so the browser has
     /// to remember it to be able to leave it.
     pub reading: std::cell::Cell<bool>,
+    /// The page icons the engine has handed us, per tab. Kept here rather than
+    /// asked for during a redraw: a redraw happens while the rows are being
+    /// rebuilt, and the view may not exist yet.
+    pub icons: RefCell<std::collections::BTreeMap<TabId, cairo::Surface>>,
 }
 
 pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
@@ -157,12 +161,11 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         .unwrap_or(false);
 
     let palette = Palette::for_look(prefs.appearance.clone(), prefs.desktop_dark);
-    let composited = gtk::prelude::GtkWindowExt::screen(&window).map(|s| s.is_composited()).unwrap_or(true);
     // One opaque window colour, so a strip the shell does not cover is the
     // window's own ground rather than whatever the compositor shows through.
     window.set_app_paintable(true);
 
-    let ui = ui::build(window.clone(), palette, &prefs, composited);
+    let ui = ui::build(window.clone(), palette, &prefs);
     window.add(&ui.overlay);
 
     let provider = gtk::CssProvider::new();
@@ -226,6 +229,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         provider,
         private_ctx: RefCell::new(None),
         palette: RefCell::new(palette),
+        icons: RefCell::new(std::collections::BTreeMap::new()),
         last_layout: RefCell::new((0, 0)),
         reading: std::cell::Cell::new(false),
     });
@@ -248,18 +252,18 @@ impl App {
     }
 
     pub fn apply_style(&self) {
-        let css = crate::css::build(
-            &self.palette.borrow(),
-            self.composited(),
-            self.prefs.borrow().row_height(),
-        );
+        let css = crate::css::build(&self.palette.borrow(), self.prefs.borrow().row_height());
         if let Err(error) = self.provider.load_from_data(css.as_bytes()) {
             eprintln!("search: the stylesheet did not load: {error}");
         }
         // Pages follow the same appearance the frame does, which WebKit takes
-        // from the toolkit's own preference.
-        if let Some(settings) = gtk::Settings::default() {
-            settings.set_gtk_application_prefer_dark_theme(self.dark());
+        // from the toolkit's own preference. Only a look the person chose is
+        // written: writing it while the look is "follow the desktop" would make
+        // this browser's own answer the desktop's answer next launch.
+        if !matches!(self.prefs.borrow().appearance, crate::store::Look::System) {
+            if let Some(settings) = gtk::Settings::default() {
+                settings.set_gtk_application_prefer_dark_theme(self.dark());
+            }
         }
         for widget in [self.ui.shell.clone().upcast::<gtk::Widget>(), self.ui.window.clone().upcast::<gtk::Widget>()] {
             widget.style_context().remove_class("dark");
@@ -268,8 +272,35 @@ impl App {
         }
     }
 
-    fn composited(&self) -> bool {
-        gtk::prelude::GtkWindowExt::screen(&self.ui.window).map(|s| s.is_composited()).unwrap_or(false)
+    /// Re-read the desktop's answer, for the look that follows it. Called when
+    /// the desktop's own appearance changes, so "follow the desktop" means
+    /// followed rather than remembered from launch.
+    pub fn follow_desktop(&self) {
+        if !matches!(self.prefs.borrow().appearance, crate::store::Look::System) {
+            return;
+        }
+        let dark_desktop = gtk::Settings::default()
+            .map(|s| s.is_gtk_application_prefer_dark_theme())
+            .unwrap_or(false);
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            if prefs.desktop_dark == dark_desktop {
+                return;
+            }
+            prefs.desktop_dark = dark_desktop;
+        }
+        *self.palette.borrow_mut() =
+            crate::palette::Palette::for_look(crate::store::Look::System, dark_desktop);
+        self.apply_style();
+        self.apply_page_tone();
+        let ids: Vec<TabId> = self.state.borrow().tabs.iter().map(|tab| tab.id).collect();
+        for id in ids {
+            if let Some(view) = self.view(id) {
+                let page = if self.dark() { (0.043, 0.043, 0.043) } else { (1.0, 1.0, 1.0) };
+                view.set_background_color(&gtk::gdk::RGBA::new(page.0, page.1, page.2, 1.0));
+            }
+        }
+        self.render();
     }
 
     pub fn switch_look(&self, look: crate::store::Look) {
@@ -410,6 +441,7 @@ impl App {
         let Some(view) = web::view_for(&app, id) else { return };
         view.set_widget_name(&format!("page-{id}"));
         let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
+        self.tone_for(&view);
         self.ui.stack.add_named(&view, &format!("tab-{id}"));
         view.show_all();
         // A view made for a tab in the background is made off screen: adding it
@@ -419,6 +451,46 @@ impl App {
         }
         if !url.is_empty() {
             web::load(&view, &url);
+        }
+    }
+
+    /// Throw a tab's view away so it is made again: used when the shield is
+    /// turned off for a host, which changes which content manager the view
+    /// needs. The page is reloaded, so nothing is lost but the engine's cache.
+    /// Turn the shield off for the page in front of you, or on again. The rules
+    /// are baked into the content manager a view is made with, so the view has
+    /// to be made again; writing the file and reloading was a no-op.
+    pub fn toggle_blocker(&self) {
+        let host = self
+            .state
+            .borrow()
+            .active_tab()
+            .map(|tab| crate::shield::host_of(&tab.url))
+            .unwrap_or_default();
+        if host.is_empty() {
+            return;
+        }
+        let off = crate::shield::allowed(&host);
+        crate::shield::set_allowed(&host, !off);
+        self.flash_toast(if off { "Blocker on here again." } else { "Blocker off here." });
+        self.rebuild_view(self.active_id());
+        self.reload();
+    }
+
+    pub fn rebuild_view(&self, id: TabId) {
+        let name = format!("tab-{id}");
+        if let Some(view) = self.view(id) {
+            self.ui.stack.remove(&view);
+        }
+        if let Some(old) = self.ui.stack.child_by_name(&name) {
+            self.ui.stack.remove(&old);
+        }
+        self.ensure_view(id);
+        if let Some(view) = self.view(id) {
+            if id == self.active_id() {
+                self.ui.stack.set_visible_child(&view);
+                view.grab_focus();
+            }
         }
     }
 
@@ -443,10 +515,66 @@ impl App {
             self.ui.stack.set_visible_child_name("error");
         } else if blank {
             self.ui.stack.set_visible_child_name("blank");
+        } else {
+            // Back from an error page: the page that loaded fine behind it has
+            // to be the visible child again, or a failed load leaves the
+            // browser showing an apology over a page that is actually there.
+            let active = self.state.borrow().active;
+            let name = format!("tab-{active}");
+            if self.ui.stack.child_by_name(&name).is_some() {
+                self.ui.stack.set_visible_child_name(&name);
+            }
         }
     }
 
+    /// Rebuild the tab column only when the tabs have actually changed shape.
+    /// A title arriving used to empty and refill the whole column, which is the
+    /// moment a tab switch felt like a redraw instead of a repaint.
     fn render_rows(&self) {
+        let shape: Vec<(TabId, bool)> = {
+            let state = self.state.borrow();
+            state.tabs.iter().map(|t| (t.id, t.pinned)).collect()
+        };
+        let same = {
+            let state = self.state.borrow();
+            let built: Vec<(TabId, bool)> = state
+                .tabs
+                .iter()
+                .filter(|t| t.row.is_some())
+                .map(|t| (t.id, t.pinned))
+                .collect();
+            let wanted: Vec<(TabId, bool)> = shape.iter().copied().filter(|(_, pinned)| !pinned).collect();
+            built.len() == wanted.len() && built.iter().zip(wanted.iter()).all(|(a, b)| a.0 == b.0)
+        };
+        if same {
+            // The column is already the right shape, so only what has changed
+            // is repainted: the titles, and which row is the one you are on.
+            // Collected first: update_row_title borrows the state for writing,
+            // and a borrow held across that is how this panicked at launch.
+            let (ids, active): (Vec<TabId>, TabId) = {
+                let state = self.state.borrow();
+                (
+                    state.tabs.iter().filter(|t| !t.pinned).map(|t| t.id).collect(),
+                    state.active,
+                )
+            };
+            for id in ids {
+                self.update_row_title(id);
+                let event = {
+                    let state = self.state.borrow();
+                    state.tab(id).and_then(|t| t.row.as_ref().map(|row| row.event.clone()))
+                };
+                if let Some(event) = event {
+                    let context = event.style_context();
+                    if id == active {
+                        context.add_class("live");
+                    } else {
+                        context.remove_class("live");
+                    }
+                }
+            }
+            return;
+        }
         for child in self.ui.rows.children() {
             self.ui.rows.remove(&child);
         }
@@ -473,7 +601,6 @@ impl App {
                 .collect();
             (tabs, state.active)
         };
-        let palette = *self.palette.borrow();
         let height = self.prefs.borrow().row_height();
         for tab in tabs.iter().filter(|t| !t.pinned) {
             let title = if tab.title.is_empty() {
@@ -485,7 +612,12 @@ impl App {
             } else {
                 tab.title.clone()
             };
-            let row = ui::tab_row(&title, palette, height, Some(tab.letter()), tab.id == active);
+            let row = ui::tab_row(&title, *self.palette.borrow(), height, Some(tab.letter()), tab.id == active);
+            // A page with its own mark shows it; one without keeps its letter.
+            let icon = self.icons.borrow().get(&tab.id).cloned();
+            if let Some(surface) = icon.as_ref() {
+                ui::mark(&row.icon, tab.letter(), Some(surface), 16);
+            }
             row.event.set_tooltip_text(Some(&if tab.url.is_empty() {
                 "New tab".to_string()
             } else {
@@ -527,7 +659,7 @@ impl App {
         new_tab.set_size_request(-1, height);
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         hbox.set_margin_start(8);
-        let plus = crate::icons::area(crate::icons::Icon::Plus, 16, palette.faint);
+        let plus = crate::icons::area(crate::icons::Icon::Plus, 16, self.palette.borrow().faint);
         plus.set_valign(gtk::Align::Center);
         ui::pack(&hbox, &plus, false);
         let label = gtk::Label::new(Some("New tab"));
@@ -568,13 +700,16 @@ impl App {
             self.ui.pins_holder.set_no_show_all(true);
             return;
         }
-        let palette = *self.palette.borrow();
         // A widget that opts out of show_all is not shown by it, even when it
         // is the one being asked: the flag comes off first.
         self.ui.pins_holder.set_no_show_all(false);
         self.ui.pins_holder.show_all();
         for (index, (id, letter, title)) in pinned.iter().enumerate() {
-            let tile = ui::pin_tile(*letter, palette, *id == active);
+            let tile = ui::pin_tile(*letter, *id == active, *self.palette.borrow());
+            let icon = self.icons.borrow().get(id).cloned();
+            if let Some(surface) = icon.as_ref() {
+                ui::mark(&tile.icon, *letter, Some(surface), 22);
+            }
             tile.event.set_tooltip_text(Some(title));
             {
                 let weak = self.weak();
@@ -629,7 +764,12 @@ impl App {
         };
         if changed {
             self.update_row_title(id);
-            self.save_session();
+            let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
+            if !url.is_empty() {
+                let mut state = self.state.borrow_mut();
+                Records::name_visit(&mut state.history, &url, title);
+            }
+            self.schedule_flush();
         }
     }
 
@@ -648,10 +788,37 @@ impl App {
         let letter = tab.letter().to_uppercase().to_string();
         if let Some(row) = tab.row.as_ref() {
             row.title.set_text(&title);
-            row.letter.set_text(&letter);
+            if let Some(label) = row.letter.as_ref() {
+                label.set_text(&letter);
+            }
         }
         if let Some(pin) = tab.pin.as_ref() {
             pin.letter.set_text(&letter);
+        }
+    }
+
+    /// The engine found a page icon. Store it and put it where the letter was.
+    pub fn set_icon(&self, id: TabId, surface: Option<cairo::Surface>) {
+        let changed = {
+            let mut icons = self.icons.borrow_mut();
+            match surface {
+                Some(surface) => icons.insert(id, surface).is_none(),
+                None => icons.remove(&id).is_some(),
+            }
+        };
+        if !changed {
+            return;
+        }
+        let paint = |holder: Option<&gtk::Box>, letter: char, size: i32| {
+            if let Some(holder) = holder {
+                let icon = self.icons.borrow().get(&id).cloned();
+                crate::ui::mark(holder, letter, icon.as_ref(), size);
+            }
+        };
+        let state = self.state.borrow();
+        if let Some(tab) = state.tab(id) {
+            paint(tab.row.as_ref().map(|row| &row.icon), tab.letter(), 16);
+            paint(tab.pin.as_ref().map(|pin| &pin.icon), tab.letter(), 22);
         }
     }
 
@@ -659,6 +826,11 @@ impl App {
         let changed = {
             let mut state = self.state.borrow_mut();
             match state.tab_mut(id) {
+                // A tab that is showing a failure keeps the address it failed
+                // on: the engine's document never changed, and reporting the
+                // old page over the new address is what made a 404 tab claim
+                // to be the site you came from.
+                Some(tab) if tab.failed && tab.url != uri => false,
                 Some(tab) if tab.url != uri => {
                     tab.url = uri.to_string();
                     true
@@ -692,8 +864,11 @@ impl App {
         let (url, title) = {
             let state = self.state.borrow();
             match state.tab(id) {
-                Some(tab) => (tab.url.clone(), tab.title.clone()),
-                None => return,
+                // A private tab's address is the one thing it promised not to
+                // keep. It was being written to history.json and then offered
+                // back in the address field.
+                Some(tab) if !tab.private => (tab.url.clone(), tab.title.clone()),
+                _ => return,
             }
         };
         if url.is_empty() {
@@ -991,32 +1166,39 @@ impl App {
 
     /// When dark pages are asked for, a site that paints white gets the
     /// browser's ground instead, and its text a colour that can be read on it.
-    pub fn apply_page_tone(&self) {
+    /// The page tone, applied to one view. Kept separate from the loop so a tab
+    /// opened after the switch gets the same sheet as the ones already open.
+    fn tone_for(&self, view: &webkit2gtk::WebView) {
         let on = self.prefs.borrow().darken_pages && self.dark();
         let sheet = if on {
             "html { background: #0b0b0b !important; }\nbody { background-color: transparent !important; }\n:root { color-scheme: dark; }"
         } else {
             ""
         };
+        let Some(manager) = view.user_content_manager() else { return };
+        manager.remove_all_style_sheets();
+        if sheet.is_empty() {
+            return;
+        }
+        let style = webkit2gtk::UserStyleSheet::new(
+            sheet,
+            webkit2gtk::UserContentInjectedFrames::AllFrames,
+            webkit2gtk::UserStyleLevel::User,
+            &[],
+            &[],
+        );
+        manager.add_style_sheet(&style);
+    }
+
+    pub fn apply_page_tone(&self) {
         let ids: Vec<TabId> = self.state.borrow().tabs.iter().map(|tab| tab.id).collect();
         for id in ids {
             if let Some(view) = self.view(id) {
-                if let Some(manager) = view.user_content_manager() {
-                    manager.remove_all_style_sheets();
-                    if !sheet.is_empty() {
-                        let style = webkit2gtk::UserStyleSheet::new(
-                            sheet,
-                            webkit2gtk::UserContentInjectedFrames::AllFrames,
-                            webkit2gtk::UserStyleLevel::User,
-                            &[],
-                            &[],
-                        );
-                        manager.add_style_sheet(&style);
-                    }
-                }
+                self.tone_for(&view);
             }
         }
     }
+
 
     /// Where the field, the panels and find stand in a window of this size.
     pub fn layout_layers(&self, width: i32, height: i32) {
@@ -1118,7 +1300,7 @@ impl App {
         }
     }
 
-    pub fn find_query(&self, text: &str, _forward: bool) {
+    pub fn find_query(&self, text: &str) {
         let Some(view) = self.view(self.active_id()) else { return };
         let Some(controller) = view.find_controller() else { return };
         if text.is_empty() {
@@ -1319,25 +1501,7 @@ impl App {
             ("Downloads", Box::new(|app: &App| app.toggle_panel(PanelKind::Downloads))),
             ("Settings", Box::new(|app: &App| app.toggle_panel(PanelKind::Settings))),
             ("Shortcuts", Box::new(|app: &App| app.toggle_panel(PanelKind::Shortcuts))),
-            ("Blocker Off Here", Box::new(|app: &App| {
-                let host = app
-                    .state
-                    .borrow()
-                    .active_tab()
-                    .map(|tab| crate::shield::host_of(&tab.url))
-                    .unwrap_or_default();
-                if host.is_empty() {
-                    return;
-                }
-                let off = crate::shield::allowed(&host);
-                crate::shield::set_allowed(&host, !off);
-                app.flash_toast(if off {
-                    "Blocker on here again."
-                } else {
-                    "Blocker off here."
-                });
-                app.reload();
-            })),
+            ("Blocker Off Here", Box::new(|app: &App| app.toggle_blocker())),
         ];
         for (label, action) in items {
             let item = gtk::MenuItem::with_label(label);
@@ -1397,7 +1561,15 @@ impl App {
                     );
                 }
             }
+            if let Some(tab) = state.tab_mut(id) {
+                if !url.is_empty() && tab.url != url {
+                    tab.url = url.to_string();
+                }
+                tab.title.clear();
+                tab.failed = true;
+            }
         }
+        self.update_row_title(id);
         if id != self.active_id() {
             // Not the page being looked at: the error is remembered above and
             // shows when its tab is selected.
@@ -1608,6 +1780,17 @@ impl App {
             Some(app) => crate::keys::handle(&app, event),
             None => crate::gtkx::inh(false),
         });
+        {
+            // "Follow the desktop" has to follow it while running.
+            let weak = self.weak();
+            if let Some(settings) = gtk::Settings::default() {
+                settings.connect_notify_local(Some("gtk-application-prefer-dark-theme"), move |_, _| {
+                    if let Some(app) = weak.upgrade() {
+                        app.follow_desktop();
+                    }
+                });
+            }
+        }
 
         // The lights.
         {
@@ -1738,7 +1921,7 @@ impl App {
             let weak = self.weak();
             entry.connect_activate(move |entry| {
                 if let Some(app) = weak.upgrade() {
-                    app.find_query(&entry.text(), true);
+                    app.find_query(&entry.text());
                 }
             });
         }

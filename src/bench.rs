@@ -160,9 +160,17 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             None => fail("close needs a tab id"),
         },
         "closeall" => {
+            // Close every tab, then leave exactly one empty tab behind: closing
+            // the last tab already makes a fresh one, so the loop must stop at
+            // one or the browser ends up with two "New tab" rows and every
+            // picture of the empty state shows both.
             let ids: Vec<u64> = app.state.borrow().tabs.iter().map(|tab| tab.id).collect();
-            for id in ids {
-                app.close_tab(id);
+            for id in ids.iter().take(ids.len().saturating_sub(1)) {
+                app.close_tab(*id);
+            }
+            let left: Vec<u64> = app.state.borrow().tabs.iter().map(|tab| tab.id).collect();
+            if left.len() == 1 {
+                app.close_tab(left[0]);
             }
             ok("")
         },
@@ -205,7 +213,11 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 app.toggle_find();
             }
             app.find.borrow().entry.set_text(argument);
-            app.find_query(argument, true);
+            app.find_query(argument);
+            ok("")
+        }
+        "blocker" => {
+            app.toggle_blocker();
             ok("")
         }
         "session" => {
@@ -359,53 +371,21 @@ fn tabs(app: &AppRef) -> String {
 }
 
 fn key(app: &AppRef, name: &str) -> String {
-    // The advertised shortcuts are driven through the same table the keyboard
-    // reads, so a name that stops meaning something fails a check instead of
-    // silently doing nothing in the browser and nothing in the bench.
-    let shortcut = match name {
-        "omni" => Some(Intent::Omni),
-        "reopen" => Some(Intent::ReopenClosed),
-        "reload" => Some(Intent::Reload),
-        "reloadbypass" => Some(Intent::ReloadBypassCache),
-        "back" => Some(Intent::Back),
-        "forward" => Some(Intent::Forward),
-        "nexttab" => Some(Intent::NextTab),
-        "previoustab" => Some(Intent::PreviousTab),
-        "bookmark" => Some(Intent::Bookmark),
-        "copy" => Some(Intent::CopyAddress),
-        "reader" => Some(Intent::Reader),
-        "hide" => Some(Intent::HideSomething),
-        "unhide" => Some(Intent::ShowHidden),
-        "find" => Some(Intent::Find),
-        "history" => Some(Intent::History),
-        "bookmarks" => Some(Intent::Bookmarks),
-        "downloads" => Some(Intent::Downloads),
-        "settings" => Some(Intent::Settings),
-        "shortcuts" => Some(Intent::Shortcuts),
-        "inspector" => Some(Intent::Inspector),
-        "zoomin" => Some(Intent::ZoomIn),
-        "zoomout" => Some(Intent::ZoomOut),
-        "zoomreset" => Some(Intent::ZoomReset),
-        "escape" => Some(Intent::Escape),
-        _ => None,
-    };
-    if let Some(intent) = shortcut {
-        crate::keys::apply(app, intent);
-        return ok("");
+    // A verb that names a shortcut goes through `keys::intent_of`, which folds
+    // the keyval exactly as a real key press does. A verb that changes a
+    // shortcut's own meaning therefore fails here instead of quietly testing
+    // something the browser no longer does.
+    if let Some(intent) = crate::keys::intent_of(name) {
+        if intent != Intent::Nothing {
+            crate::keys::apply(app, intent);
+            return ok("");
+        }
     }
     match name {
         "down" => app.omni.step(1),
         "up" => app.omni.step(-1),
-        "newtab" => {
-            app.new_tab(None, false, false);
-            return ok("");
-        }
-        "privatetab" => {
-            app.new_tab(None, true, false);
-            return ok("");
-        }
-        "closetab" => {
-            app.close_tab(app.active_id());
+        "blocker" => {
+            app.toggle_blocker();
             return ok("");
         }
         "pin" => {

@@ -125,7 +125,7 @@ pages that never finish, pages that eat memory, pages that redirect in a loop,
 opens and closes every panel, hides things, uses find and reading mode, resizes
 the window, and watches the memory the whole time. It writes
 `build/stress-report.json` and exits non-zero if anything fails. It currently
-reports 56 of 56 checks passing on a 4-core Linux desktop with 8 GB of RAM.
+reports 60 of 60 checks passing on a 4-core Linux desktop with 8 GB of RAM.
 
 The full list of places this build differs from the Mac original, and why, is in
 [docs/DIFFERENCES.md](docs/DIFFERENCES.md).
@@ -142,13 +142,14 @@ line. It is the same idea as the Mac build's `./bench`.
 
 | | |
 |---|---|
-| `Ctrl L` field · `Ctrl T` new tab · `Ctrl W` close · `Ctrl Shift T` reopen | `Ctrl [ ]` back, forward · `Ctrl Tab` next, previous |
-| `Ctrl 1`–`Ctrl 9` jump | `Ctrl R` reload · `Ctrl Shift R` reading mode |
+| `Ctrl L` field · `Ctrl T` new tab · `Ctrl Shift N` private tab | `Ctrl Tab` / `Ctrl Page Down` next · `Ctrl Shift Tab` / `Ctrl Page Up` previous |
+| `Ctrl W` close · `Ctrl Shift T` reopen | `Alt ←` / `Alt →` back, forward · `Ctrl [ ]` the same |
+| `Ctrl 1`–`Ctrl 9` jump | `Ctrl R` reload · `Ctrl Shift R` reading mode · `F5` reload · `Ctrl F5` reload past the cache |
 | `Ctrl D` bookmark this page | `Ctrl F` find |
 | `Ctrl Y` history · `Ctrl Shift B` bookmarks · `Ctrl J` downloads | `Ctrl ,` settings |
 | `Ctrl Shift H` hide something · `Ctrl Shift U` what is hidden | `Ctrl Shift C` copy address |
 | `Ctrl +` `Ctrl -` `Ctrl 0` zoom | `Ctrl /` every shortcut, listed |
-| `Ctrl Shift I` inspector | |
+| `F12` or `Ctrl Shift I` inspector · `Escape` closes what is open | '' |
 
 ## How it is put together
 

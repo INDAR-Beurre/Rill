@@ -142,6 +142,50 @@ impl Key {
     }
 }
 
+/// Every key the browser keeps, in one table. The panel draws it, the bench
+/// presses it by name, and a test asserts each row still means something, so
+/// the three can no longer drift apart.
+///
+/// (bench verb, label, what it does, keyval name, ctrl, shift, alt)
+pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
+    ("shortcuts", "Ctrl /", "This list", "slash", true, false, false),
+    ("omni", "Ctrl L", "The field", "l", true, false, false),
+    ("newtab", "Ctrl T", "New tab", "t", true, false, false),
+    ("privatetab", "Ctrl Shift N", "Private tab", "n", true, true, false),
+    ("closetab", "Ctrl W", "Close tab", "w", true, false, false),
+    ("reopen", "Ctrl Shift T", "Reopen the last closed tab", "t", true, true, false),
+    ("nexttab", "Ctrl Tab", "Next tab", "tab", true, false, false),
+    ("previoustab", "Ctrl Shift Tab", "Previous tab", "tab", true, true, false),
+    ("jump", "Ctrl 1 to 9", "Jump to a tab", "3", true, false, false),
+    ("back", "Alt Left", "Back", "left", false, false, true),
+    ("forward", "Alt Right", "Forward", "right", false, false, true),
+    ("reload", "Ctrl R", "Reload", "r", true, false, false),
+    ("reloadbypass", "Ctrl F5", "Reload past the cache", "f5", true, false, false),
+    ("reader", "Ctrl Shift R", "Reading mode (again to leave)", "r", true, true, false),
+    ("find", "Ctrl F", "Find in the page", "f", true, false, false),
+    ("bookmark", "Ctrl D", "Keep this page", "d", true, false, false),
+    ("history", "Ctrl Y", "History", "y", true, false, false),
+    ("bookmarks", "Ctrl Shift B", "Bookmarks", "b", true, true, false),
+    ("downloads", "Ctrl J", "Downloads", "j", true, false, false),
+    ("settings", "Ctrl ,", "Settings", "comma", true, false, false),
+    ("hide", "Ctrl Shift H", "Hide something on this site", "h", true, true, false),
+    ("unhide", "Ctrl Shift U", "Show what is hidden here", "u", true, true, false),
+    ("copy", "Ctrl Shift C", "Copy the address", "c", true, true, false),
+    ("inspector", "F12", "The inspector", "f12", false, false, false),
+    ("zoomin", "Ctrl +", "Zoom in", "plus", true, false, false),
+    ("zoomout", "Ctrl -", "Zoom out", "minus", true, false, false),
+    ("zoomreset", "Ctrl 0", "Zoom reset", "0", true, false, false),
+    ("backbracket", "Ctrl [", "Back", "bracketleft", true, false, false),
+    ("forwardbracket", "Ctrl ]", "Forward", "bracketright", true, false, false),
+    ("escape", "Escape", "Close the field, find, a panel, or reading mode", "escape", false, false, false),
+];
+
+/// The intent a bench verb stands for, through the same fold the keyboard uses.
+pub fn intent_of(verb: &str) -> Option<Intent> {
+    let row = SHEET.iter().find(|row| row.0 == verb)?;
+    Some(Key::new(row.3, row.4, row.5, row.6).intent())
+}
+
 /// Carries an intent out. Split from `handle` so the bench can drive the same
 /// table the keyboard does: a shortcut that stops working is caught by the
 /// suite without a window and without a fake key event.
@@ -222,6 +266,47 @@ pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
 }
 
 #[cfg(test)]
+mod sheet_tests {
+    use super::*;
+
+    /// The panel lists SHEET. If a row stops resolving to a real intent, the
+    /// browser is advertising a key that does nothing.
+    #[test]
+    fn every_advertised_key_means_something() {
+        for row in SHEET {
+            let key = Key::new(row.3, row.4, row.5, row.6);
+            let intent = key.intent();
+            assert_ne!(
+                intent,
+                Intent::Nothing,
+                "the sheet advertises {} ({}) but {} with ctrl={} shift={} alt={} means nothing",
+                row.1,
+                row.0,
+                row.3,
+                row.4,
+                row.5,
+                row.6
+            );
+        }
+    }
+
+    /// And the bench verb for that row drives the same intent.
+    #[test]
+    fn every_bench_verb_reaches_its_intent() {
+        for row in SHEET {
+            let key = Key::new(row.3, row.4, row.5, row.6);
+            assert_eq!(
+                intent_of(row.0),
+                Some(key.intent()),
+                "the bench verb {} and the sheet row {} disagree",
+                row.0,
+                row.1
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{Intent, Key};
 
@@ -281,3 +366,4 @@ mod tests {
         assert_eq!(key("Left", false, false, false).intent(), Intent::Nothing);
     }
 }
+

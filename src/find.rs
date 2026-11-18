@@ -38,10 +38,12 @@ impl FindBar {
         count.set_valign(gtk::Align::Center);
         crate::ui::pack(&bar, &count, false);
 
-        let up = crate::icons::button(crate::icons::Icon::Back, 12, palette.muted, "door");
+        // Down the page, not back through history: the marks say "previous
+        // match" and "next match", so they point that way.
+        let up = crate::icons::button(crate::icons::Icon::Up, 12, palette.muted, "door");
         up.set_valign(gtk::Align::Center);
         crate::ui::pack(&bar, &up, false);
-        let down = crate::icons::button(crate::icons::Icon::Forward, 12, palette.muted, "door");
+        let down = crate::icons::button(crate::icons::Icon::Down, 12, palette.muted, "door");
         down.set_valign(gtk::Align::Center);
         crate::ui::pack(&bar, &down, false);
         let close = crate::icons::button(crate::icons::Icon::Close, 12, palette.muted, "door");
@@ -54,7 +56,7 @@ impl FindBar {
             let entry = entry.clone();
             entry.connect_changed(move |entry| {
                 if let Some(app) = crate::app::current() {
-                    app.find_query(&entry.text(), true);
+                    app.find_query(&entry.text());
                 }
             });
         }

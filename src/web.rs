@@ -13,20 +13,30 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 thread_local! {
-    static MANAGER: RefCell<Option<UserContentManager>> = const { RefCell::new(None) };
+    // Two of these, not one: the shield is per host, and the rules are baked
+    // into the content manager a view is made with. A host where you turned
+    // the blocker off needs a manager that never had the rules in it.
+    static MANAGERS: RefCell<[Option<UserContentManager>; 2]> = const { RefCell::new([None, None]) };
     static CONTEXT_READY: RefCell<bool> = const { RefCell::new(false) };
 }
 
-pub fn shared_manager(app: &AppRef) -> UserContentManager {
-    if let Some(manager) = MANAGER.with(|m| m.borrow().clone()) {
+fn shielded_for(app: &AppRef, url: &str) -> bool {
+    app.prefs.borrow().shield && !crate::shield::is_allowed(&crate::shield::host_of(url))
+}
+
+/// The content manager a view should be made with, keyed on whether the
+/// blocker applies to that page's host.
+pub fn shared_manager(app: &AppRef, shielded: bool) -> UserContentManager {
+    let slot = usize::from(shielded);
+    if let Some(manager) = MANAGERS.with(|m| m.borrow()[slot].clone()) {
         return manager;
     }
     let manager = UserContentManager::new();
-    if app.prefs.borrow().shield && !crate::shield::is_allowed("") {
+    if shielded {
         crate::shield::install(&manager);
     }
     curtain::install(app, &manager);
-    MANAGER.with(|m| *m.borrow_mut() = Some(manager.clone()));
+    MANAGERS.with(|m| m.borrow_mut()[slot] = Some(manager.clone()));
     manager
 }
 
@@ -61,10 +71,11 @@ pub fn view_for(app: &AppRef, tab: TabId) -> Option<WebView> {
         install_context(app, &context);
         context
     };
+    let url = app.state.borrow().tab(tab).map(|t| t.url.clone()).unwrap_or_default();
     let manager = if private {
         UserContentManager::new()
     } else {
-        shared_manager(app)
+        shared_manager(app, shielded_for(app, &url))
     };
     let view = WebView::builder()
         .web_context(&context)
@@ -89,6 +100,15 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             let title = view.title().map(|t| t.to_string()).unwrap_or_default();
             if let Some(app) = weak.upgrade() {
                 app.set_title(tab, &title);
+            }
+        });
+    }
+    {
+        let weak = app.weak();
+        view.connect_favicon_notify(move |view| {
+            let icon = view.favicon();
+            if let Some(app) = weak.upgrade() {
+                app.set_icon(tab, icon);
             }
         });
     }
@@ -180,7 +200,17 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 _ => format!("The site answered with {status}."),
             };
             if let Some(app) = weak.upgrade() {
-                let uri = response.uri().map(|uri| uri.to_string()).unwrap_or_default();
+                // The response's own uri is empty for a document the engine
+                // refused to commit; the request is what was asked for, and it
+                // is what the address bar and the tab have to say.
+                let asked = policy.request().and_then(|request| request.uri().map(|uri| uri.to_string()));
+                let answered = response.uri().map(|uri| uri.to_string());
+                let uri = asked
+                    .filter(|uri| !uri.is_empty())
+                    .or(answered.filter(|uri| !uri.is_empty()))
+                    .unwrap_or_else(|| {
+                        app.state.borrow().tab(tab).map(|tab| tab.url.clone()).unwrap_or_default()
+                    });
                 app.mark_failed(tab);
                 if !uri.is_empty() {
                     app.set_uri(tab, &uri);
@@ -213,7 +243,15 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         view.connect_create(move |_, action| {
             if let Some(app) = weak.upgrade() {
                 if let Some(uri) = action.request().and_then(|request| request.uri().map(|u| u.to_string())) {
-                    app.new_tab(Some(&uri), false, true);
+                    // A window asked for by a private tab is a private tab.
+                    // It used to become an ordinary one, and be written down.
+                    let private = app
+                        .state
+                        .borrow()
+                        .tab(tab)
+                        .map(|t| t.private)
+                        .unwrap_or(false);
+                    app.new_tab(Some(&uri), private, true);
                 }
             }
             None

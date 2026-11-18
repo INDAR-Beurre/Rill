@@ -134,6 +134,11 @@ class Run:
         env["SEARCH_BENCH"] = "1"
         env.setdefault("XDG_CONFIG_HOME", str(self.tmp / "config"))
         env.setdefault("XDG_DATA_HOME", str(self.tmp / "data"))
+        # A download that lands in the real ~/Downloads can pass on a file an
+        # earlier run left there. Give the suite its own folder.
+        self.downloads = self.tmp / "downloads"
+        self.downloads.mkdir(exist_ok=True)
+        env["XDG_DOWNLOAD_DIR"] = str(self.downloads)
         env.pop("DISPLAY", None)
         env["GDK_BACKEND"] = "wayland"
         started = time.time()
@@ -240,11 +245,16 @@ class Run:
         def _start():
             # A check that asserts True asserts nothing: these two now assert
             # what the browser reported, so a launch that answers nothing fails.
-            self.check("bench is up", self.startup < 30, f"ready in {self.startup:.1f}s")
+            # A deadline of 30s makes "< 30" a check that cannot fail: the
+            # browser is only reachable if it answered inside it. So assert a
+            # number that is a claim, and assert the browser drew something.
+            self.check("bench is up", self.startup < 8, f"ready in {self.startup:.1f}s")
             ram = self.ram()
-            self.check("first paint", ram.get("anon_mb", 0) > 0, json.dumps(ram)[:110])
+            self.check("first paint", ram.get("anon_mb", 0) > 5 and ram.get("pss_mb", 0) > 40,
+                       json.dumps(ram)[:110])
             probe = bench.probe()
-            self.check("probe", probe.get("active", 0) > 0, f"{len(probe.get('tabs', []))} tabs")
+            self.check("probe", probe.get("active", 0) > 0 and probe.get("width", 0) > 200,
+                       f"{probe.get('width')}x{probe.get('height')}, {len(probe.get('tabs', []))} tabs")
 
         @self.scenario("a single idle tab")
         def _idle():
@@ -283,9 +293,11 @@ class Run:
                 bench.close(tab_id)
             time.sleep(1)
             after_close = self.ram()
+            # Giving memory back means the number came down, not that it stayed
+            # inside a tolerance of its own value.
             self.check(
                 "tabs give their memory back",
-                after_close["pss_mb"] <= max(after["pss_mb"], before["pss_mb"]) + 10,
+                after_close["pss_mb"] < after["pss_mb"] - 100,
                 f"{after_close['pss_mb']}MB after closing (was {after['pss_mb']}MB)",
                 {"memory": after_close},
             )
@@ -325,14 +337,43 @@ class Run:
                 bench.open(self.url(path))
                 bench.wait_loaded(timeout=timeout)
                 took = time.time() - started
+                # wait_loaded raises on timeout, so "took < timeout" is always
+                # true. Assert the page really rendered: words for a text page,
+                # elements for a page of pictures or frames, which have neither.
+                # It is asked in JS rather than through `text`, because `text`
+                # waits on the page and a page of 40 images can outlast it.
+                if path == "/images":
+                    probe_js = "js document.images.length"
+                    wanted = 12
+                elif path == "/frames":
+                    probe_js = "js document.querySelectorAll('iframe').length"
+                    wanted = 12
+                else:
+                    probe_js = "js (document.body.textContent||'').length"
+                    wanted = 40
+                # The DOM is empty for a moment after `load_changed` says
+                # Finished, so the first answer is a legitimate-looking 0.
+                # Keep asking until one answer passes, and treat 0 as "ask
+                # again" rather than as a result.
+                seen = 0
+                for _ in range(12):
+                    answer = bench.must(probe_js).get("value") or "0"
+                    seen = int(answer) if answer.isdigit() else 0
+                    if seen >= wanted:
+                        break
+                    time.sleep(0.25)
                 self.check(
                     f"loads {path}",
-                    took < timeout,
-                    f"{took:.1f}s",
+                    seen >= wanted,
+                    f"{took:.1f}s, {seen} on the page",
                     {"seconds": round(took, 2)},
                 )
             probe = bench.probe()
-            self.check("alive after hard pages", bool(probe.get("tabs")), f"{len(probe['tabs'])} tabs")
+            self.check("alive after hard pages",
+                       len(probe["tabs"]) >= len(cases)
+                       and all(tab["hasView"] for tab in probe["tabs"] if tab["url"]),
+                       f"{len(probe['tabs'])} tabs, "
+                       f"{sum(1 for tab in probe['tabs'] if tab['hasView'])} with a view")
 
         @self.scenario("pages that misbehave")
         def _bad():
@@ -343,7 +384,11 @@ class Run:
             self.check("a 404 shows the browser's own page",
                        probe["visibleChild"] == "error",
                        f"showing {probe['visibleChild']}, active {probe['active']}")
-            self.check("a 404 shows, the browser lives", bool(probe.get("tabs")), f"{len(probe['tabs'])} tabs")
+            self.check("a 404 shows, the browser lives",
+                       len(probe["tabs"]) >= 1
+                       and all(tab["hasView"] for tab in probe["tabs"] if tab["url"]),
+                       f"{len(probe['tabs'])} tabs, "
+                       f"{sum(1 for tab in probe['tabs'] if tab['hasView'])} with a view")
 
             bench.open(self.url("/redirect?n=6"))
             landed = bench.wait_for(lambda probe: probe["url"].endswith("/plain"), timeout=25)
@@ -479,14 +524,20 @@ class Run:
             bench.must("key reader")
             time.sleep(1.5)
             text = bench.text()
+            # A container that exists is not a page that was reset: measure that
+            # it is on screen and that the article's own headline has moved
+            # inside it, at the size the reader chose.
             style = bench.must(
                 "js (() => { const r = document.getElementById('__search_reader');"
-                " return !!(r && getComputedStyle(r.querySelector('h1')||r).fontFamily); })()"
+                " if (!r || r.getBoundingClientRect().width < 300) return 'narrow';"
+                " const h = r.querySelector('h1'); if (!h) return 'no headline';"
+                " const size = parseFloat(getComputedStyle(h).fontSize);"
+                " return size >= 28 ? 'set' : 'small:' + size; })()"
             )
             # Keeping the words is not the claim: the claim is that the browser
             # set the article again in its own type, in its own container.
             self.check("reading mode replaces the page",
-                       (text.get("text") or "") != "" and style.get("value") == "true",
+                       (text.get("text") or "") != "" and style.get("value") == "set",
                        f"text {len(text.get('text') or '')} chars, container {style.get('value')}")
             bench.must("key reload")
             bench.wait_loaded(timeout=20)
@@ -507,7 +558,18 @@ class Run:
             self.check("a hidden thing is kept", "#hide-me" in json.dumps(hidden), str(hidden)[:90])
             bench.must("key reload")
             bench.wait_loaded(timeout=20)
-            still = bench.must("js getComputedStyle(document.querySelector('#hide-me')).display")
+            # After a reload the old document is gone for a moment; ask until
+            # the element is there to be measured, or the answer is a
+            # TypeError about null rather than a verdict about the strip.
+            still = {"value": "absent"}
+            for _ in range(40):
+                still = bench.must(
+                    "js (() => { const e = document.querySelector('#hide-me');"
+                    " return e ? getComputedStyle(e).display : 'absent'; })()"
+                )
+                if still.get("value") != "absent":
+                    break
+                time.sleep(0.25)
             self.check("and stays hidden after a reload", still.get("value") == "none", str(still)[:60])
 
         @self.scenario("downloads and popups")
@@ -520,7 +582,11 @@ class Run:
             bench.must("js document.getElementById('go').click()")
             time.sleep(1.5)
             probe = bench.probe()
-            self.check("a pop-up becomes a tab", len(probe["tabs"]) >= 2, f"{len(probe['tabs'])} tabs")
+            # "at least two tabs" is true of a browser that had two already.
+            # The claim is that the pop-up made exactly one more.
+            self.check("a pop-up becomes a tab",
+                       len(probe["tabs"]) == len(before["tabs"]) + 1,
+                       f"{len(before['tabs'])} -> {len(probe['tabs'])} tabs")
             # A tab opening in the background must not take the screen: the tab
             # bar and the page have to name the same tab, or Ctrl+W closes the
             # one the user is not looking at.
@@ -536,8 +602,15 @@ class Run:
                 if answer.get("downloads"):
                     break
                 time.sleep(0.3)
+            for _ in range(30):
+                downloads = bench.must("downloads").get("downloads", [])
+                if downloads and all(item.get("done") for item in downloads):
+                    break
+                time.sleep(0.3)
             downloads = bench.must("downloads").get("downloads", [])
-            self.check("a download is recorded", bool(downloads), str(downloads)[:120])
+            self.check("a download is recorded and finishes",
+                       bool(downloads) and all(item.get("done") for item in downloads),
+                       str(downloads)[:140])
             path = Path(downloads[0]["path"]) if downloads else Path("/nonexistent")
             for _ in range(40):
                 if path.exists() and path.stat().st_size > 0:
@@ -566,6 +639,25 @@ class Run:
                        and state.get("ad") is False
                        and state.get("news") is False,
                        json.dumps(state))
+            # turning it off for a host has to change the page, not just a file
+            bench.must("blocker")
+            time.sleep(1.0)
+            bench.must(f"go {self.url('/banner?off=1')}")
+            bench.wait_loaded(timeout=20)
+            time.sleep(0.8)
+            off = json.loads(bench.must("js window.__probe()").get("value") or "{}")
+            self.check("turning it off for a site brings the rules back",
+                       off.get("banner") is True and off.get("ad") is True,
+                       json.dumps(off))
+            bench.must("blocker")
+            time.sleep(1.0)
+            bench.must(f"go {self.url('/banner?on=1')}")
+            bench.wait_loaded(timeout=20)
+            time.sleep(0.8)
+            on = json.loads(bench.must("js window.__probe()").get("value") or "{}")
+            self.check("and turning it on again hides them",
+                       on.get("banner") is False,
+                       json.dumps(on))
 
         @self.scenario("a private tab")
         def _private():
@@ -594,6 +686,32 @@ class Run:
             self.check("and starts with an empty jar", jar.get("value") == "false", str(jar)[:60])
             bench.must("key privatetab")
             time.sleep(0.4)
+            # A private tab's address is the one thing it promised not to keep.
+            bench.must(f"go {self.url('/titled?t=SecretVisit')}")
+            bench.wait_loaded(private, timeout=20)
+            bench.must("key privatetab")
+            time.sleep(0.5)
+            history = self.tmp / "data" / "search" / "history.json"
+            written = history.read_text() if history.exists() else ""
+            self.check("a private visit is not written down",
+                       "SecretVisit" not in written,
+                       f"{len(written)} bytes of history")
+
+            # A window a private tab opens is a private tab.
+            bench.must("key privatetab")
+            time.sleep(0.5)
+            probe = bench.probe()
+            owner = probe["active"]
+            bench.must(f"go {self.url('/popup')}")
+            bench.wait_loaded(owner, timeout=20)
+            time.sleep(0.5)
+            bench.must("js document.getElementById('go').click()")
+            time.sleep(1.5)
+            after = bench.probe()
+            born = [tab for tab in after["tabs"] if tab["id"] not in {t["id"] for t in probe["tabs"]}]
+            self.check("a window a private tab opens is private too",
+                       bool(born) and all(tab["private"] for tab in born),
+                       f"{len(born)} new tabs, private: {[t['private'] for t in born]}")
             fork = bench.must("js document.cookie.includes('flavour')")
             self.check("two private tabs share nothing with the ordinary one",
                        fork.get("value") == "false", str(fork)[:60])
@@ -646,7 +764,12 @@ class Run:
                 time.sleep(0.05)
             time.sleep(0.5)
             probe = bench.probe()
-            self.check("the window survives resizing", probe.get("ok"), f"{probe.get('width')}x{probe.get('height')}")
+            # The desktop adds its own frame, so the inner size is a few pixels
+            # shy of the request. What matters is that the size was taken.
+            width, height = probe.get("width", 0), probe.get("height", 0)
+            self.check("the window survives resizing",
+                       abs(width - 1200) <= 40 and abs(height - 780) <= 40,
+                       f"{width}x{height}, asked for 1200x780")
             before = bench.probe()["maximised"]
             bench.must("key maximise")
             time.sleep(0.4)

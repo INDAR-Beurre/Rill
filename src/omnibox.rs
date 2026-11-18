@@ -168,6 +168,7 @@ impl Omnibox {
     pub fn set_offers(&self, _ui: &crate::ui::Ui, app: &AppRef, offers: Vec<Offer>) {
         *self.offers.borrow_mut() = offers.clone();
         let picked = self.picked.get();
+        let tint = app.palette.borrow().faint;
         for child in self.list.children() {
             self.list.remove(&child);
         }
@@ -205,16 +206,20 @@ impl Omnibox {
             hbox.set_margin_top(7);
             hbox.set_margin_bottom(7);
 
-            let letter = gtk::Label::new(Some(
-                &offer.title.chars().next().unwrap_or('•').to_uppercase().to_string(),
-            ));
-            crate::ui::class(&letter, "tileletter");
-            let tile = gtk::EventBox::new();
-            crate::ui::class(&tile, "tile");
-            tile.set_size_request(18, 18);
-            tile.set_valign(gtk::Align::Center);
-            tile.add(&letter);
-            crate::ui::pack(&hbox, &tile, false);
+            // A mark that says where the suggestion came from, rather than the
+            // first letter of its title: four history rows for one host used
+            // to show four identical "1" tiles.
+            let glyph = match offer.kind.as_str() {
+                "Open" => crate::icons::Icon::Tab,
+                "History" => crate::icons::Icon::Clock,
+                "Bookmark" => crate::icons::Icon::Star,
+                "Search" => crate::icons::Icon::Search,
+                _ => crate::icons::Icon::Globe,
+            };
+            let mark = crate::icons::area(glyph, 15, tint);
+            mark.set_size_request(18, 18);
+            mark.set_valign(gtk::Align::Center);
+            crate::ui::pack(&hbox, &mark, false);
 
             let texts = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let title = gtk::Label::new(Some(&offer.title));

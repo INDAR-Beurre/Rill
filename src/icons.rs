@@ -13,6 +13,14 @@ pub enum Icon {
     Close,
     Menu,
     Globe,
+    Search,
+    Up,
+    Down,
+    Clock,
+    Star,
+    Tab,
+    Minimise,
+    Maximise,
 }
 
 pub fn area(kind: Icon, size: i32, color: Rgb) -> gtk::DrawingArea {
@@ -77,6 +85,70 @@ fn draw(cr: &cairo::Context, kind: Icon, w: f64) {
                 cr.move_to(s * (0.24 + inset), s * y);
                 cr.line_to(s * (0.76 - inset), s * y);
             }
+            let _ = cr.stroke();
+        }
+        Icon::Clock => {
+            cr.arc(c, c, s * 0.32, 0.0, 2.0 * std::f64::consts::PI);
+            let _ = cr.stroke();
+            cr.move_to(c, c - s * 0.16);
+            cr.line_to(c, c);
+            cr.line_to(c + s * 0.14, c + s * 0.06);
+            let _ = cr.stroke();
+        }
+        Icon::Star => {
+            let fifth = std::f64::consts::PI / 5.0;
+            for i in 0..5 {
+                let angle = -std::f64::consts::FRAC_PI_2 + (i as f64) * 4.0 * fifth;
+                let inner = angle + fifth;
+                let outer = (c + s * 0.34 * angle.cos(), c + s * 0.34 * angle.sin());
+                let notch = (c + s * 0.14 * inner.cos(), c + s * 0.14 * inner.sin());
+                if i == 0 {
+                    cr.move_to(outer.0, outer.1);
+                } else {
+                    cr.line_to(outer.0, outer.1);
+                }
+                cr.line_to(notch.0, notch.1);
+            }
+            cr.close_path();
+            let _ = cr.stroke();
+        }
+        Icon::Tab => {
+            let w = s * 0.30;
+            let h = s * 0.24;
+            cr.rectangle(c - w, c - h, w * 2.0, h * 2.0);
+            let _ = cr.stroke();
+            cr.move_to(c + w * 0.1, c - h);
+            cr.line_to(c + w * 0.35, c - h - s * 0.10);
+            cr.line_to(c + w * 1.1, c - h - s * 0.10);
+            let _ = cr.stroke();
+        }
+        Icon::Up => {
+            cr.move_to(c - s * 0.17, c + s * 0.08);
+            cr.line_to(c, c - s * 0.11);
+            cr.line_to(c + s * 0.17, c + s * 0.08);
+            let _ = cr.stroke();
+        }
+        Icon::Down => {
+            cr.move_to(c - s * 0.17, c - s * 0.08);
+            cr.line_to(c, c + s * 0.11);
+            cr.line_to(c + s * 0.17, c - s * 0.08);
+            let _ = cr.stroke();
+        }
+        Icon::Minimise => {
+            cr.move_to(c - s * 0.19, c);
+            cr.line_to(c + s * 0.19, c);
+            let _ = cr.stroke();
+        }
+        Icon::Maximise => {
+            let r = s * 0.17;
+            cr.rectangle(c - r, c - r, r * 2.0, r * 2.0);
+            let _ = cr.stroke();
+        }
+        Icon::Search => {
+            cr.arc(c, c - s * 0.04, s * 0.26, 0.0, 2.0 * std::f64::consts::PI);
+            let _ = cr.stroke();
+            cr.move_to(c + s * 0.15, c + s * 0.15);
+            cr.line_to(c + s * 0.28, c + s * 0.28);
             let _ = cr.stroke();
         }
         Icon::Globe => {

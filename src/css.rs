@@ -6,7 +6,7 @@ fn rgba(c: crate::palette::Rgb, a: f32) -> String {
     format!("rgba({},{},{},{:.3})", c.0, c.1, c.2, a)
 }
 
-pub fn build(p: &Palette, _composited: bool, row_height: i32) -> String {
+pub fn build(p: &Palette, row_height: i32) -> String {
     let radius = 12;
     let ground = p.card.hex();
     format!(
@@ -23,11 +23,14 @@ headerbar.nobar > box {{ min-height: 0; padding: 0; margin: 0; border: none; }}
 
 .side {{ background-color: {sidebg}; }}
 
-.light {{ min-width: 15px; min-height: 15px; border-radius: 15px; background-color: {hairline}; }}
-.light.red {{ background-color: {red}; }}
-.light.amber {{ background-color: {amber}; }}
-.light.green {{ background-color: {green}; }}
-window.unfocused .light.red, window.unfocused .light.amber, window.unfocused .light.green {{ background-color: {resting}; }}
+.control {{ min-width: 22px; min-height: 22px; border-radius: 6px; background-color: transparent; }}
+.control:hover {{ background-color: {hover}; }}
+.control.shut:hover {{ background-color: {danger}; }}
+.control.shut:hover label {{ color: #FFFFFF; }}
+.control:active {{ background-color: {hairline}; }}
+.control label {{ color: {muted}; }}
+window.unfocused .control {{ opacity: 0.55; }}
+.rowmark {{ margin: 0; }}
 
 /* GTK brings its own skin for every control. The browser has one, so the
    stock skin is taken off first and only what is wanted is put back. */
@@ -110,6 +113,9 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 
 .card {{ background-color: {ground}; }}
 .blank {{ background-color: {ground}; }}
+.fakefield {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 9px; }}
+.fakefield:hover {{ border-color: {faint}; }}
+.fakefieldtext {{ font-family: {font}; font-size: 13px; color: {faint}; }}
 .blanktitle {{ font-family: {font}; font-size: 15px; font-weight: bold; color: {muted}; letter-spacing: -0.01em; }}
 .blankhint {{ font-family: {font}; font-size: 12px; color: {blankhint}; }}
 .erraddress {{ font-family: {mono}; font-size: 11px; color: {emptyfg}; margin-top: 4px; }}
@@ -180,11 +186,8 @@ scrollbar trough {{ background: transparent; }}
         ground = ground,
         radius = radius,
         hairline = p.hairline.hex(),
-        red = p.light_red.hex(),
-        amber = p.light_amber.hex(),
-        green = p.light_green.hex(),
-        resting = p.faint.hex(),
         hover = p.hover.hex(),
+        danger = p.danger.hex(),
         wash = p.wash.hex(),
         tile = p.side_tile.hex(),
         pinlive = p.side_pin_live.hex(),

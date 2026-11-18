@@ -25,7 +25,10 @@ pub fn css_for(app: &App, host: &str) -> String {
 }
 /// The style sheet the next document of the shared manager will wear.
 pub fn sync(app: &AppRef, host: &str) {
-    let manager = crate::web::shared_manager(app);
+    // Same key the view will be made with, or the sheet lands on the manager
+    // the page does not use.
+    let shielded = app.prefs.borrow().shield && !crate::shield::is_allowed(host);
+    let manager = crate::web::shared_manager(app, shielded);
     manager.remove_all_style_sheets();
     let css = css_for(app, host);
     if css.is_empty() {

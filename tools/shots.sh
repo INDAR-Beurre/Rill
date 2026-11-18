@@ -227,12 +227,11 @@ time.sleep(1.2)
 shot("07-reading", "reading mode")
 bench.must("key reload")
 
-# 8. empty tab. One tab, so the picture shows the empty state and not the
-# leftovers of every state before it.
+# 8. empty tab. closeall leaves exactly one fresh tab behind (closing the last
+# tab makes a new one), so asking for another here would put two "New tab"
+# rows in a picture that is meant to show one.
 bench.must("closeall")
-time.sleep(0.4)
-bench.must("key newtab")
-time.sleep(0.5)
+time.sleep(0.6)
 shot("08-empty", "an empty tab")
 bench.must("escape")
 

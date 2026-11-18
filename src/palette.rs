@@ -48,9 +48,9 @@ pub struct Palette {
     pub side_tile: Rgb,
     pub side_pin_live: Rgb,
     pub card: Rgb,
-    pub light_red: Rgb,
-    pub light_amber: Rgb,
-    pub light_green: Rgb,
+    /// The one alarming colour in the browser: used for the close button's
+    /// hover mark and nothing else.
+    pub danger: Rgb,
 }
 
 impl Palette {
@@ -73,9 +73,7 @@ impl Palette {
             side_tile: pick(pair(Rgb(0xF6, 0xF6, 0xF6), Rgb(0x2A, 0x2A, 0x2A))),
             side_pin_live: pick(pair(Rgb(0xDB, 0xDB, 0xD9), Rgb(0x4A, 0x4A, 0x4A))),
             card: pick(pair(Rgb(0xFF, 0xFF, 0xFF), Rgb(0x0B, 0x0B, 0x0B))),
-            light_red: pick(same(Rgb(0xEC, 0x6A, 0x5E))),
-            light_amber: pick(same(Rgb(0xF5, 0xBF, 0x4F))),
-            light_green: pick(same(Rgb(0x61, 0xC5, 0x54))),
+            danger: pick(same(Rgb(0xC0, 0x39, 0x2B))),
         }
     }
 

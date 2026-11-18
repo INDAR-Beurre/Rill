@@ -215,8 +215,11 @@ class Run:
 
         @self.scenario("start")
         def _start():
-            self.check("bench is up", True, f"ready in {self.startup}s")
-            self.check("first paint", True, json.dumps(self.ram()))
+            # A check that asserts True asserts nothing: these two now assert
+            # what the browser reported, so a launch that answers nothing fails.
+            self.check("bench is up", self.startup < 30, f"ready in {self.startup:.1f}s")
+            ram = self.ram()
+            self.check("first paint", ram.get("anon_mb", 0) > 0, json.dumps(ram)[:110])
             probe = bench.probe()
             self.check("probe", probe.get("active", 0) > 0, f"{len(probe.get('tabs', []))} tabs")
 
@@ -310,17 +313,33 @@ class Run:
 
         @self.scenario("pages that misbehave")
         def _bad():
-            bench.open(self.url("/missing"))
-            bench.wait_loaded(timeout=15)
-            self.check("a 404 shows, the browser lives", True, "ok")
+            tab = bench.open(self.url("/missing"))
+            bench.wait_loaded(tab, timeout=15)
+            time.sleep(0.4)
+            probe = bench.probe()
+            self.check("a 404 shows the browser's own page",
+                       probe["visibleChild"] == "error",
+                       f"showing {probe['visibleChild']}, active {probe['active']}")
+            self.check("a 404 shows, the browser lives", bool(probe.get("tabs")), f"{len(probe['tabs'])} tabs")
 
             bench.open(self.url("/redirect?n=6"))
             landed = bench.wait_for(lambda probe: probe["url"].endswith("/plain"), timeout=25)
             self.check("a redirect chain lands", landed["url"].endswith("/plain"), landed["url"])
 
-            bench.open(self.url("/loop"))
+            # Surviving a loop means: the tab exists, the browser answers fast,
+            # and the engine has stopped asking. The address of a loop that
+            # never resolves is not something the browser can report.
+            loop_tab = bench.open(self.url("/loop"))
             time.sleep(3)
-            self.check("a redirect loop is survived", True, bench.probe()["url"][:60])
+            started = time.time()
+            probe = bench.probe()
+            answered = time.time() - started
+            alive = [tab for tab in probe["tabs"] if tab["id"] == loop_tab]
+            self.check(
+                "a redirect loop is survived",
+                bool(alive) and answered < 3,
+                f"{len(alive)} tab for the loop, answered in {answered:.1f}s",
+            )
 
             bench.open(self.url("/stall"))
             time.sleep(3)
@@ -329,12 +348,18 @@ class Run:
             self.check("a page that never ends does not hang the browser", time.time() - started < 3,
                        f"probe answered in {time.time() - started:.1f}s")
 
-            bench.open(self.url("/js-busy"))
+            busy = bench.open(self.url("/js-busy"))
             time.sleep(2)
             started = time.time()
-            bench.open(self.url("/plain?after-busy=1"))
-            bench.wait_loaded(timeout=20)
-            self.check("a busy script does not stop other tabs", True, f"{time.time() - started:.1f}s")
+            other = bench.open(self.url("/plain?after-busy=1"))
+            bench.wait_loaded(other, timeout=20)
+            took = time.time() - started
+            titles = {tab["id"]: tab for tab in bench.probe()["tabs"]}
+            self.check(
+                "a busy script does not stop other tabs",
+                took < 20 and titles.get(busy, {}).get("hasView") is True,
+                f"other tab loaded in {took:.1f}s, busy tab still here: {busy in titles}",
+            )
 
             spray = bench.open(self.url("/js-leak"))
             time.sleep(3)
@@ -372,8 +397,10 @@ class Run:
             bench.must("key down")
             time.sleep(0.3)
             probe = bench.probe()
+            # Only meaningful when there is something to pick: an empty list
+            # would have made the old assertion pass on a broken step().
             self.check("down picks a suggestion",
-                       probe["omniPicked"] >= 0 or probe["omniCount"] == 0,
+                       probe["omniCount"] > 0 and probe["omniPicked"] >= 0,
                        f"picked {probe['omniPicked']} of {probe['omniCount']}")
             bench.must("escape")
 
@@ -462,14 +489,16 @@ class Run:
                 time.sleep(0.3)
             downloads = bench.must("downloads").get("downloads", [])
             self.check("a download is recorded", bool(downloads), str(downloads)[:120])
-            if downloads:
-                path = Path(downloads[0]["path"])
-                for _ in range(40):
-                    if path.exists() and path.stat().st_size > 0:
-                        break
-                    time.sleep(0.2)
-                self.check("the file landed", path.exists() and path.stat().st_size > 0,
-                           f"{path} {path.stat().st_size if path.exists() else 0} bytes")
+            path = Path(downloads[0]["path"]) if downloads else Path("/nonexistent")
+            for _ in range(40):
+                if path.exists() and path.stat().st_size > 0:
+                    break
+                time.sleep(0.2)
+            self.check(
+                "the file landed",
+                path.exists() and path.stat().st_size > 0,
+                f"{path} {path.stat().st_size if path.exists() else 0} bytes",
+            )
 
         @self.scenario("reading mode")
         def _reading():
@@ -499,10 +528,15 @@ class Run:
             time.sleep(0.5)
             probe = bench.probe()
             self.check("the window survives resizing", probe.get("ok"), f"{probe.get('width')}x{probe.get('height')}")
+            before = bench.probe()["maximised"]
             bench.must("key maximise")
             time.sleep(0.4)
+            toggled = bench.probe()["maximised"]
             bench.must("key maximise")
-            self.check("maximise toggles", True, "ok")
+            time.sleep(0.4)
+            back = bench.probe()["maximised"]
+            self.check("maximise toggles", toggled != before and back == before,
+                       f"{before} -> {toggled} -> {back}")
 
         @self.scenario("closing everything")
         def _close_all():

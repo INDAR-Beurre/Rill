@@ -80,7 +80,10 @@ pages that never finish, pages that eat memory, pages that redirect in a loop,
 opens and closes every panel, hides things, uses find and reading mode, resizes
 the window, and watches the memory the whole time. It writes
 `build/stress-report.json` and exits non-zero if anything fails. It currently
-reports 44 of 44 checks passing.
+reports 48 of 48 checks passing.
+
+The full list of places this build differs from the Mac original, and why, is in
+[docs/DIFFERENCES.md](docs/DIFFERENCES.md).
 
 It has already earned its keep: it caught a panel that wedged the whole UI
 because the card asked for a preferred size inside an allocation pass, and a

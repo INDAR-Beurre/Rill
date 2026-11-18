@@ -26,7 +26,7 @@ needs a Chromium-only feature will not work here. Extensions do not exist.
 ## Tested, and not
 
 `tools/stress.py` reproduces slow, stalled, looping, 404, popup, download,
-memory-spray, resize and idle states, 44 checks, all green. It drives the
+memory-spray, resize and idle states, 48 checks, all green. It drives the
 browser's own actions, not the compositor's input: real mouse and keyboard
 events at the window level, full screen, notifications and media playback are
 checked by hand.

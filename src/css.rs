@@ -203,7 +203,7 @@ scrollbar trough {{ background: transparent; }}
         blankhint = if p.is_dark() { "#6E6E6E".to_string() } else { "#9E9E9E".to_string() },
         muted = p.muted.hex(),
         faint = if p.is_dark() { p.faint.hex() } else { "#ABABA9".to_string() },
-        scrim = if p.is_dark() { rgba(crate::palette::Rgb(0x00, 0x00, 0x00), 0.80) } else { rgba(p.card, 0.74) },
+        scrim = if p.is_dark() { rgba(crate::palette::Rgb(0x00, 0x00, 0x00), 0.86) } else { rgba(p.card, 0.88) },
         fieldbg = if p.is_dark() { "#1A1A1A".to_string() } else { "#FFFFFF".to_string() },
         fieldborder = if p.is_dark() { "#2A2A2A".to_string() } else { "#E6E6E4".to_string() },
         scroll = if p.is_dark() { "#3A3A3A".to_string() } else { "#D6D6D4".to_string() },

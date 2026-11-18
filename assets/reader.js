@@ -80,6 +80,19 @@ window.__searchReader = function (palette) {
 
   const container = document.createElement('div');
   container.id = '__search_reader';
+  const exit = document.createElement('button');
+  exit.id = '__search_reader_exit';
+  exit.type = 'button';
+  exit.textContent = 'Leave reading mode';
+  exit.setAttribute('style', `all: unset; display: inline-block; cursor: pointer; font: 12px system-ui, sans-serif;
+    color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 5px 10px; margin-bottom: 32px;`);
+  // The button calls the toggle with the palette it was built with, so leaving
+  // reader mode puts the page back exactly as it was.
+  const exitPalette = palette;
+  exit.addEventListener('click', () => {
+    window.__searchReader(exitPalette);
+  });
+  container.appendChild(exit);
   const title = document.createElement('h1');
   title.textContent = heading.trim();
   container.appendChild(title);

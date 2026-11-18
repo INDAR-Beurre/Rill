@@ -148,7 +148,7 @@ pub fn is_allowed(host: &str) -> bool {
 pub fn host_of(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or(url);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let host = host.split('@').last().unwrap_or(host);
+    let host = host.rsplit('@').next().unwrap_or(host);
     host.split(':').next().unwrap_or(host).to_lowercase()
 }
 

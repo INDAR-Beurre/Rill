@@ -471,6 +471,25 @@ class Run:
                 self.check("the file landed", path.exists() and path.stat().st_size > 0,
                            f"{path} {path.stat().st_size if path.exists() else 0} bytes")
 
+        @self.scenario("reading mode")
+        def _reading():
+            # The page's own words, set again by the browser: it must enter, and
+            # it must carry a way out that does not need a keyboard.
+            tab = bench.open(self.url("/long"))
+            bench.wait_loaded(tab, timeout=20)
+            bench.must("escape")
+            time.sleep(0.2)
+            bench.must("key reader")
+            time.sleep(1.2)
+            inside = bench.must("js !!window.__searchReaderOn")
+            self.check("reading mode enters", inside.get("value") == "true", str(inside)[:60])
+            way_out = bench.must("js !!document.getElementById('__search_reader_exit')")
+            self.check("and carries its own way out", way_out.get("value") == "true", str(way_out)[:60])
+            bench.must("key reader")
+            time.sleep(1.2)
+            back = bench.must("js !!window.__searchReaderOn")
+            self.check("and leaves again", back.get("value") == "false", str(back)[:60])
+
         @self.scenario("the window itself")
         def _window():
             sizes = [(1000, 700), (1400, 900), (900, 620), (1600, 1000), (1200, 780)]

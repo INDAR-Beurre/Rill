@@ -151,7 +151,7 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                     _ => return false,
                 };
                 app.mark_failed(tab);
-                app.show_error(tab, &reason, &uri);
+                app.show_error(tab, &reason, uri);
             }
             true
         });

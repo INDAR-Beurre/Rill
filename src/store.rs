@@ -9,16 +9,12 @@ use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Look {
     Light,
     Dark,
+    #[default]
     System,
-}
-
-impl Default for Look {
-    fn default() -> Self {
-        Look::System
-    }
 }
 
 impl Look {

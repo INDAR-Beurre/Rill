@@ -114,9 +114,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
 
     // The rows.
     let rows = widget_box(gtk::Orientation::Vertical, 2);
-    rows.set_margin_start(8);
-    rows.set_margin_end(9);
     rows.set_margin_start(10);
+    rows.set_margin_end(9);
     rows.set_margin_top(4);
     let rows_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     rows_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);

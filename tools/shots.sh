@@ -50,6 +50,9 @@ else
   APPEARANCE=light
 fi
 
+# A socket left by a killed browser still answers connect() and then never
+# replies, which reads as a browser that loaded nothing. Start from none.
+rm -f "${XDG_RUNTIME_DIR:-/tmp}/search-bench.sock"
 "$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >/tmp/search-shots.log 2>&1 &
 APP=$!
 trap 'kill $APP 2>/dev/null || true; [[ -n "${FIXTURES:-}" ]] && kill $FIXTURES 2>/dev/null || true' EXIT
@@ -224,13 +227,18 @@ time.sleep(1.2)
 shot("07-reading", "reading mode")
 bench.must("key reload")
 
-# 8. empty tab
+# 8. empty tab. One tab, so the picture shows the empty state and not the
+# leftovers of every state before it.
+bench.must("closeall")
+time.sleep(0.4)
 bench.must("key newtab")
 time.sleep(0.5)
 shot("08-empty", "an empty tab")
 bench.must("escape")
 
 # 9. a page that fails
+bench.must("closeall")
+time.sleep(0.4)
 open_page("/missing")
 time.sleep(0.6)
 shot("09-missing", "a 404")

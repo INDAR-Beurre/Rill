@@ -115,6 +115,9 @@ impl State {
     }
 }
 
+/// One entry in a menu: what it says, and what it does.
+type MenuItem = Box<dyn Fn(&App)>;
+
 pub struct App {
     pub ui: Ui,
     pub prefs: RefCell<crate::store::Prefs>,
@@ -1272,7 +1275,7 @@ impl App {
             .tab(id)
             .map(|t| if t.pinned { "Unpin Tab" } else { "Pin Tab" })
             .unwrap_or("Pin Tab");
-        let items: Vec<(&str, Box<dyn Fn(&App)>)> = vec![
+        let items: Vec<(&str, MenuItem)> = vec![
             (pin_label, Box::new(move |app: &App| app.toggle_pin(id))),
             ("Duplicate Tab", Box::new(move |app: &App| app.duplicate(id))),
             ("Close Tab", Box::new(move |app: &App| app.close_tab(id))),
@@ -1295,14 +1298,18 @@ impl App {
 
     pub fn main_menu(&self) {
         let menu = gtk::Menu::new();
-        let items: Vec<(&str, Box<dyn Fn(&App)>)> = vec![
+        let items: Vec<(&str, MenuItem)> = vec![
             ("New Tab", Box::new(|app: &App| {
                 app.new_tab(None, false, false);
             })),
             ("New Private Tab", Box::new(|app: &App| {
                 app.new_tab(None, true, false);
             })),
-            ("Reading Mode", Box::new(|app: &App| app.reader())),
+            (
+                if self.reading.get() { "Leave Reading Mode" } else { "Reading Mode" },
+                Box::new(|app: &App| app.reader()),
+            ),
+            ("Find in Page", Box::new(|app: &App| app.toggle_find())),
             ("Bookmarks", Box::new(|app: &App| app.toggle_panel(PanelKind::Bookmarks))),
             ("History", Box::new(|app: &App| app.toggle_panel(PanelKind::History))),
             ("Downloads", Box::new(|app: &App| app.toggle_panel(PanelKind::Downloads))),
@@ -1517,7 +1524,7 @@ impl App {
             // The window's own corners, as the desktop draws them.
             let radius = 12.0;
             rounded_rectangle(&context, 0.0, 0.0, width as f64, height as f64, radius);
-            let _ = context.clip();
+            context.clip();
             context.set_operator(cairo::Operator::Over);
             let _ = context.translate(offset.0 as f64, offset.1 as f64);
 
@@ -1529,8 +1536,8 @@ impl App {
             if let Some((page, x, y, page_width, page_height)) = page.as_ref() {
                 let _ = context.save();
                 context.rectangle(*x as f64, *y as f64, *page_width as f64, *page_height as f64);
-                let _ = context.clip();
-                let _ = context.translate(*x as f64, *y as f64);
+                context.clip();
+                context.translate(*x as f64, *y as f64);
                 let _ = context.set_source_surface(page, 0.0, 0.0);
                 let _ = context.paint();
                 let _ = context.restore();
@@ -1820,10 +1827,12 @@ pub fn install_self(app: &AppRef) {
 /// Draw a widget where it stands inside an ancestor.
 fn draw_at(context: &cairo::Context, widget: &impl IsA<gtk::Widget>, ancestor: &impl IsA<gtk::Widget>) {
     let offset = widget.translate_coordinates(ancestor, 0, 0).unwrap_or((0, 0));
-    let _ = context.save();
-    let _ = context.translate(offset.0 as f64, offset.1 as f64);
+    // A capture is best effort: a surface that is already unusable has
+    // nothing to report that the caller could act on.
+    let _status = context.save();
+    context.translate(offset.0 as f64, offset.1 as f64);
     widget.draw(context);
-    let _ = context.restore();
+    let _status = context.restore();
 }
 
 fn rounded_rectangle(context: &cairo::Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {

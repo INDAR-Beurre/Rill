@@ -176,7 +176,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
 
     let mut tabs: Vec<Tab> = Vec::new();
     let mut next_id: TabId = 1;
-    if prefs.restore_session {
+    if prefs.restore_session && !prefs.skip_restore {
         for record in Records::load_session() {
             let mut tab = Tab::new(next_id);
             tab.url = record.url;
@@ -935,6 +935,10 @@ impl App {
                 continue;
             }
             let hay = format!("{} {}", tab.title, tab.url).to_lowercase();
+            // Two tabs on the same page are one suggestion, not two.
+            if offers.iter().any(|o| o.url == tab.url) {
+                continue;
+            }
             if typed_lower.is_empty() || hay.contains(&typed_lower) {
                 offers.push(Offer {
                     title: if tab.title.is_empty() { tab.url.clone() } else { tab.title.clone() },

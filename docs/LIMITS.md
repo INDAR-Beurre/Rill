@@ -15,8 +15,9 @@ There is no configuration of this browser that puts three WebKit processes with
 a page loaded under 100 MB resident. That is the engine's floor, not the
 browser's. The stated goal was 100 MB of the browser's own memory for one idle tab; the measured figure is 101 MB, which is the engine's floor rather than a target that was rounded down.
 
-`SEARCH_LOW_MEMORY=1` turns off the DMA-BUF renderer and shares one malloc
-arena for a few tens of megabytes, at the cost of the fastest painting path.
+`SEARCH_LOW_MEMORY=1` turns off the DMA-BUF renderer, turns off compositing and
+sets `MALLOC_ARENA_MAX=2`. Together they buy a few tens of megabytes at the cost
+of the fastest painting path.
 Tabs let go of their page after half an hour (Settings, on by default).
 
 ## Engine
@@ -27,7 +28,7 @@ needs a Chromium-only feature will not work here. Extensions do not exist.
 ## Tested, and not
 
 `tools/stress.py` reproduces slow, stalled, looping, 404, popup, download,
-memory-spray, resize and idle states, 48 checks, all green. It drives the
+memory-spray, resize and idle states, 56 checks, all green. It drives the
 browser's own actions, not the compositor's input: real mouse and keyboard
 events at the window level, full screen, notifications and media playback are
 checked by hand.
@@ -36,8 +37,14 @@ checked by hand.
 
 | case | resident | own |
 |---|---|---|
-| 8 tabs | 515 MB | 332 MB |
+| 8 tabs | 515 MB | 390 MB |
 | a page that allocates without limit | 1504 MB at its peak, 763 MB once it settles | 1368 MB |
+
+| tab switch (90 switches) | mean 10 ms, worst 29 ms | `build/stress-report.json` |
+| a panel opening | mean 13 ms over 24 | `build/stress-report.json` |
+| a 400-paragraph page | 0.0 s to load | `build/stress-report.json` |
+| a page of 40 images | 0.0 s to load | `build/stress-report.json` |
+| a page that sprays memory, resident | 2913 MB at its peak | the true worst case |
 
 Closing tabs gives memory back, but not all at once: eight tabs went from 515 MB
 to 228 MB after they were closed. The browser itself does not grow when a page
@@ -45,4 +52,4 @@ sprays memory; that tab does, and closing it is the way back.
 
 ## The one number that is not a claim
 
-`cargo test` runs 10 tests. `cargo build --release` prints no warnings.
+`cargo test` runs 16 tests. `cargo build --release` prints no warnings.

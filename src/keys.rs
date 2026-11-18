@@ -142,11 +142,12 @@ impl Key {
     }
 }
 
-pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
-    let key = Key::from_event(event);
-    let intent = key.intent();
+/// Carries an intent out. Split from `handle` so the bench can drive the same
+/// table the keyboard does: a shortcut that stops working is caught by the
+/// suite without a window and without a fake key event.
+pub fn apply(app: &AppRef, intent: Intent) {
     match intent {
-        Intent::Nothing => crate::gtkx::inh(false),
+        Intent::Nothing => {}
         Intent::Escape => {
             if app.omni.visible.get() {
                 app.close_omni();
@@ -158,122 +159,66 @@ pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
                 // Reading mode is the last thing standing between Escape and
                 // the page, so it is the last thing Escape takes away.
                 app.reader();
-            } else {
-                return crate::gtkx::inh(false);
             }
-            crate::gtkx::inh(true)
         }
-        Intent::Omni => {
-            app.open_omni(true);
-            crate::gtkx::inh(true)
-        }
+        Intent::Omni => app.open_omni(true),
         Intent::NewTab => {
             app.new_tab(None, false, false);
-            crate::gtkx::inh(true)
         }
         Intent::NewPrivateTab => {
             app.new_tab(None, true, false);
-            crate::gtkx::inh(true)
         }
-        Intent::ReopenClosed => {
-            app.reopen_closed();
-            crate::gtkx::inh(true)
-        }
-        Intent::CloseTab => {
-            app.close_tab(app.active_id());
-            crate::gtkx::inh(true)
-        }
-        Intent::Reload => {
-            app.reload();
-            crate::gtkx::inh(true)
-        }
+        Intent::ReopenClosed => app.reopen_closed(),
+        Intent::CloseTab => app.close_tab(app.active_id()),
+        Intent::Reload => app.reload(),
         Intent::ReloadBypassCache => {
             if let Some(view) = app.view(app.active_id()) {
                 view.reload_bypass_cache();
             }
-            crate::gtkx::inh(true)
         }
-        Intent::Reader => {
-            app.reader();
-            crate::gtkx::inh(true)
-        }
-        Intent::Bookmark => {
-            app.add_bookmark();
-            crate::gtkx::inh(true)
-        }
-        Intent::Find => {
-            app.toggle_find();
-            crate::gtkx::inh(true)
-        }
-        Intent::History => {
-            app.toggle_panel(PanelKind::History);
-            crate::gtkx::inh(true)
-        }
-        Intent::Downloads => {
-            app.toggle_panel(PanelKind::Downloads);
-            crate::gtkx::inh(true)
-        }
-        Intent::Bookmarks => {
-            app.toggle_panel(PanelKind::Bookmarks);
-            crate::gtkx::inh(true)
-        }
-        Intent::Settings => {
-            app.toggle_panel(PanelKind::Settings);
-            crate::gtkx::inh(true)
-        }
-        Intent::Shortcuts => {
-            app.toggle_panel(PanelKind::Shortcuts);
-            crate::gtkx::inh(true)
-        }
-        Intent::HideSomething => {
-            app.hide_element_mode();
-            crate::gtkx::inh(true)
-        }
-        Intent::ShowHidden => {
-            app.unhide_all();
-            crate::gtkx::inh(true)
-        }
-        Intent::Inspector => {
-            app.inspector();
-            crate::gtkx::inh(true)
-        }
-        Intent::NextTab => {
-            app.cycle(true);
-            crate::gtkx::inh(true)
-        }
-        Intent::PreviousTab => {
-            app.cycle(false);
-            crate::gtkx::inh(true)
-        }
-        Intent::Back => {
-            app.go_back();
-            crate::gtkx::inh(true)
-        }
-        Intent::Forward => {
-            app.go_forward();
-            crate::gtkx::inh(true)
-        }
-        Intent::ZoomIn => {
-            app.zoom(0.1);
-            crate::gtkx::inh(true)
-        }
-        Intent::ZoomOut => {
-            app.zoom(-0.1);
-            crate::gtkx::inh(true)
-        }
-        Intent::ZoomReset => {
-            app.reset_zoom();
-            crate::gtkx::inh(true)
-        }
-        Intent::Jump(number) => {
-            app.jump(number);
-            crate::gtkx::inh(true)
-        }
-        Intent::CopyAddress => {
-            app.copy_address();
-            crate::gtkx::inh(true)
-        }
+        Intent::Reader => app.reader(),
+        Intent::Bookmark => app.add_bookmark(),
+        Intent::Find => app.toggle_find(),
+        Intent::History => app.toggle_panel(PanelKind::History),
+        Intent::Downloads => app.toggle_panel(PanelKind::Downloads),
+        Intent::Bookmarks => app.toggle_panel(PanelKind::Bookmarks),
+        Intent::Settings => app.toggle_panel(PanelKind::Settings),
+        Intent::Shortcuts => app.toggle_panel(PanelKind::Shortcuts),
+        Intent::HideSomething => app.hide_element_mode(),
+        Intent::ShowHidden => app.unhide_all(),
+        Intent::Inspector => app.inspector(),
+        Intent::NextTab => app.cycle(true),
+        Intent::PreviousTab => app.cycle(false),
+        Intent::Back => app.go_back(),
+        Intent::Forward => app.go_forward(),
+        Intent::ZoomIn => app.zoom(0.1),
+        Intent::ZoomOut => app.zoom(-0.1),
+        Intent::ZoomReset => app.reset_zoom(),
+        Intent::Jump(number) => app.jump(number),
+        Intent::CopyAddress => app.copy_address(),
     }
+}
+
+/// True when the browser should swallow the key rather than let the page have
+/// it. Escape is the one that can be nobody's: an Escape with nothing open
+/// belongs to the page.
+pub fn taken(app: &AppRef, intent: Intent) -> bool {
+    match intent {
+        Intent::Nothing => false,
+        Intent::Escape => {
+            app.omni.visible.get()
+                || app.find.borrow().visible
+                || app.panels.borrow().open.is_some()
+                || app.reading.get()
+        }
+        _ => true,
+    }
+}
+
+pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
+    let intent = Key::from_event(event).intent();
+    apply(app, intent);
+    crate::gtkx::inh(taken(app, intent))
 }
 
 #[cfg(test)]

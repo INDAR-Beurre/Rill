@@ -573,7 +573,8 @@ impl Panels {
     /// keys is a browser whose keys nobody learns.
     fn build_shortcuts(&self) {
         self.clear_body();
-        let keys: [(&str, &str); 27] = [
+        let keys: [(&str, &str); 28] = [
+            ("Ctrl /", "This list"),
             ("Ctrl L", "The field"),
             ("Ctrl T", "New tab"),
             ("Ctrl W", "Close tab"),
@@ -618,7 +619,9 @@ impl Panels {
             crate::ui::pack(&row, &label, true);
             list.add(&row);
         }
-        self.body.add(&list);
+        // 28 rows are taller than the card's tallest allowed height, so the
+        // sheet scrolls like every other panel instead of losing its last rows.
+        self.body.add(&self.body_scroll(&list));
         self.body.show_all();
     }
 

@@ -129,7 +129,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .suggest .sgrow:hover {{ background-color: {hover}; }}
 .suggest .sgrow.picked {{ background-color: {wash}; }}
 .suggest .sgrow.picked .sgtitle {{ font-weight: bold; }}
-.suggest .sghead {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {faint}; letter-spacing: 0.06em; }}
+.suggest .sghead {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {muted}; letter-spacing: 0.06em; }}
 .suggest .sgrow {{ min-height: 44px; }}
 .suggest .sgrow {{ border-left: 2px solid transparent; }}
 .suggest .sgrow.picked {{ border-left: 2px solid {ink}; border-top-left-radius: 0; border-bottom-left-radius: 0; }}
@@ -158,7 +158,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel button.act label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
 .panel switch {{ }}
 .setting {{ font-family: {font}; font-size: 13px; color: {ink}; }}
-.group {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {faint}; letter-spacing: 0.07em; margin-top: 14px; margin-bottom: 2px; }}
+.group {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {muted}; letter-spacing: 0.07em; margin-top: 14px; margin-bottom: 2px; }}
 .keyhint {{ font-family: {mono}; font-size: 11px; color: {muted}; background-color: {wash}; border-radius: 5px; padding: 1px 5px; }}
 .settingdesc {{ font-family: {font}; font-size: 11px; color: {muted}; }}
 .panel stack, .panel box {{ background-color: transparent; }}

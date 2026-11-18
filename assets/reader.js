@@ -55,6 +55,7 @@ window.__searchReader = function (palette) {
   const dark = /#0B0B0B/i.test(palette);
   const rule = dark ? '#242424' : '#EAEAEA';
   const muted = dark ? '#8A8A8A' : '#6B6B6B';
+  const ground = dark ? '#0B0B0B' : '#FFFFFF';
 
   document.head.querySelectorAll('[data-search-reader]').forEach((n) => n.remove());
   const style = document.createElement('style');
@@ -84,8 +85,11 @@ window.__searchReader = function (palette) {
   exit.id = '__search_reader_exit';
   exit.type = 'button';
   exit.textContent = 'Leave reading mode';
+  // Stays where it can be reached: an article can be thousands of pixels long,
+  // and a way out that scrolls away is not a way out.
   exit.setAttribute('style', `all: unset; display: inline-block; cursor: pointer; font: 12px system-ui, sans-serif;
-    color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 5px 10px; margin-bottom: 32px;`);
+    color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 5px 10px;
+    position: fixed; top: 14px; right: 18px; background: ${ground}; z-index: 2147483647;`);
   // The button calls the toggle with the palette it was built with, so leaving
   // reader mode puts the page back exactly as it was.
   const exitPalette = palette;

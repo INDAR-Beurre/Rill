@@ -15,6 +15,8 @@ panels.rs      bookmarks, history, downloads, settings
 reader.rs      reading mode (assets/reader.js does the work)
 curtain.rs     hidden elements, per site, before first paint
 shield.rs      the content blocker, compiled once
+keys.rs        every shortcut: what a key means, and what it does
+js.rs          running a script in a page, and hearing back
 store.rs       prefs and the small JSON files
 files.rs       reading and writing those files
 bench.rs       the socket tests drive the browser through
@@ -76,7 +78,7 @@ and idle, the browser's own memory is about 101 MB and the resident total about
 210 MB; the difference is the shared GTK and WebKit libraries, which the desktop
 has in memory anyway.
 
-`SEARCH_LOW_MEMORY=1` turns off the DMA-BUF renderer and shares one malloc
-arena, which buys a few tens of megabytes at the cost of the fastest painting
-path. Tabs also let go of their page after half an hour (Settings › Let tabs
+`SEARCH_LOW_MEMORY=1` turns off the DMA-BUF renderer and compositing and caps the
+allocator at two arenas (`MALLOC_ARENA_MAX=2`), which buys a few tens of
+megabytes at the cost of the fastest painting path. Tabs also let go of their page after half an hour (Settings › Let tabs
 sleep), which returns the page's memory to the system.

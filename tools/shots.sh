@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/council/latest}"
-SIZE="${SHOT_SIZE:-1740x1012}"
+SIZE="${SHOT_SIZE:-1500x917}"
 PORT="${FIXTURE_PORT:-8099}"
 BIN="$ROOT/target/release/search"
 

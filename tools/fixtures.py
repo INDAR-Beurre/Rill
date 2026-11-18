@@ -131,6 +131,32 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
         elif route == "/missing":
             self.send("not found", status=404, kind="text/plain")
+        elif route == "/banner":
+            # A page whose whole content is the kind of thing the blocker hides,
+            # next to one thing it must leave alone. The two are told apart by
+            # measuring them in the page, not by trusting the rule list.
+            self.send(page("Banner", "<p id='keep'>This stays.</p>"
+                           "<div class='cookie-banner'>A banner</div>"
+                           "<div class='ad-slot'>An advertisement</div>"
+                           "<div class='newsletter-overlay'>Newsletter</div>"
+                           "<script>window.__probe=()=>{"
+                           "const seen=(sel)=>{const n=document.querySelector(sel);"
+                           "return !!(n&&n.getBoundingClientRect().width>0&&getComputedStyle(n).display!=='none')};"
+                           "return JSON.stringify({keep:seen('#keep'),banner:seen('.cookie-banner'),"
+                           "ad:seen('.ad-slot'),news:seen('.newsletter-overlay')})}</script>",
+                           banner=False))
+        elif route == "/cookie":
+            # Two routes, because one route cannot answer both questions: "/cookie?set=1"
+            # puts a cookie in the jar, "/cookie" only reports what is in it. A single
+            # route that both sets and reads would let a private tab plant the very
+            # cookie the test was checking it did not have.
+            # The value can be named, so two jars can be told apart: a tab that
+            # writes "flavour=private" must not be visible from another one.
+            value = query.get("set", [""])[0] or "oat"
+            headers = {"Set-Cookie": f"flavour={value}; Path=/"} if "set" in query else None
+            self.send(page("Cookie jar", "<p id='who'>nobody</p>"
+                           "<script>document.getElementById('who').textContent=document.cookie||'empty'</script>",
+                           banner=False), headers=headers)
         elif route == "/js-busy":
             self.send(page("Busy script", "<p>Working...</p><script>const t=Date.now();"
                                            "while(Date.now()-t<20000){}</script>", banner=False))
@@ -162,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
                                f"<li><a href='{name}'>{name}</a></li>" for name in
                                ["plain", "long", "big", "images", "slow", "stall", "redirect?n=3",
                                 "loop", "missing", "js-busy", "js-leak", "frames", "popup",
-                                "download", "form", "fonts"]
+                                "download", "form", "fonts", "banner", "cookie"]
                            ) + "</ul>"))
 
 

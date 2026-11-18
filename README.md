@@ -50,6 +50,20 @@ On purpose: no sync, no account, no cloud, no telemetry, no extension engine, no
 second window. Tabs, history, bookmarks and what you have hidden are small JSON
 files in your own folders and nowhere else.
 
+Things that decide whether you can switch, stated plainly:
+
+- **DRM video does not play.** Netflix, Spotify's web player and anything else
+  that needs Widevine will refuse, because the engine ships without it. YouTube
+  is fine.
+- **No password manager and no autofill.** Use your desktop's clipboard or a
+  password manager's own app.
+- **PDFs open in the engine's own viewer**, which is basic: no annotations, no
+  form saving.
+- **No extensions at all**, not even an engine to refuse them with.
+- **No multiple windows and no tab dragging between them.** One window, tabs in
+  its column.
+- **No print dialog.** `Ctrl P` is the page's own.
+
 ## Build it
 
 Needs GTK 3 and WebKitGTK 4.1 (package `webkit2gtk-4.1` on Arch, `libwebkit2gtk-4.1-dev`
@@ -62,6 +76,37 @@ cargo build --release
 
 That is the whole build. There is no bundler, no node, no submodule. It builds
 with no warnings: `cargo build --release` should say nothing at all.
+
+### Install it
+
+```sh
+cargo install --path . --root ~/.local     # puts `search` in ~/.local/bin
+mkdir -p ~/.local/share/applications
+cat > ~/.local/share/applications/search.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Search
+Comment=A small, fast, quiet browser
+Exec=search %u
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;
+EOF
+xdg-mime default search.desktop x-scheme-handler/https
+```
+
+`~/.local/bin` is on `PATH` on most desktops; if it is not, add it. `xdg-mime`
+makes Search the browser links open in. There is no package, no AppImage and no
+Flatpak: one binary, one `.desktop` file, and GTK and WebKitGTK from your
+distribution.
+
+### What it costs next to what you have
+
+One idle tab is 210 MB resident, of which 101 MB is this browser's own. The same
+tab in Firefox on this machine is 480 MB over five processes, and in Chromium
+based browsers it is more. That is the whole pitch, and it is why the engine is
+the one the desktop already has in memory rather than a second copy shipped in
+the binary.
 
 ## Drive it, test it
 
@@ -80,7 +125,7 @@ pages that never finish, pages that eat memory, pages that redirect in a loop,
 opens and closes every panel, hides things, uses find and reading mode, resizes
 the window, and watches the memory the whole time. It writes
 `build/stress-report.json` and exits non-zero if anything fails. It currently
-reports 48 of 48 checks passing on a 4-core Linux desktop with 8 GB of RAM.
+reports 56 of 56 checks passing on a 4-core Linux desktop with 8 GB of RAM.
 
 The full list of places this build differs from the Mac original, and why, is in
 [docs/DIFFERENCES.md](docs/DIFFERENCES.md).

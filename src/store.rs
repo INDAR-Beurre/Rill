@@ -45,6 +45,12 @@ pub struct Prefs {
     /// Filled in by the browser at launch: whether the desktop is dark.
     #[serde(skip)]
     pub desktop_dark: bool,
+    /// Set by --fresh for this launch only: start with one blank tab, but do
+    /// not stop recording where you are. Telling a test to start clean is not
+    /// the same as telling the browser to forget the session, and conflating
+    /// them meant a --fresh start never wrote a session at all.
+    #[serde(skip)]
+    pub skip_restore: bool,
 }
 
 impl Default for Prefs {
@@ -63,6 +69,7 @@ impl Default for Prefs {
             show_bookmarks_bar: false,
             darken_pages: false,
             desktop_dark: false,
+            skip_restore: false,
         }
     }
 }

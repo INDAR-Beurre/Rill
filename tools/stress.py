@@ -129,7 +129,7 @@ class Run:
                 time.sleep(0.1)
         raise RuntimeError("the fixture server did not start")
 
-    def start_browser(self):
+    def start_browser(self, fresh=True):
         env = dict(os.environ)
         env["SEARCH_BENCH"] = "1"
         env.setdefault("XDG_CONFIG_HOME", str(self.tmp / "config"))
@@ -137,8 +137,14 @@ class Run:
         env.pop("DISPLAY", None)
         env["GDK_BACKEND"] = "wayland"
         started = time.time()
+        argv = [str(BINARY), "--appearance", "light"]
+        if fresh:
+            # --fresh means "do not restore", and it is the right start for a
+            # test that wants a known state. A restart that is meant to bring
+            # the session back must not pass it, or it tests nothing.
+            argv.append("--fresh")
         self.browser = subprocess.Popen(
-            [str(BINARY), "--fresh", "--appearance", "light"],
+            argv,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -156,6 +162,23 @@ class Run:
             except (BenchError, OSError):
                 time.sleep(0.1)
         raise RuntimeError("the bench socket never answered")
+
+    def restart(self):
+        """Close the browser and start it again on the same config and data."""
+        if self.bench:
+            try:
+                self.bench.command("quit")
+            except Exception:
+                pass
+        if self.browser and self.browser.poll() is None:
+            self.browser.terminate()
+            try:
+                self.browser.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.browser.kill()
+        self.bench = None
+        self.start_browser(fresh=False)
+        return self.bench
 
     def stop(self):
         if self.bench:
@@ -396,12 +419,18 @@ class Run:
                        f"field holds {probe['omniText'][-24:]!r}")
             bench.must("key down")
             time.sleep(0.3)
-            probe = bench.probe()
-            # Only meaningful when there is something to pick: an empty list
-            # would have made the old assertion pass on a broken step().
-            self.check("down picks a suggestion",
-                       probe["omniCount"] > 0 and probe["omniPicked"] >= 0,
-                       f"picked {probe['omniPicked']} of {probe['omniCount']}")
+            once = bench.probe()
+            bench.must("key down")
+            time.sleep(0.3)
+            twice = bench.probe()
+            # "Picked something" is true of a list that has never been stepped,
+            # so the assertion is that the pick *moved*, twice, from nothing.
+            self.check("down moves the pick through the list",
+                       once["omniCount"] > 1
+                       and once["omniPicked"] == 0
+                       and twice["omniPicked"] == 1,
+                       f"picked {once['omniPicked']} then {twice['omniPicked']} "
+                       f"of {once['omniCount']}")
             bench.must("escape")
 
             # A panel's own search has to filter, keep its words, and clear.
@@ -428,17 +457,37 @@ class Run:
             probe = bench.probe()
             self.check("Ctrl / lists every key", probe["panel"] == "Shortcuts", probe["panel"])
             bench.must("key closepanel")
+            # Find is a question about the page on screen, and the panel checks
+            # above left this tab on /plain. Go back to the long read first, or
+            # the search is fair and finds nothing.
+            bench.must(f"go {self.url('/long')}")
+            bench.wait_loaded(timeout=20)
+            time.sleep(0.4)
             answer = bench.command("find Paragraph 5")
             self.check("find searches", answer.get("ok"), str(answer)[:80])
-            time.sleep(1)
+            time.sleep(1.5)
             probe = bench.probe()
             self.check("find bar state", probe["find"] is True, "open")
+            # A find that matches nothing also "succeeds". The count is the
+            # evidence that the engine was asked and answered.
+            self.check("find counts its matches",
+                       probe.get("findCount", "").endswith("matches")
+                       and probe["findCount"] != "no matches",
+                       f"count {probe.get('findCount')!r}")
             bench.must("escape")
 
             bench.must("key reader")
             time.sleep(1.5)
             text = bench.text()
-            self.check("reading mode replaces the page", (text.get("text") or "") != "", "text present")
+            style = bench.must(
+                "js (() => { const r = document.getElementById('__search_reader');"
+                " return !!(r && getComputedStyle(r.querySelector('h1')||r).fontFamily); })()"
+            )
+            # Keeping the words is not the claim: the claim is that the browser
+            # set the article again in its own type, in its own container.
+            self.check("reading mode replaces the page",
+                       (text.get("text") or "") != "" and style.get("value") == "true",
+                       f"text {len(text.get('text') or '')} chars, container {style.get('value')}")
             bench.must("key reload")
             bench.wait_loaded(timeout=20)
 
@@ -499,6 +548,76 @@ class Run:
                 path.exists() and path.stat().st_size > 0,
                 f"{path} {path.stat().st_size if path.exists() else 0} bytes",
             )
+
+        @self.scenario("the blocker runs before the page")
+        def _blocker():
+            # The rule list is a promise; this is the page that measures it.
+            tab = bench.open(self.url("/banner"))
+            bench.wait_loaded(tab, timeout=20)
+            time.sleep(0.6)
+            seen = bench.must("js window.__probe()")
+            try:
+                state = json.loads(seen.get("value") or "{}")
+            except json.JSONDecodeError:
+                state = {}
+            self.check("the blocker hides what it says it hides",
+                       state.get("keep") is True
+                       and state.get("banner") is False
+                       and state.get("ad") is False
+                       and state.get("news") is False,
+                       json.dumps(state))
+
+        @self.scenario("a private tab")
+        def _private():
+            # Its own cookie jar, and nothing of it left afterwards.
+            ordinary = bench.open(self.url("/cookie?set=1"))
+            bench.wait_loaded(ordinary, timeout=20)
+            time.sleep(0.4)
+            bench.must(f"go {self.url('/cookie')}")
+            bench.wait_loaded(ordinary, timeout=20)
+            time.sleep(0.4)
+            shared = bench.must("js document.cookie.includes('flavour')")
+            self.check("an ordinary tab keeps a cookie",
+                       shared.get("value") == "true", str(shared)[:60])
+
+            bench.must("key privatetab")
+            time.sleep(0.6)
+            probe = bench.probe()
+            private = probe["active"]
+            self.check("a private tab is marked private",
+                       any(tab["id"] == private and tab["private"] for tab in probe["tabs"]),
+                       f"tab {private}")
+            bench.must(f"go {self.url('/cookie')}")
+            bench.wait_loaded(private, timeout=20)
+            time.sleep(0.4)
+            jar = bench.must("js document.cookie.includes('flavour')")
+            self.check("and starts with an empty jar", jar.get("value") == "false", str(jar)[:60])
+            bench.must("key privatetab")
+            time.sleep(0.4)
+            fork = bench.must("js document.cookie.includes('flavour')")
+            self.check("two private tabs share nothing with the ordinary one",
+                       fork.get("value") == "false", str(fork)[:60])
+
+        @self.scenario("what a fresh start remembers")
+        def _session():
+            # The restart replaces the socket; every later scenario reads the
+            # same name, so it has to point at the new browser.
+            nonlocal bench
+            # Tabs come back, and they come back asleep: a restored tab should
+            # cost nothing until it is clicked.
+            tab = bench.open(self.url("/titled?t=Remembered"))
+            bench.wait_loaded(tab, timeout=20)
+            bench.must("key bookmark")     # something to notice afterwards
+            bench.must("session")          # the session write is debounced; ask now
+            bench = self.restart()
+            probe = bench.probe()
+            urls = [t["url"] for t in probe["tabs"]]
+            self.check("a fresh start brings the tabs back",
+                       any("/titled?t=Remembered" in url for url in urls),
+                       f"{len(urls)} tabs")
+            asleep = [t["asleep"] for t in probe["tabs"] if "/titled?t=Remembered" in t["url"]]
+            self.check("and they come back asleep",
+                       bool(asleep) and all(asleep), f"asleep {asleep}")
 
         @self.scenario("reading mode")
         def _reading():

@@ -5,7 +5,7 @@
 // Line protocol over a Unix socket under the user's runtime folder. One
 // command per line, one JSON answer per line.
 use crate::app::AppRef;
-use crate::panels::PanelKind;
+use crate::keys::Intent;
 use gtk::prelude::*;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -208,6 +208,10 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             app.find_query(argument, true);
             ok("")
         }
+        "session" => {
+            app.save_session();
+            ok("")
+        }
         "hidden" => {
             let state = app.state.borrow();
             let mut items: Vec<String> = Vec::new();
@@ -294,7 +298,7 @@ fn probe(app: &AppRef) -> String {
     let panels = app.panels.borrow();
     let hide_mode = app.state.borrow().hide_mode;
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"hideMode\":{},\"maximised\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{}}}",
+        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{}}}",
         active,
         json_escape(&url),
         json_escape(&title),
@@ -307,6 +311,7 @@ fn probe(app: &AppRef) -> String {
         json_escape(&panels.filter.borrow()),
         find.visible,
         json_escape(&find.entry.text()),
+        json_escape(&find.count.text()),
         hide_mode,
         app.ui.window.is_maximized(),
         app.ui.stack.visible_child_name().map(|name| name.to_string()).unwrap_or_default(),
@@ -354,45 +359,70 @@ fn tabs(app: &AppRef) -> String {
 }
 
 fn key(app: &AppRef, name: &str) -> String {
+    // The advertised shortcuts are driven through the same table the keyboard
+    // reads, so a name that stops meaning something fails a check instead of
+    // silently doing nothing in the browser and nothing in the bench.
+    let shortcut = match name {
+        "omni" => Some(Intent::Omni),
+        "reopen" => Some(Intent::ReopenClosed),
+        "reload" => Some(Intent::Reload),
+        "reloadbypass" => Some(Intent::ReloadBypassCache),
+        "back" => Some(Intent::Back),
+        "forward" => Some(Intent::Forward),
+        "nexttab" => Some(Intent::NextTab),
+        "previoustab" => Some(Intent::PreviousTab),
+        "bookmark" => Some(Intent::Bookmark),
+        "copy" => Some(Intent::CopyAddress),
+        "reader" => Some(Intent::Reader),
+        "hide" => Some(Intent::HideSomething),
+        "unhide" => Some(Intent::ShowHidden),
+        "find" => Some(Intent::Find),
+        "history" => Some(Intent::History),
+        "bookmarks" => Some(Intent::Bookmarks),
+        "downloads" => Some(Intent::Downloads),
+        "settings" => Some(Intent::Settings),
+        "shortcuts" => Some(Intent::Shortcuts),
+        "inspector" => Some(Intent::Inspector),
+        "zoomin" => Some(Intent::ZoomIn),
+        "zoomout" => Some(Intent::ZoomOut),
+        "zoomreset" => Some(Intent::ZoomReset),
+        "escape" => Some(Intent::Escape),
+        _ => None,
+    };
+    if let Some(intent) = shortcut {
+        crate::keys::apply(app, intent);
+        return ok("");
+    }
     match name {
-        "omni" => app.open_omni(true),
         "down" => app.omni.step(1),
         "up" => app.omni.step(-1),
         "newtab" => {
             app.new_tab(None, false, false);
+            return ok("");
         }
         "privatetab" => {
             app.new_tab(None, true, false);
+            return ok("");
         }
-        "closetab" => app.close_tab(app.active_id()),
-        "reopen" => app.reopen_closed(),
-        "reload" => app.reload(),
-        "back" => app.go_back(),
-        "forward" => app.go_forward(),
-        "nexttab" => app.cycle(true),
-        "previoustab" => app.cycle(false),
-        "pin" => app.toggle_pin(app.active_id()),
-        "bookmark" => app.add_bookmark(),
-        "copy" => app.copy_address(),
-        "reader" => app.reader(),
-        "hide" => app.hide_element_mode(),
-        "unhide" => app.unhide_all(),
-        "find" => app.toggle_find(),
-        "history" => app.toggle_panel(PanelKind::History),
-        "bookmarks" => app.toggle_panel(PanelKind::Bookmarks),
-        "downloads" => app.toggle_panel(PanelKind::Downloads),
-        "settings" => app.toggle_panel(PanelKind::Settings),
-        "shortcuts" => app.toggle_panel(PanelKind::Shortcuts),
-        "closepanel" => app.close_panels(),
-        "zoomin" => app.zoom(0.1),
-        "zoomout" => app.zoom(-0.1),
-        "zoomreset" => app.reset_zoom(),
+        "closetab" => {
+            app.close_tab(app.active_id());
+            return ok("");
+        }
+        "pin" => {
+            app.toggle_pin(app.active_id());
+            return ok("");
+        }
+        "closepanel" => {
+            app.close_panels();
+            return ok("");
+        }
         "maximise" => {
             if app.ui.window.is_maximized() {
                 app.ui.window.unmaximize();
             } else {
                 app.ui.window.maximize();
             }
+            return ok("");
         }
         other => {
             if let Ok(number) = other.parse::<usize>() {

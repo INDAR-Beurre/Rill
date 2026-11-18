@@ -88,7 +88,7 @@ fn main() {
 
     let mut prefs = store::Prefs::load();
     if fresh {
-        prefs.restore_session = false;
+        prefs.skip_restore = true;
     }
     if let Some(look) = appearance {
         prefs.appearance = match look.to_lowercase().as_str() {
@@ -97,9 +97,8 @@ fn main() {
             _ => store::Look::System,
         };
     }
-    if let Some(url) = url.clone() {
-        prefs.restore_session = false;
-        let _ = url;
+    if url.is_some() {
+        prefs.skip_restore = true;
     }
 
     let app = app::start(prefs);

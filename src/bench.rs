@@ -4,16 +4,14 @@
 //
 // Line protocol over a Unix socket under the user's runtime folder. One
 // command per line, one JSON answer per line.
-use crate::app::{App, AppRef};
+use crate::app::AppRef;
 use crate::panels::PanelKind;
 use gtk::prelude::*;
-use javascriptcore::ValueExt;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
-use webkit2gtk::WebViewExt;
 
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("SEARCH_BENCH_SOCKET") {
@@ -371,6 +369,7 @@ fn key(app: &AppRef, name: &str) -> String {
         "bookmarks" => app.toggle_panel(PanelKind::Bookmarks),
         "downloads" => app.toggle_panel(PanelKind::Downloads),
         "settings" => app.toggle_panel(PanelKind::Settings),
+        "shortcuts" => app.toggle_panel(PanelKind::Shortcuts),
         "closepanel" => app.close_panels(),
         "zoomin" => app.zoom(0.1),
         "zoomout" => app.zoom(-0.1),
@@ -403,12 +402,8 @@ fn page_text(app: &AppRef, sender: &mpsc::Sender<String>) {
         return JSON.stringify({ title: document.title || '', url: location.href, length: body.length, text: body.slice(0, 400) });
     })();"#;
     let sender = sender.clone();
-    view.run_javascript(js, None::<&gtk::gio::Cancellable>, move |result| {
-        let value = result
-            .ok()
-            .and_then(|javascript| javascript.js_value())
-            .map(|value| value.to_str().to_string())
-            .filter(|value| !value.is_empty());
+    crate::js::run(&view, js, move |result| {
+        let value = result.ok().filter(|value| !value.is_empty());
         let answer = match value {
             Some(value) => ok(&format!(",\"text\":{value}")),
             None => fail("the page did not answer"),
@@ -429,17 +424,10 @@ fn page_eval(app: &AppRef, code: &str, sender: &mpsc::Sender<String>) {
         serde_json::to_string(code).unwrap_or_else(|_| "\"\"".into())
     );
     let sender = sender.clone();
-    view.run_javascript(&wrapped, None::<&gtk::gio::Cancellable>, move |result| {
-        let answered = result.is_ok();
-        let value = result
-            .ok()
-            .and_then(|javascript| javascript.js_value())
-            .map(|value| value.to_str().to_string())
-            .unwrap_or_default();
-        let answer = if answered {
-            ok(&format!(",\"value\":\"{}\"", json_escape(&value)))
-        } else {
-            fail("the page did not answer")
+    crate::js::run(&view, &wrapped, move |result| {
+        let answer = match result {
+            Ok(value) => ok(&format!(",\"value\":\"{}\"", json_escape(&value))),
+            Err(_) => fail("the page did not answer"),
         };
         let _ = sender.send(answer);
     });

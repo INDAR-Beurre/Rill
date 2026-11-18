@@ -11,6 +11,7 @@ mod files;
 mod find;
 mod gtkx;
 mod icons;
+mod js;
 mod keys;
 mod layer;
 mod omnibox;

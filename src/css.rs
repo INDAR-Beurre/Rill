@@ -87,6 +87,7 @@ flowboxchild {{ background-color: transparent; padding: 0; }}
 .pin {{ border-radius: 9px; background-color: {tile}; }}
 .pin.live {{ background-color: {pinlive}; }}
 .pinletter {{ font-family: {font}; font-size: 13px; font-weight: normal; color: {pinfg}; }}
+.pin.live .pinletter {{ color: {muted}; }}
 .pin:hover {{ background-color: {sidehover}; }}
 
 .row {{ border-radius: 7px; background-color: transparent; min-height: {row_height}px; }}
@@ -134,6 +135,10 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .suggest .sgrow {{ border-radius: 6px; }}
 .suggest .sgrow:hover {{ background-color: {hover}; }}
 .suggest .sgrow.picked {{ background-color: {wash}; }}
+.suggest .sgrow.picked .sgtitle {{ font-weight: bold; }}
+.suggest .sghead {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {faint}; letter-spacing: 0.06em; }}
+.suggest .sgrow {{ border-left: 2px solid transparent; }}
+.suggest .sgrow.picked {{ border-left: 2px solid {ink}; border-top-left-radius: 0; border-bottom-left-radius: 0; }}
 .panel .ptrow {{ border-radius: 7px; }}
 .panel .ptrow:hover {{ background-color: {hover}; }}
 .suggest row:hover {{ background-color: {hover}; }}
@@ -150,6 +155,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel row:hover {{ background-color: {hover}; }}
 .panel .ptitle {{ font-family: {font}; font-size: 13px; color: {ink}; }}
 .panel .purl {{ font-family: {font}; font-size: 11px; color: {muted}; }}
+.keycap {{ font-family: {mono}; font-size: 11px; color: {muted}; background-color: {wash}; border-radius: 5px; padding: 2px 6px; }}
 .panel button.tab {{ background: none; background-image: none; box-shadow: none; border: none; padding: 5px 10px; border-radius: 6px; }}
 .panel button.tab label {{ font-family: {font}; font-size: 12px; color: {muted}; }}
 .panel button.tab:checked {{ background-color: {wash}; }}
@@ -158,6 +164,8 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel button.act label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
 .panel switch {{ }}
 .setting {{ font-family: {font}; font-size: 13px; color: {ink}; }}
+.group {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {faint}; letter-spacing: 0.07em; margin-top: 14px; margin-bottom: 2px; }}
+.keyhint {{ font-family: {mono}; font-size: 11px; color: {muted}; background-color: {wash}; border-radius: 5px; padding: 1px 5px; }}
 .settingdesc {{ font-family: {font}; font-size: 11px; color: {muted}; }}
 .panel stack, .panel box {{ background-color: transparent; }}
 .panel scrolledwindow {{ background-color: transparent; }}
@@ -191,7 +199,7 @@ scrollbar trough {{ background: transparent; }}
         wash = p.wash.hex(),
         tile = p.side_tile.hex(),
         pinlive = p.side_pin_live.hex(),
-        pinfg = p.muted.hex(),
+        pinfg = if p.is_dark() { "#6E6E6E".to_string() } else { "#C3C3C3".to_string() },
         rowfg = if p.is_dark() { p.ink.mix(p.muted, 0.35).hex() } else { "#7C7C7C".to_string() },
         liveink = if p.is_dark() { p.ink.hex() } else { "#0E0E0E".to_string() },
         ink = p.ink.hex(),

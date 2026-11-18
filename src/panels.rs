@@ -1,6 +1,6 @@
 // The four panels that hold everything else: what you kept, where you went,
 // what you brought down, and how the browser is set up.
-use crate::app::{App, AppRef};
+use crate::app::AppRef;
 use crate::palette::Palette;
 use crate::store::{ago, now_secs, Records};
 use gtk::prelude::*;
@@ -11,6 +11,7 @@ pub enum PanelKind {
     History,
     Downloads,
     Settings,
+    Shortcuts,
 }
 
 impl PanelKind {
@@ -20,15 +21,24 @@ impl PanelKind {
             PanelKind::History => "History",
             PanelKind::Downloads => "Downloads",
             PanelKind::Settings => "Settings",
+            PanelKind::Shortcuts => "Shortcuts",
         }
     }
-    fn all() -> [PanelKind; 4] {
-        [PanelKind::Bookmarks, PanelKind::History, PanelKind::Downloads, PanelKind::Settings]
+    fn all() -> [PanelKind; 5] {
+        [
+            PanelKind::Bookmarks,
+            PanelKind::History,
+            PanelKind::Downloads,
+            PanelKind::Settings,
+            PanelKind::Shortcuts,
+        ]
     }
 }
 
 pub struct Panels {
     pub wanted_height: std::cell::Cell<i32>,
+    column: std::cell::Cell<i32>,
+    pub filter: std::cell::RefCell<String>,
     pub holder: gtk::Fixed,
     layer: crate::layer::Layer,
     pub scrim: gtk::DrawingArea,
@@ -37,7 +47,6 @@ pub struct Panels {
     pub nav: gtk::Box,
     pub body: gtk::Box,
     pub open: Option<PanelKind>,
-    pub palette: Palette,
 }
 
 impl Panels {
@@ -84,6 +93,8 @@ impl Panels {
 
         let panels = Panels {
             wanted_height: std::cell::Cell::new(420),
+            column: std::cell::Cell::new(0),
+            filter: std::cell::RefCell::new(String::new()),
             holder,
             layer,
             scrim,
@@ -92,7 +103,6 @@ impl Panels {
             nav,
             body,
             open: None,
-            palette: *palette,
         };
 
         close.connect_clicked(move |_| {
@@ -112,7 +122,37 @@ impl Panels {
         panels
     }
 
+    /// A filter typed into a panel: the panel is rebuilt with it applied.
+    pub fn set_filter(&mut self, app: &AppRef, kind: PanelKind, text: &str) {
+        *self.filter.borrow_mut() = text.to_lowercase();
+        self.open_panel_with(app, kind);
+    }
+
+    fn open_panel_with(&mut self, app: &AppRef, kind: PanelKind) {
+        self.open = Some(kind.clone());
+        self.title.set_text(kind.title());
+        self.build_nav(app, &kind);
+        match kind {
+            PanelKind::Bookmarks => self.build_bookmarks(app),
+            PanelKind::History => self.build_history(app),
+            PanelKind::Downloads => self.build_downloads(app),
+            PanelKind::Settings => self.build_settings(app),
+            PanelKind::Shortcuts => self.build_shortcuts(),
+        }
+        let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
+        let wanted = self.body.preferred_height_for_width(card_width - 32).0 + 132;
+        self.wanted_height.set(wanted.clamp(300, 640));
+        self.layer.show();
+        self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        let filter = self.filter.borrow();
+        filter.is_empty() || text.to_lowercase().contains(filter.as_str())
+    }
+
     pub fn open_panel(&mut self, app: &AppRef, kind: PanelKind) {
+        *self.filter.borrow_mut() = String::new();
         self.open = Some(kind.clone());
         self.title.set_text(kind.title());
         self.layer.show();
@@ -122,6 +162,7 @@ impl Panels {
             PanelKind::History => self.build_history(app),
             PanelKind::Downloads => self.build_downloads(app),
             PanelKind::Settings => self.build_settings(app),
+            PanelKind::Shortcuts => self.build_shortcuts(),
         }
         // Measured here, not during an allocation pass: asking a widget for
         // its preferred size while GTK is allocating is how a UI wedges.
@@ -142,12 +183,13 @@ impl Panels {
         // The column stays readable while a panel is up: the scrim covers the
         // page, not the tabs.
         let column = 232;
-        self.layer.place(&self.scrim, column, 0, (width - column).max(0), height);
+        self.column.set(column);
         self.layout_card(width, height);
     }
 
     fn layout_card(&self, width: i32, height: i32) {
-        self.layer.place(&self.scrim, 0, 0, width, height);
+        let column = self.column.get();
+        self.layer.place(&self.scrim, column, 0, (width - column).max(0), height);
         let card_width = 680.min(width - 48);
         // The card is as tall as what it holds, within reason: a panel with
         // one line in it should not be a window with one line in it.
@@ -205,6 +247,15 @@ impl Panels {
         scroll
     }
 
+    fn filter_field(&self, placeholder: &str, on_type: impl Fn(&str) + 'static) -> gtk::Entry {
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some(placeholder));
+        entry.set_margin_bottom(8);
+        let on_type = std::rc::Rc::new(on_type);
+        entry.connect_changed(move |entry| on_type(&entry.text()));
+        entry
+    }
+
     fn build_bookmarks(&self, app: &AppRef) {
         self.clear_body();
         let bookmarks = app.state.borrow().bookmarks.clone();
@@ -213,8 +264,14 @@ impl Panels {
             self.body.show_all();
             return;
         }
+        let filter = self.filter_field("Search bookmarks", |text| {
+            if let Some(app) = crate::app::current() {
+                app.filter_panel(PanelKind::Bookmarks, text);
+            }
+        });
+        self.body.add(&filter);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        for bookmark in bookmarks {
+        for bookmark in bookmarks.into_iter().filter(|bookmark| self.matches(&format!("{} {}", bookmark.title, bookmark.url))) {
             let row = self.link_row(app, &bookmark.title, &bookmark.url, "Open", {
                 let url = bookmark.url.clone();
                 move |app: &AppRef| app.navigate_active(&url)
@@ -255,9 +312,15 @@ impl Panels {
         header.add(&clear);
         self.body.add(&header);
 
+        let filter = self.filter_field("Search history", |text| {
+            if let Some(app) = crate::app::current() {
+                app.filter_panel(PanelKind::History, text);
+            }
+        });
+        self.body.add(&filter);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let now = now_secs();
-        for entry in history.iter().take(300) {
+        for entry in history.iter().take(300).filter(|entry| self.matches(&format!("{} {}", entry.title, entry.url))) {
             let title = if entry.title.is_empty() {
                 crate::shield::host_of(&entry.url)
             } else {
@@ -316,7 +379,8 @@ impl Panels {
         label.style_context().add_class("setting");
         label.set_xalign(0.0);
         appearance.add(&label);
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        buttons.style_context().add_class("segmented");
         for look in [crate::store::Look::Light, crate::store::Look::Dark, crate::store::Look::System] {
             let button = gtk::Button::with_label(look.title());
             button.style_context().add_class("act");
@@ -336,6 +400,10 @@ impl Panels {
         appearance.add(&buttons);
         list.add(&appearance);
 
+        let browsing = gtk::Label::new(Some("BROWSING"));
+        browsing.style_context().add_class("group");
+        browsing.set_xalign(0.0);
+        list.add(&browsing);
         list.add(&self.setting_switch(app, "Block ads and trackers", "Rules enforced inside the engine, before a request is made.", prefs.shield, |app, on| {
             app.prefs.borrow_mut().shield = on;
             app.prefs.borrow().save();
@@ -359,6 +427,23 @@ impl Panels {
             |app, on| {
                 app.prefs.borrow_mut().memory_saver = on;
                 app.prefs.borrow().save();
+            },
+        ));
+
+        let tabs_head = gtk::Label::new(Some("TABS"));
+        tabs_head.style_context().add_class("group");
+        tabs_head.set_xalign(0.0);
+        list.add(&tabs_head);
+        list.add(&self.setting_switch(
+            app,
+            "Darken pages that stay white",
+            "Sites that do not offer a dark page get one from the browser. Off by default: a page's colour is the site's to choose.",
+            prefs.darken_pages,
+            |app, on| {
+                app.prefs.borrow_mut().darken_pages = on;
+                app.prefs.borrow().save();
+                app.apply_page_tone();
+                app.reload();
             },
         ));
 
@@ -418,9 +503,36 @@ impl Panels {
             .map(|t| crate::shield::host_of(&t.url))
             .unwrap_or_default();
         let count = app.state.borrow().hidden.get(&hidden).map(|v| v.len()).unwrap_or(0);
-        list.add(&self.setting_switch(app, "Nothing hidden here", &format!("{count} things hidden on {hidden}"), false, |app, _| {
-            app.unhide_all();
-        }));
+        let unhide_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        unhide_row.set_margin_top(7);
+        unhide_row.set_margin_bottom(7);
+        let unhide_text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        unhide_text.set_hexpand(true);
+        let unhide_title = gtk::Label::new(Some("Hidden here"));
+        unhide_title.style_context().add_class("setting");
+        unhide_title.set_xalign(0.0);
+        let unhide_sub = gtk::Label::new(Some(&format!("{count} things hidden on {hidden}")));
+        unhide_sub.style_context().add_class("settingdesc");
+        unhide_sub.set_xalign(0.0);
+        unhide_text.add(&unhide_title);
+        unhide_text.add(&unhide_sub);
+        crate::ui::pack(&unhide_row, &unhide_text, true);
+        let show_all = gtk::Button::with_label("Show them");
+        show_all.style_context().add_class("act");
+        {
+            let weak = app.weak();
+            show_all.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.unhide_all();
+                    app.toggle_panel_switch(PanelKind::Settings);
+                }
+            });
+        }
+        crate::ui::pack(&unhide_row, &show_all, false);
+        list.add(&unhide_row);
+
+        // Group headings, so a list of switches is not a wall of switches.
+        
 
         let about = gtk::Label::new(Some(&format!(
             "Search {} · WebKitGTK · Rust · this machine only",
@@ -433,6 +545,50 @@ impl Panels {
 
         // Settings is a list of rows, not a document: give it to the body
         // directly so the card can measure it and be as tall as it.
+        self.body.add(&list);
+        self.body.show_all();
+    }
+
+    /// Every key the browser keeps, in one table. A browser that hides its
+    /// keys is a browser whose keys nobody learns.
+    fn build_shortcuts(&self) {
+        self.clear_body();
+        let keys: [(&str, &str); 18] = [
+            ("Ctrl L", "The field"),
+            ("Ctrl T", "New tab"),
+            ("Ctrl W", "Close tab"),
+            ("Ctrl Shift T", "Reopen the last closed tab"),
+            ("Ctrl Tab", "Next tab"),
+            ("Ctrl 1 to 9", "Jump to a tab"),
+            ("Ctrl [ ]", "Back and forward"),
+            ("Ctrl R", "Reload"),
+            ("Ctrl F", "Find in the page"),
+            ("Ctrl D", "Keep this page"),
+            ("Ctrl Y", "History"),
+            ("Ctrl Shift B", "Bookmarks"),
+            ("Ctrl J", "Downloads"),
+            ("Ctrl Shift R", "Reading mode"),
+            ("Ctrl Shift H", "Hide something on this site"),
+            ("Ctrl Shift U", "Show what is hidden here"),
+            ("Ctrl ,", "Settings"),
+            ("Ctrl Shift I", "The inspector"),
+        ];
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        for (key, what) in keys {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.set_margin_top(4);
+            row.set_margin_bottom(4);
+            let keycap = gtk::Label::new(Some(key));
+            keycap.style_context().add_class("keycap");
+            keycap.set_xalign(0.0);
+            keycap.set_size_request(150, -1);
+            crate::ui::pack(&row, &keycap, false);
+            let label = gtk::Label::new(Some(what));
+            label.style_context().add_class("setting");
+            label.set_xalign(0.0);
+            crate::ui::pack(&row, &label, true);
+            list.add(&row);
+        }
         self.body.add(&list);
         self.body.show_all();
     }
@@ -538,11 +694,16 @@ impl Panels {
             let app_weak = app.weak();
             let run = std::rc::Rc::new(run);
             let run_row = run.clone();
-            row.connect_button_press_event(move |_, _| {
-                if let Some(app) = app_weak.upgrade() {
-                    run_row(&app);
+            row.connect_button_press_event(move |_, event| {
+                if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
+                    if button.button() == 1 {
+                        if let Some(app) = app_weak.upgrade() {
+                            run_row(&app);
+                        }
+                        return crate::gtkx::inh(true);
+                    }
                 }
-                crate::gtkx::inh(true)
+                crate::gtkx::inh(false)
             });
             let app_weak = app.weak();
             button.connect_clicked(move |_| {

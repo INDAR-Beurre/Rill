@@ -12,17 +12,7 @@ pub enum Icon {
     Plus,
     Close,
     Menu,
-    Search,
-    Book,
-    Clock,
-    Download,
-    Gear,
-    Reader,
     Globe,
-    Shield,
-    Eye,
-    Split,
-    Pin,
 }
 
 pub fn area(kind: Icon, size: i32, color: Rgb) -> gtk::DrawingArea {
@@ -89,64 +79,6 @@ fn draw(cr: &cairo::Context, kind: Icon, w: f64) {
             }
             let _ = cr.stroke();
         }
-        Icon::Search => {
-            cr.arc(c - s * 0.04, c - s * 0.04, s * 0.22, 0.0, 2.0 * std::f64::consts::PI);
-            let _ = cr.stroke();
-            cr.move_to(c + s * 0.12, c + s * 0.12);
-            cr.line_to(s * 0.74, s * 0.74);
-            let _ = cr.stroke();
-        }
-        Icon::Book => {
-            cr.move_to(s * 0.26, s * 0.22);
-            cr.line_to(s * 0.62, s * 0.22);
-            cr.line_to(s * 0.74, s * 0.32);
-            cr.line_to(s * 0.74, s * 0.78);
-            cr.line_to(s * 0.26, s * 0.78);
-            cr.close_path();
-            let _ = cr.stroke();
-            cr.move_to(s * 0.62, s * 0.22);
-            cr.line_to(s * 0.62, s * 0.33);
-            cr.line_to(s * 0.73, s * 0.33);
-            let _ = cr.stroke();
-        }
-        Icon::Clock => {
-            cr.arc(c, c, s * 0.28, 0.0, 2.0 * std::f64::consts::PI);
-            let _ = cr.stroke();
-            cr.move_to(c, c - s * 0.14);
-            cr.line_to(c, c + s * 0.02);
-            cr.line_to(c + s * 0.13, c + s * 0.09);
-            let _ = cr.stroke();
-        }
-        Icon::Download => {
-            cr.move_to(c, s * 0.24);
-            cr.line_to(c, s * 0.6);
-            let _ = cr.stroke();
-            cr.move_to(c - s * 0.14, s * 0.46);
-            cr.line_to(c, s * 0.61);
-            cr.line_to(c + s * 0.14, s * 0.46);
-            let _ = cr.stroke();
-            cr.move_to(s * 0.26, s * 0.76);
-            cr.line_to(s * 0.74, s * 0.76);
-            let _ = cr.stroke();
-        }
-        Icon::Gear => {
-            cr.arc(c, c, s * 0.13, 0.0, 2.0 * std::f64::consts::PI);
-            let _ = cr.stroke();
-            for i in 0..8 {
-                let a = i as f64 * std::f64::consts::PI / 4.0;
-                cr.move_to(c + s * 0.22 * a.cos(), c + s * 0.22 * a.sin());
-                cr.line_to(c + s * 0.31 * a.cos(), c + s * 0.31 * a.sin());
-            }
-            let _ = cr.stroke();
-        }
-        Icon::Reader => {
-            for (i, y) in [0.3, 0.44, 0.58, 0.72].iter().enumerate() {
-                let right = if i == 3 { 0.58 } else { 0.74 };
-                cr.move_to(s * 0.26, s * y);
-                cr.line_to(s * right, s * y);
-            }
-            let _ = cr.stroke();
-        }
         Icon::Globe => {
             cr.arc(c, c, s * 0.28, 0.0, 2.0 * std::f64::consts::PI);
             let _ = cr.stroke();
@@ -158,33 +90,6 @@ fn draw(cr: &cairo::Context, kind: Icon, w: f64) {
             let _ = cr.stroke();
             cr.move_to(c - s * 0.28, c);
             cr.line_to(c + s * 0.28, c);
-            let _ = cr.stroke();
-        }
-        Icon::Shield => {
-            cr.move_to(c, s * 0.22);
-            cr.line_to(s * 0.72, s * 0.33);
-            cr.curve_to(s * 0.72, s * 0.62, s * 0.6, s * 0.72, c, s * 0.79);
-            cr.curve_to(s * 0.4, s * 0.72, s * 0.28, s * 0.62, s * 0.28, s * 0.33);
-            cr.close_path();
-            let _ = cr.stroke();
-        }
-        Icon::Eye => {
-            cr.move_to(s * 0.24, c);
-            cr.curve_to(s * 0.38, s * 0.34, s * 0.62, s * 0.34, s * 0.76, c);
-            cr.curve_to(s * 0.62, s * 0.66, s * 0.38, s * 0.66, s * 0.24, c);
-            let _ = cr.stroke();
-            cr.arc(c, c, s * 0.08, 0.0, 2.0 * std::f64::consts::PI);
-            let _ = cr.stroke();
-        }
-        Icon::Split => {
-            cr.rectangle(s * 0.24, s * 0.28, s * 0.52, s * 0.44);
-            let _ = cr.stroke();
-            cr.move_to(c, s * 0.28);
-            cr.line_to(c, s * 0.72);
-            let _ = cr.stroke();
-        }
-        Icon::Pin => {
-            cr.arc(c, c, s * 0.1, 0.0, 2.0 * std::f64::consts::PI);
             let _ = cr.stroke();
         }
     }

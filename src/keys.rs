@@ -2,7 +2,6 @@
 use crate::app::AppRef;
 use crate::panels::PanelKind;
 use gtk::gdk::ModifierType;
-use gtk::prelude::*;
 use webkit2gtk::WebViewExt;
 
 pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
@@ -45,9 +44,7 @@ pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
                 return crate::gtkx::inh(true);
             }
             ("r", true) => {
-                if let Some(view) = app.view(app.active_id()) {
-                    view.reload_bypass_cache();
-                }
+                app.reader();
                 return crate::gtkx::inh(true);
             }
             ("d", _) => {
@@ -162,7 +159,13 @@ pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
             }
         }
         "F5" => {
-            app.reload();
+            if event.state().contains(ModifierType::CONTROL_MASK) {
+                if let Some(view) = app.view(app.active_id()) {
+                    view.reload_bypass_cache();
+                }
+            } else {
+                app.reload();
+            }
             return crate::gtkx::inh(true);
         }
         "F12" => {

@@ -36,9 +36,12 @@ Chromium to download, update and keep in memory.
   gone on that site next time, before the page has drawn a single frame.
 - **Reading mode.** `Ctrl Shift R` takes the article out of the page and sets it
   again in the browser's own type.
-- **Find, downloads, bookmarks, history** — each a panel, each searchable, each
-  one keystroke away.
-- **Light, dark, or the desktop's own.** The frame and the pages follow.
+- **Find, downloads, bookmarks, history, shortcuts** — each a panel, each one
+  keystroke away. The shortcuts panel (`Ctrl /`) exists so the keys are
+  discoverable, not folklore.
+- **Light, dark, or the desktop's own.** The frame follows. Pages follow when a
+  site offers a dark page; for the ones that never do, Settings has a switch
+  that gives them the browser's ground instead.
 - **A private tab** with its own cookie jar, gone when it closes.
 
 ## What it does not do
@@ -57,7 +60,8 @@ cargo build --release
 ./target/release/search
 ```
 
-That is the whole build. There is no bundler, no node, no submodule.
+That is the whole build. There is no bundler, no node, no submodule. It builds
+with no warnings: `cargo build --release` should say nothing at all.
 
 ## Drive it, test it
 
@@ -95,7 +99,8 @@ line. It is the same idea as the Mac build's `./bench`.
 | `Ctrl D` bookmark this page | `Ctrl F` find |
 | `Ctrl Y` history · `Ctrl Shift B` bookmarks · `Ctrl J` downloads | `Ctrl ,` settings |
 | `Ctrl Shift H` hide something · `Ctrl Shift U` what is hidden | `Ctrl Shift C` copy address |
-| `Ctrl +` `Ctrl -` `Ctrl 0` zoom | `Ctrl Shift I` inspector |
+| `Ctrl +` `Ctrl -` `Ctrl 0` zoom | `Ctrl /` every shortcut, listed |
+| `Ctrl Shift I` inspector | |
 
 ## How it is put together
 

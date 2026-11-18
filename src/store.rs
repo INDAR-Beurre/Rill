@@ -45,6 +45,7 @@ pub struct Prefs {
     pub restore_session: bool,
     pub search_engine: String,
     pub show_bookmarks_bar: bool,
+    pub darken_pages: bool,
     /// Filled in by the browser at launch: whether the desktop is dark.
     #[serde(skip)]
     pub desktop_dark: bool,
@@ -64,6 +65,7 @@ impl Default for Prefs {
             restore_session: true,
             search_engine: "DuckDuckGo".into(),
             show_bookmarks_bar: false,
+            darken_pages: false,
             desktop_dark: false,
         }
     }
@@ -94,7 +96,7 @@ impl Prefs {
         if self.roomy_tabs {
             36
         } else {
-            30
+            28
         }
     }
 
@@ -149,11 +151,6 @@ pub struct Bookmark {
     pub title: String,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-pub struct Store {
-    #[serde(skip)]
-    pub path: PathBuf,
-}
 
 pub struct Records;
 

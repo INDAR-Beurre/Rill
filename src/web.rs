@@ -1,14 +1,13 @@
 // Pages: one WebKit view per tab, made when you first look at a tab and given
 // back when it closes. The engine is the one the desktop already ships with,
 // so there is no second browser inside this one.
-use crate::app::{App, AppRef, TabId};
+use crate::app::{AppRef, TabId};
 use crate::curtain;
 use gtk::prelude::*;
 use webkit2gtk::{
-    DownloadExt, HardwareAccelerationPolicy, NavigationPolicyDecisionExt, NavigationType,
-    PolicyDecisionExt, ResponsePolicyDecisionExt, Settings, SettingsExt, URIRequestExt, URIResponseExt,
-    UserContentManager,
-    UserContentManagerExt, WebContext, WebContextExt, WebView, WebViewExt,
+    DownloadExt, HardwareAccelerationPolicy, NavigationPolicyDecisionExt, PolicyDecisionExt,
+    ResponsePolicyDecisionExt, Settings, SettingsExt, URIRequestExt, URIResponseExt,
+    UserContentManager, WebContext, WebContextExt, WebView, WebViewExt,
 };
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -195,22 +194,18 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     // The page asks, the browser answers: a fresh address syncs what is hidden
     // there before the first frame, and anything that wants a window of its
     // own becomes a tab.
-    {
-        let weak = app.weak();
-        view.connect_decide_policy(move |_, decision, kind| {
-            if kind != webkit2gtk::PolicyDecisionType::NavigationAction {
-                return false;
-            }
-            let Some(policy) = decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>() else {
-                return false;
-            };
-            let Some(mut action) = policy.navigation_action() else { return false };
-            // Nothing is changed here: a policy decision is no place to touch
-            // the content manager. The style sheet is set when the load
-            // starts instead, before the document begins to arrive.
-            false
-        });
-    }
+    // A navigation decision is a place to look, not to touch: the style sheet
+    // is set when the load starts instead.
+    view.connect_decide_policy(|_, decision, kind| {
+        if kind != webkit2gtk::PolicyDecisionType::NavigationAction {
+            return false;
+        }
+        decision
+            .downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
+            .and_then(|policy| policy.navigation_action())
+            .is_some()
+            && false
+    });
     // window.open: a tab, never a pop-up. The page asks for a window, the
     // browser answers with a tab and gives WebKit no view of its own.
     {
@@ -235,7 +230,7 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     // The mouse's own doors.
     {
         let weak = app.weak();
-        view.connect_button_press_event(move |view, event| {
+        view.connect_button_press_event(move |_view, event| {
             if event.event_type() == gtk::gdk::EventType::ButtonPress {
                 if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
                     if let Some(app) = weak.upgrade() {

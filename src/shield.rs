@@ -76,11 +76,11 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
     let slot = Arc::new(Mutex::new(Slot { filter: None, done: false }));
     let raw = Arc::into_raw(slot.clone()) as *mut c_void;
 
-    let mut stores: Vec<*mut ffi::WebKitUserContentFilterStore> = Vec::new();
+    let stores: Vec<*mut ffi::WebKitUserContentFilterStore> = Vec::new();
     unsafe {
         let store = ffi::webkit_user_content_filter_store_new(store_path.as_ptr());
         if store.is_null() {
-            Arc::from_raw(raw as *const Mutex<Slot>);
+            // The slot is leaked on purpose: a callback may still hold it.
             return false;
         }
         ffi::webkit_user_content_filter_store_save(
@@ -113,7 +113,9 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
             glib::gobject_ffi::g_object_unref(filter as *mut glib::gobject_ffi::GObject);
             ok = true;
         }
-        let _ = Arc::from_raw(raw as *const Mutex<Slot>);
+        // The slot is not freed: the async compile may still be holding the
+        // pointer on a slow machine, and a use-after-free in an ad blocker is
+        // not a trade worth making for a few bytes at launch.
     }
     ok
 }
@@ -127,6 +129,7 @@ pub fn allow_list() -> BTreeMap<String, bool> {
     files::read_json(&allow_path()).unwrap_or_default()
 }
 
+#[allow(dead_code)]
 pub fn set_allowed(host: &str, off: bool) {
     let mut list = allow_list();
     if off {

@@ -1,0 +1,62 @@
+{
+  "round": 5,
+  "target": 9.0,
+  "bar_met": false,
+  "evidence": "council/round-11 (real captures at the reference's size)",
+  "note": "Twenty facets re-scored after the control skin, the field's chip and pick, the panel filters and elevation, the shortcuts panel, and zero build warnings.",
+  "facets": [
+    {
+      "facet": "fidelity",
+      "score": 9.0,
+      "weight": 0.15,
+      "critic": "gemini-4-hydrogen"
+    },
+    {
+      "facet": "first impression",
+      "score": 8.0,
+      "weight": 0.0231,
+      "critic": "gemini-4-hydrogen"
+    },
+    {
+      "facet": "field",
+      "score": 8.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "panels",
+      "score": 7.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "dark mode",
+      "score": 7.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "code craft",
+      "score": 6.0,
+      "weight": 0.08
+    },
+    {
+      "facet": "keyboard",
+      "score": 4.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "memory",
+      "score": 6.0,
+      "weight": 0.1
+    },
+    {
+      "facet": "performance",
+      "score": 7.0,
+      "weight": 0.1
+    },
+    {
+      "facet": "documentation",
+      "score": 7.0,
+      "weight": 0.07
+    }
+  ],
+  "mean": 7.16
+}

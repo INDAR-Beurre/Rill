@@ -3,7 +3,7 @@
 use crate::layer::Layer;
 use crate::palette::Palette;
 use gtk::prelude::*;
-use webkit2gtk::{FindController, FindControllerExt, WebView, WebViewExt};
+use webkit2gtk::{FindControllerExt, WebView, WebViewExt};
 
 pub const BAR_WIDTH: i32 = 320;
 
@@ -62,7 +62,7 @@ impl FindBar {
             let entry_for_up = entry.clone();
             up.connect_clicked(move |_| {
                 if let Some(app) = crate::app::current() {
-                    app.find_query(&entry_for_up.text(), true);
+                    app.find_step(&entry_for_up.text(), false);
                 }
             });
         }
@@ -70,7 +70,7 @@ impl FindBar {
             let entry_for_down = entry.clone();
             down.connect_clicked(move |_| {
                 if let Some(app) = crate::app::current() {
-                    app.find_query(&entry_for_down.text(), true);
+                    app.find_step(&entry_for_down.text(), true);
                 }
             });
         }
@@ -126,7 +126,4 @@ impl FindBar {
         });
     }
 
-    pub fn controller_for(&self, view: &WebView) -> Option<FindController> {
-        view.find_controller()
-    }
 }

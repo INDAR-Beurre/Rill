@@ -126,6 +126,7 @@ impl Omnibox {
         let host = crate::app::current()
             .and_then(|app| app.state.borrow().active_tab().map(|tab| crate::shield::host_of(&tab.url)))
             .unwrap_or_default();
+        // The chip names where you are, whenever there is a where.
         if host.is_empty() {
             self.site.set_no_show_all(true);
             self.site.hide();
@@ -134,7 +135,10 @@ impl Omnibox {
             self.site.set_text(&host);
             self.site.show();
         }
-        self.entry.set_text("");
+        let current = crate::app::current()
+            .and_then(|app| app.state.borrow().active_tab().map(|tab| tab.url.clone()))
+            .unwrap_or_default();
+        self.entry.set_text(&current);
         if let Some(app) = crate::app::current() {
             self.set_offers(ui, &app, offers);
         }
@@ -157,7 +161,18 @@ impl Omnibox {
             return;
         }
         self.list.set_no_show_all(false);
+        let mut last_kind = String::new();
         for (index, offer) in offers.into_iter().enumerate() {
+            if offer.kind != last_kind {
+                last_kind = offer.kind.clone();
+                let head = gtk::Label::new(Some(&last_kind));
+                head.style_context().add_class("sghead");
+                head.set_xalign(0.0);
+                head.set_margin_start(12);
+                head.set_margin_top(6);
+                head.set_margin_bottom(2);
+                self.list.add(&head);
+            }
             let row = gtk::EventBox::new();
             row.style_context().add_class("sgrow");
             if index as i32 == picked {

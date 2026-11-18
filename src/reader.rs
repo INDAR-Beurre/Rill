@@ -1,9 +1,7 @@
 // Reading mode: the page's own words, set in the browser's type, with nothing
 // around them. Done in the page rather than beside it, so it costs no second
 // view and no third process.
-use crate::app::{App, AppRef};
-use javascriptcore::ValueExt;
-use webkit2gtk::WebViewExt;
+use crate::app::AppRef;
 
 const TOGGLE_ON: &str = include_str!("../assets/reader.js");
 
@@ -17,13 +15,9 @@ pub fn enter(app: &AppRef, view: &webkit2gtk::WebView) {
         serde_json::to_string(palette).unwrap_or_else(|_| "\"\"".into())
     );
     let weak = app.weak();
-    view.run_javascript(&script, None::<&gtk::gio::Cancellable>, move |result| {
-        let ok = result
-            .ok()
-            .and_then(|r| r.js_value())
-            .map(|value| value.to_str() != "false")
-            .unwrap_or(false);
-        if !ok {
+    crate::js::run(view, &script, move |result| {
+        let done = result.map(|value| value != "false").unwrap_or(false);
+        if !done {
             if let Some(app) = weak.upgrade() {
                 app.flash_error("Nothing to read on this page");
             }

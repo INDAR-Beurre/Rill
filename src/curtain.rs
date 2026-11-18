@@ -1,11 +1,9 @@
 // Hidden things: a per-site list of selectors, applied as a style sheet before
 // the page draws, and a picker that adds to it.
 use crate::app::{App, AppRef, TabId};
-use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::{
-    UserContentInjectedFrames, UserContentManagerExt, UserStyleLevel, UserStyleSheet, WebView,
-    WebViewExt,
+    UserContentInjectedFrames, UserContentManagerExt, UserStyleLevel, UserStyleSheet,
 };
 pub fn selectors(app: &App, host: &str) -> Vec<String> {
     app.state
@@ -74,7 +72,7 @@ pub fn apply_immediately(view: &webkit2gtk::WebView, app: &App, host: &str) {
         "(() => {{ let s = document.getElementById('__search_hidden'); if (!s) {{ s = document.createElement('style'); s.id = '__search_hidden'; (document.head || document.documentElement).appendChild(s); }} s.textContent = {}; }})();",
         serde_json::to_string(&css).unwrap_or_else(|_| "\"\"".into())
     );
-    view.run_javascript(&js, None::<&gtk::gio::Cancellable>, |_| {});
+    crate::js::run(view, &js, |_| {});
 }
 const PICK: &str = r#"
 (() => {
@@ -137,7 +135,7 @@ pub fn pick(_app: &App, view: &webkit2gtk::WebView, on: bool) {
     } else {
         "(() => { window.__searchHideOn = false; const st = document.getElementById('__search_hide_style'); if (st) st.remove(); })();".to_string()
     };
-    view.run_javascript(&js, None::<&gtk::gio::Cancellable>, |_| {});
+    crate::js::run(view, &js, |_| {});
 }
 /// A style sheet that hides what was hidden here, as the page begins.
 pub fn install(app: &AppRef, manager: &webkit2gtk::UserContentManager) {

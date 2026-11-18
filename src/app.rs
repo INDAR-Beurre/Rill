@@ -10,7 +10,7 @@ use crate::ui::{self, TabRow, Ui};
 use crate::web;
 use gtk::gdk::prelude::*;
 use gtk::prelude::*;
-use webkit2gtk::{FindControllerExt, WebInspectorExt, WebViewExt};
+use webkit2gtk::{FindControllerExt, UserContentManagerExt, WebInspectorExt, WebViewExt};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
@@ -25,13 +25,10 @@ thread_local! {
 }
 
 static HISTORY_PENDING: AtomicBool = AtomicBool::new(false);
+static SESSION_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn current() -> Option<AppRef> {
     CURRENT.with(|c| c.borrow().clone())
-}
-
-pub fn weak_app() -> Weak<App> {
-    CURRENT.with(|c| c.borrow().as_ref().map(Rc::downgrade).unwrap_or_default())
 }
 
 pub struct Tab {
@@ -277,6 +274,7 @@ impl App {
         let palette = Palette::for_look(look, self.prefs.borrow().desktop_dark);
         *self.palette.borrow_mut() = palette;
         self.apply_style();
+        self.apply_page_tone();
         // A page already open keeps the background it was made with unless it
         // is told the appearance changed.
         let page = if palette.is_dark() { (0.043, 0.043, 0.043) } else { (1.0, 1.0, 1.0) };
@@ -344,7 +342,7 @@ impl App {
             view.grab_focus();
         }
         self.render();
-        self.save_session();
+        self.schedule_session();
     }
 
     pub fn close_tab(&self, id: TabId) {
@@ -425,6 +423,12 @@ impl App {
             )
         };
         if has_error {
+            let active = self.state.borrow().active;
+            if let Some(error) = self.state.borrow().errors.get(&active) {
+                self.ui.error_reason.set_text(&error.reason);
+                self.ui.error_address.set_text(&error.url);
+            }
+            self.ui.errorpage.show_all();
             self.ui.stack.set_visible_child_name("error");
         } else if blank {
             self.ui.stack.set_visible_child_name("blank");
@@ -762,11 +766,6 @@ impl App {
         }
     }
 
-    pub fn stop(&self) {
-        if let Some(view) = self.view(self.active_id()) {
-            view.stop_loading();
-        }
-    }
 
     pub fn toggle_pin(&self, id: TabId) {
         if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
@@ -891,6 +890,8 @@ impl App {
         let entry = self.omni.entry.clone();
         glib::idle_add_local(move || {
             entry.grab_focus();
+            // The address comes up selected, so typing replaces it and Return
+            // goes where the field already says.
             entry.select_region(0, -1);
             glib::ControlFlow::Break
         });
@@ -962,6 +963,35 @@ impl App {
         }
     }
 
+    /// When dark pages are asked for, a site that paints white gets the
+    /// browser's ground instead, and its text a colour that can be read on it.
+    pub fn apply_page_tone(&self) {
+        let on = self.prefs.borrow().darken_pages && self.dark();
+        let sheet = if on {
+            "html { background: #0b0b0b !important; }\nbody { background-color: transparent !important; }\n:root { color-scheme: dark; }"
+        } else {
+            ""
+        };
+        let ids: Vec<TabId> = self.state.borrow().tabs.iter().map(|tab| tab.id).collect();
+        for id in ids {
+            if let Some(view) = self.view(id) {
+                if let Some(manager) = view.user_content_manager() {
+                    manager.remove_all_style_sheets();
+                    if !sheet.is_empty() {
+                        let style = webkit2gtk::UserStyleSheet::new(
+                            sheet,
+                            webkit2gtk::UserContentInjectedFrames::AllFrames,
+                            webkit2gtk::UserStyleLevel::User,
+                            &[],
+                            &[],
+                        );
+                        manager.add_style_sheet(&style);
+                    }
+                }
+            }
+        }
+    }
+
     /// Where the field, the panels and find stand in a window of this size.
     pub fn layout_layers(&self, width: i32, height: i32) {
         // Setting a size request from inside an allocation pass asks for
@@ -994,6 +1024,16 @@ impl App {
         self.panels.borrow().layout(width, height);
         self.find.borrow().holder.set_size_request(width, height);
         self.find.borrow().layout(width);
+    }
+
+    /// A search inside a panel re-opens it with the filter applied.
+    pub fn filter_panel(&self, kind: PanelKind, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(app) = current() {
+            self.panels.borrow_mut().set_filter(&app, kind, text);
+        }
     }
 
     pub fn toggle_panel(&self, kind: PanelKind) {
@@ -1031,6 +1071,21 @@ impl App {
                 find.attach(&view);
             }
             find.focus();
+        }
+    }
+
+    /// One step through the matches, in the direction asked for.
+    pub fn find_step(&self, text: &str, forward: bool) {
+        let Some(view) = self.view(self.active_id()) else { return };
+        let Some(controller) = view.find_controller() else { return };
+        if text.is_empty() {
+            controller.search("", 0, 0);
+            return;
+        }
+        if forward {
+            controller.search_next();
+        } else {
+            controller.search_previous();
         }
     }
 
@@ -1147,27 +1202,24 @@ impl App {
         }
     }
 
-    pub fn block_site_toggle(&self) {
-        let host = self
-            .state
-            .borrow()
-            .active_tab()
-            .map(|t| crate::shield::host_of(&t.url))
-            .unwrap_or_default();
-        if host.is_empty() {
-            return;
-        }
-        let off = !crate::shield::is_allowed(&host);
-        crate::shield::set_allowed(&host, off);
-        self.reload();
-        self.flash_toast(if off {
-            "The shield is off here, until you say otherwise"
-        } else {
-            "The shield is on here again"
-        });
-    }
 
     // ---- session --------------------------------------------------------
+
+    /// Session writes are debounced: a tab switch should cost a repaint, not a
+    /// JSON file written to disk on the way.
+    pub fn schedule_session(&self) {
+        if SESSION_PENDING.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let weak = self.weak();
+        glib::timeout_add_seconds_local(2, move || {
+            SESSION_PENDING.store(false, Ordering::Relaxed);
+            if let Some(app) = weak.upgrade() {
+                app.save_session();
+            }
+            glib::ControlFlow::Break
+        });
+    }
 
     pub fn save_session(&self) {
         if !self.prefs.borrow().restore_session {
@@ -1229,6 +1281,7 @@ impl App {
             ("History", Box::new(|app: &App| app.toggle_panel(PanelKind::History))),
             ("Downloads", Box::new(|app: &App| app.toggle_panel(PanelKind::Downloads))),
             ("Settings", Box::new(|app: &App| app.toggle_panel(PanelKind::Settings))),
+            ("Shortcuts", Box::new(|app: &App| app.toggle_panel(PanelKind::Shortcuts))),
         ];
         for (label, action) in items {
             let item = gtk::MenuItem::with_label(label);
@@ -1396,7 +1449,7 @@ impl App {
             self.ui.shell.translate_coordinates(&self.ui.window, 0, 0),
             self.ui.side.allocated_width()
         );
-        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)
             .map_err(|error| error.to_string())?;
         {
             let context = cairo::Context::new(&surface).map_err(|error| error.to_string())?;

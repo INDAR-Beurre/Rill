@@ -4,7 +4,7 @@
 // Nothing here knows what a tab is; it makes widgets, and the browser keeps
 // them true.
 use crate::icons::{self, Icon};
-use crate::palette::{Palette, Rgb};
+use crate::palette::Palette;
 use gtk::prelude::*;
 
 pub struct Ui {
@@ -23,23 +23,14 @@ pub struct Ui {
     pub pins: gtk::Grid,
     pub pins_holder: gtk::Box,
     pub rows: gtk::Box,
-    pub rows_scroll: gtk::ScrolledWindow,
-    pub footer: gtk::Box,
     pub menu: gtk::Button,
-    pub card: gtk::Box,
     pub stack: gtk::Stack,
-    pub blank: gtk::Box,
     pub blank_holder: gtk::EventBox,
     pub errorpage: gtk::Box,
     pub error_title: gtk::Label,
     pub error_reason: gtk::Label,
     pub error_address: gtk::Label,
     pub error_retry: gtk::Button,
-    pub palette: Palette,
-}
-
-pub struct Chrome {
-    pub row_height: i32,
 }
 
 fn widget_box(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
@@ -53,15 +44,6 @@ pub fn pack<B: IsA<gtk::Box>, C: IsA<gtk::Widget>>(container: &B, child: &C, exp
     container.pack_start(child, expand, true, 0);
 }
 
-/// The column's edge: the handle between the tabs and the page.
-pub fn set_side_width(paned: &gtk::Paned, width: i32) {
-    paned.set_position(width);
-}
-
-/// Add a child that keeps exactly the width it asks for.
-pub fn pack_fixed<B: IsA<gtk::Box>, C: IsA<gtk::Widget>>(container: &B, child: &C) {
-    container.pack_start(child, false, false, 0);
-}
 
 pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs, composited: bool) -> Ui {
     let overlay = gtk::Overlay::new();
@@ -115,7 +97,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     pins_holder.set_margin_end(10);
     pins_holder.set_margin_top(24);
     let pins = gtk::Grid::new();
-    pins.set_column_spacing(4);
+    pins.set_column_spacing(3);
     pins.set_row_spacing(4);
     pins.set_halign(gtk::Align::Start);
     pack(&pins_holder, &pins, false);
@@ -169,10 +151,16 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     blank.set_halign(gtk::Align::Center);
     let blank_title = gtk::Label::new(Some("Search"));
     blank_title.style_context().add_class("blanktitle");
-    let blank_hint = gtk::Label::new(Some("Type an address, or a few words.  Ctrl L for the field."));
+    let blank_hint_row = widget_box(gtk::Orientation::Horizontal, 6);
+    blank_hint_row.set_halign(gtk::Align::Center);
+    let blank_hint = gtk::Label::new(Some("Type an address, or a few words."));
     blank_hint.style_context().add_class("blankhint");
+    let keycap = gtk::Label::new(Some("Ctrl L"));
+    keycap.style_context().add_class("keyhint");
+    pack(&blank_hint_row, &blank_hint, false);
+    pack(&blank_hint_row, &keycap, false);
     pack(&blank, &blank_title, false);
-    pack(&blank, &blank_hint, false);
+    pack(&blank, &blank_hint_row, false);
     blank_holder.add(&blank);
     stack.add_named(&blank_holder, "blank");
 
@@ -221,19 +209,14 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
         pins,
         pins_holder,
         rows,
-        rows_scroll,
-        footer,
         menu,
-        card,
         stack,
-        blank,
         blank_holder,
         errorpage,
         error_title,
         error_reason,
         error_address,
         error_retry,
-        palette,
     };
     let _ = composited;
     ui
@@ -256,9 +239,7 @@ pub struct TabRow {
     pub event: gtk::EventBox,
     pub title: gtk::Label,
     pub letter: gtk::Label,
-    pub icon: gtk::Box,
     pub close: gtk::Button,
-    pub box_: gtk::Box,
 }
 
 pub fn tab_row(title: &str, palette: Palette, row_height: i32, letter: Option<char>, live: bool) -> TabRow {
@@ -303,6 +284,13 @@ pub fn tab_row(title: &str, palette: Palette, row_height: i32, letter: Option<ch
 
     let label = gtk::Label::new(Some(title));
     label.style_context().add_class("rowtitle");
+    if live {
+        // GTK's CSS wants keywords, so the weight that sits between normal and
+        // bold is set as a Pango attribute instead.
+        let attrs = gtk::pango::AttrList::new();
+        attrs.insert(gtk::pango::AttrInt::new_weight(gtk::pango::Weight::Semibold));
+        label.set_attributes(Some(&attrs));
+    }
     label.set_xalign(0.0);
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     label.set_hexpand(true);
@@ -321,7 +309,7 @@ pub fn tab_row(title: &str, palette: Palette, row_height: i32, letter: Option<ch
     pack(&hbox, &close, false);
 
     event.add(&hbox);
-    TabRow { event, title: label, letter: letter_label, icon, close, box_: hbox }
+    TabRow { event, title: label, letter: letter_label, close }
 }
 
 /// A pinned page: one square, one letter, or its site's mark.
@@ -336,7 +324,7 @@ pub fn pin_tile(letter: char, palette: Palette, live: bool) -> PinWidget {
     if live {
         event.style_context().add_class("live");
     }
-    event.set_size_request(36, 36);
+    event.set_size_request(35, 35);
     let label = gtk::Label::new(Some(&letter.to_uppercase().to_string()));
     label.style_context().add_class("pinletter");
     label.set_halign(gtk::Align::Center);
@@ -369,16 +357,4 @@ pub fn scrim(palette: &Palette) -> gtk::DrawingArea {
     area
 }
 
-pub fn separator(palette: Palette) -> gtk::Box {
-    let line = widget_box(gtk::Orientation::Horizontal, 0);
-    line.style_context().add_class("hairline");
-    line.set_size_request(-1, 1);
-    line.set_margin_top(6);
-    line.set_margin_bottom(6);
-    let _ = palette;
-    line
-}
 
-pub fn ink(palette: Palette) -> Rgb {
-    palette.ink
-}

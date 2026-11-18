@@ -28,6 +28,7 @@ impl PanelKind {
 }
 
 pub struct Panels {
+    pub wanted_height: std::cell::Cell<i32>,
     pub holder: gtk::Fixed,
     layer: crate::layer::Layer,
     pub scrim: gtk::DrawingArea,
@@ -82,6 +83,7 @@ impl Panels {
         layer.add(&card);
 
         let panels = Panels {
+            wanted_height: std::cell::Cell::new(420),
             holder,
             layer,
             scrim,
@@ -121,6 +123,11 @@ impl Panels {
             PanelKind::Downloads => self.build_downloads(app),
             PanelKind::Settings => self.build_settings(app),
         }
+        // Measured here, not during an allocation pass: asking a widget for
+        // its preferred size while GTK is allocating is how a UI wedges.
+        let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
+        let wanted = self.body.preferred_height_for_width(card_width - 32).0 + 132;
+        self.wanted_height.set(wanted.clamp(300, 640));
         self.layer.show();
         self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
     }
@@ -144,8 +151,7 @@ impl Panels {
         let card_width = 680.min(width - 48);
         // The card is as tall as what it holds, within reason: a panel with
         // one line in it should not be a window with one line in it.
-        let wanted = self.body.preferred_height_for_width(card_width - 32).0 + 132;
-        let card_height = wanted.clamp(300, 640).min(height - 80);
+        let card_height = self.wanted_height.get().min(height - 80).max(240);
         self.layer.place(
             &self.card,
             (width - card_width) / 2,
@@ -315,7 +321,7 @@ impl Panels {
             let button = gtk::Button::with_label(look.title());
             button.style_context().add_class("act");
             if look == prefs.appearance {
-                button.style_context().add_class("on");
+                button.style_context().add_class("chosen");
             }
             let app_weak = app.weak();
             let chosen = look.clone();
@@ -342,10 +348,19 @@ impl Panels {
             app.reload();
         }));
 
-        list.add(&self.setting_switch(app, "Let tabs sleep", "Tabs you have not looked at let go of their page after half an hour.", prefs.memory_saver, |app, on| {
-            app.prefs.borrow_mut().memory_saver = on;
-            app.prefs.borrow().save();
-        }));
+        list.add(&self.setting_switch(
+            app,
+            "Let tabs sleep",
+            &format!(
+                "A tab you have not looked at for {} minutes lets go of its page, and reloads when you come back.",
+                prefs.sleep_minutes
+            ),
+            prefs.memory_saver,
+            |app, on| {
+                app.prefs.borrow_mut().memory_saver = on;
+                app.prefs.borrow().save();
+            },
+        ));
 
         list.add(&self.setting_switch(app, "Roomy tabs", "Taller rows, as the Mac build offers.", prefs.roomy_tabs, |app, on| {
             app.prefs.borrow_mut().roomy_tabs = on;
@@ -444,7 +459,7 @@ impl Panels {
         sub.set_line_wrap(true);
         texts.add(&name);
         texts.add(&sub);
-        row.add(&texts);
+        crate::ui::pack(&row, &texts, true);
         let switch = gtk::Switch::new();
         switch.set_active(value);
         switch.set_valign(gtk::Align::Center);
@@ -455,7 +470,7 @@ impl Panels {
                 changed(&app, switch.is_active());
             }
         });
-        row.add(&switch);
+        crate::ui::pack(&row, &switch, false);
         row
     }
 
@@ -478,19 +493,24 @@ impl Panels {
     ) -> gtk::EventBox {
         let row = gtk::EventBox::new();
         row.style_context().add_class("ptrow");
+        row.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         hbox.set_margin_top(7);
         hbox.set_margin_bottom(7);
         hbox.set_margin_start(6);
         hbox.set_margin_end(6);
-        let letter = gtk::Label::new(Some(&title.chars().next().unwrap_or('•').to_uppercase().to_string()));
+
+        let letter = gtk::Label::new(Some(
+            &title.chars().next().unwrap_or('\u{2022}').to_uppercase().to_string(),
+        ));
         letter.style_context().add_class("tileletter");
         let tile = gtk::EventBox::new();
         tile.style_context().add_class("tile");
         tile.set_size_request(18, 18);
         tile.set_valign(gtk::Align::Center);
         tile.add(&letter);
-        hbox.add(&tile);
+        crate::ui::pack(&hbox, &tile, false);
+
         let texts = gtk::Box::new(gtk::Orientation::Vertical, 1);
         texts.set_hexpand(true);
         let name = gtk::Label::new(Some(title));
@@ -503,25 +523,34 @@ impl Panels {
         url.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         texts.add(&name);
         texts.add(&url);
-        hbox.add(&texts);
+        crate::ui::pack(&hbox, &texts, true);
+
         let button = gtk::Button::with_label(action);
         button.style_context().add_class("act");
         button.set_valign(gtk::Align::Center);
-        let app_weak = app.weak();
-        let run = std::rc::Rc::new(run);
-        button.connect_clicked(move |_| {
-            if let Some(app) = app_weak.upgrade() {
-                run(&app);
-            }
-        });
-        hbox.add(&button);
+        crate::ui::pack(&hbox, &button, false);
+
         row.add(&hbox);
-        let app_weak = app.weak();
-        let run = std::rc::Rc::new(()); // the row itself only highlights
-        row.connect_button_press_event(move |_, _| {
-            let _ = (&app_weak, &run);
-            crate::gtkx::inh(false)
-        });
+
+        // The whole row runs the row's action: a row that lights up under the
+        // cursor and ignores the click is worse than a plain row.
+        {
+            let app_weak = app.weak();
+            let run = std::rc::Rc::new(run);
+            let run_row = run.clone();
+            row.connect_button_press_event(move |_, _| {
+                if let Some(app) = app_weak.upgrade() {
+                    run_row(&app);
+                }
+                crate::gtkx::inh(true)
+            });
+            let app_weak = app.weak();
+            button.connect_clicked(move |_| {
+                if let Some(app) = app_weak.upgrade() {
+                    run(&app);
+                }
+            });
+        }
         row
     }
 }

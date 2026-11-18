@@ -97,11 +97,14 @@ class Bench:
 
     def wait_loaded(self, tab_id=None, timeout=25.0):
         def ready(probe):
+            if probe.get("visibleChild") == "error":
+                return True
             if tab_id is None:
                 return not probe.get("loading", False) and bool(probe.get("url"))
             for tab in probe.get("tabs", []):
                 if tab.get("id") == tab_id:
                     return not tab.get("loading", False) and bool(tab.get("url"))
+            return False
             return False
 
         return self.wait_for(ready, timeout=timeout)

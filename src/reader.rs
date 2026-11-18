@@ -31,5 +31,3 @@ pub fn enter(app: &AppRef, view: &webkit2gtk::WebView) {
     });
 }
 
-#[allow(dead_code)]
-pub fn unused(_: &App) {}

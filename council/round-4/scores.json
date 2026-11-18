@@ -1,0 +1,41 @@
+{
+  "round": 4,
+  "target": 9.0,
+  "bar_met": false,
+  "evidence": "council/round-10 (real captures at the reference's own size, flattened)",
+  "note": "Six facets re-scored after the flatten fix, the one-divider fix, the reference geometry, and the control skin. Fidelity reached 8; the field, panels and code are the remaining gap.",
+  "facets": [
+    {
+      "facet": "fidelity",
+      "score": 8.0,
+      "weight": 0.15,
+      "critic": "gemini-4-hydrogen"
+    },
+    {
+      "facet": "typography",
+      "score": 6.5,
+      "weight": 0.0231
+    },
+    {
+      "facet": "dark mode",
+      "score": 5.5,
+      "weight": 0.0231
+    },
+    {
+      "facet": "panels",
+      "score": 5.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "field",
+      "score": 4.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "code craft",
+      "score": 3.5,
+      "weight": 0.08
+    }
+  ],
+  "mean": 6.1
+}

@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import statistics
 import subprocess
 import sys
@@ -34,7 +35,7 @@ from bench import Bench, BenchError  # noqa: E402
 
 BINARY = ROOT / "target/release/search"
 REPORT = ROOT / "build/stress-report.json"
-PORT = 8099
+PORT = 0  # chosen at start: a stale server on a fixed port has fooled this before
 
 
 # -- process and memory ----------------------------------------------------
@@ -103,21 +104,26 @@ class Run:
         self.browser = None
         self.bench = None
         self.server = None
+        self.port = 0
         self.tmp = Path(tempfile.mkdtemp(prefix="search-stress-"))
         self.rounds = 6 if args.quick else 20
 
     # -- lifecycle ------------------------------------------------------
     def start_server(self):
+        # Bind port 0 so the fixture server always picks a free port: an old
+        # server left running on a fixed port would be tested instead of this
+        # one, and it would be the old one's fault that everything timed out.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = probe.getsockname()[1]
         self.server = subprocess.Popen(
-            [sys.executable, str(HERE / "fixtures.py"), str(PORT)],
+            [sys.executable, str(HERE / "fixtures.py"), str(self.port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        for _ in range(50):
+        for _ in range(80):
             try:
-                import socket as sock
-
-                with sock.create_connection(("127.0.0.1", PORT), timeout=0.2):
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
                     return
             except OSError:
                 time.sleep(0.1)
@@ -198,7 +204,7 @@ class Run:
         return run
 
     def url(self, path):
-        return f"http://127.0.0.1:{PORT}{path}"
+        return f"http://127.0.0.1:{self.port}{path}"
 
     def ram(self):
         return memory(self.browser.pid)

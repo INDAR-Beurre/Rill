@@ -11,11 +11,12 @@ is a Linux build of the same idea, written from scratch in Rust against the web
 engine your desktop already ships — WebKitGTK — so there is no second copy of
 Chromium to download, update and keep in memory.
 
-* about 750 KB of binary
-* one process for the frame, one for the page: ~100 MB of the browser's own
-  memory with a tab open, measured, not estimated
-* starts in under a second
-* every page runs in WebKit's own process, as in Safari
+* about 850 KB of binary
+* three processes with a tab open, as in Safari: the frame, a page, a network.
+  115 MB of that is the browser's own memory and 211 MB is resident in total,
+  the difference being the shared GTK and WebKit libraries the desktop already
+  has. Both numbers are measured by `tools/stress.py`, not estimated
+* every page runs in WebKit's own process
 
 ## What it does
 
@@ -74,7 +75,13 @@ python3 tools/stress.py              # the whole stress suite, ~4 minutes
 pages that never finish, pages that eat memory, pages that redirect in a loop,
 opens and closes every panel, hides things, uses find and reading mode, resizes
 the window, and watches the memory the whole time. It writes
-`build/stress-report.json` and exits non-zero if anything fails.
+`build/stress-report.json` and exits non-zero if anything fails. It currently
+reports 38 of 38 checks passing.
+
+It has already earned its keep: it caught a panel that wedged the whole UI
+because the card asked for a preferred size inside an allocation pass, and a
+redirect chain that hung because the curtain was synced from inside a policy
+decision.
 
 `tools/bench.py` speaks to a running browser over a Unix socket, one command per
 line. It is the same idea as the Mac build's `./bench`.

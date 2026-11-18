@@ -6,33 +6,76 @@ fn rgba(c: crate::palette::Rgb, a: f32) -> String {
     format!("rgba({},{},{},{:.3})", c.0, c.1, c.2, a)
 }
 
-pub fn build(p: &Palette, composited: bool, row_height: i32) -> String {
-    let radius = if composited { 12 } else { 0 };
-    let shell_bg = if composited { "transparent".to_string() } else { p.card.hex() };
+pub fn build(p: &Palette, _composited: bool, row_height: i32) -> String {
+    let radius = 12;
     let ground = p.card.hex();
     format!(
         r#"
-window {{ background-color: {shell_bg}; }}
+window {{ background-color: {ground}; }}
 window.csd, .csd {{ padding: 0; margin: 0; border-width: 0; }}
+headerbar.nobar {{ background-color: {ground}; }}
 headerbar.nobar, headerbar {{ min-height: 0; padding: 0; margin: 0; border: none; background: none; box-shadow: none; }}
 headerbar.nobar button, headerbar button {{ min-height: 0; padding: 0; margin: 0; }}
 decoration {{ box-shadow: none; border-width: 0; margin: 0; padding: 0; background: none; border-radius: {radius}px; }}
 .csd {{ box-shadow: none; }}
 headerbar.nobar > box {{ min-height: 0; padding: 0; margin: 0; border: none; }}
 .shell {{ background-color: {ground}; border-radius: {radius}px; }}
-.shell > separator {{ background-color: {hairline}; min-width: 1px; min-height: 1px; }}
+.shell > separator, paned > separator {{ background-color: {divider}; background-image: none; min-width: 1px; min-height: 1px; border: none; }}
+.shell > separator:hover, paned > separator:hover {{ background-color: {hairline}; }}
 
-.side {{ background-color: {sidebg}; border-right: 1px solid {hairline}; }}
+.side {{ background-color: {sidebg}; }}
 .side.noline {{ border-right: none; }}
 
 .lights {{ }}
-.light {{ min-width: 14px; min-height: 14px; border-radius: 14px; background-color: {hairline}; }}
+.light {{ min-width: 15px; min-height: 15px; border-radius: 15px; background-color: {hairline}; }}
 .light.red {{ background-color: {red}; }}
 .light.amber {{ background-color: {amber}; }}
 .light.green {{ background-color: {green}; }}
 window.unfocused .light.red, window.unfocused .light.amber, window.unfocused .light.green {{ background-color: {resting}; }}
 .lightlabel {{ color: {resting_ink}; font-family: {font}; font-size: 9px; font-weight: bold; }}
 
+/* GTK brings its own skin for every control. The browser has one, so the
+   stock skin is taken off first and only what is wanted is put back. */
+button, .panel button, .blank button, combobox button, entry, spinbutton {{
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+}}
+button {{
+  background-color: transparent;
+  border: none;
+  color: {ink};
+  padding: 2px 6px;
+  border-radius: 6px;
+  min-height: 0;
+}}
+button:hover {{ background-color: {hover}; }}
+button:active {{ background-color: {wash}; }}
+button.act {{
+  background-color: {wash};
+  border: 1px solid {fieldborder};
+  border-radius: 7px;
+  padding: 5px 11px;
+}}
+button.act:hover {{ background-color: {hairline}; }}
+button.act label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+.panel button.chosen, button.chosen {{ background-color: {ink}; border-color: {ink}; }}
+button.chosen label {{ color: {ground}; font-weight: bold; }}
+combobox button {{
+  background-color: {wash};
+  border: 1px solid {fieldborder};
+  border-radius: 7px;
+  padding: 4px 10px;
+  color: {ink};
+}}
+combobox button:hover {{ background-color: {hairline}; }}
+combobox button label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+combobox arrow {{ color: {muted}; min-width: 10px; min-height: 10px; }}
+menu {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 4px; }}
+menuitem {{ border-radius: 5px; padding: 4px 8px; }}
+menuitem:hover {{ background-color: {hover}; }}
+menuitem label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+entry {{ background-image: none; box-shadow: none; border: none; }}
 button.mark {{ background: none; background-image: none; border: none; box-shadow: none; padding: 4px; border-radius: 6px; min-width: 0; min-height: 0; }}
 button.mark:hover {{ background-color: {hover}; }}
 button.mark:active {{ background-color: {wash}; }}
@@ -44,7 +87,7 @@ flowboxchild {{ background-color: transparent; padding: 0; }}
 .pin {{ border-radius: 9px; background-color: {tile}; }}
 .pin.live {{ background-color: {pinlive}; }}
 .pinletter {{ font-family: {font}; font-size: 13px; font-weight: normal; color: {pinfg}; }}
-.pin:hover {{ background-color: {pinlive}; }}
+.pin:hover {{ background-color: {sidehover}; }}
 
 .row {{ border-radius: 7px; background-color: transparent; min-height: {row_height}px; }}
 button.close, button.loupe {{ background: none; border: none; box-shadow: none; padding: 1px; min-width: 0; min-height: 0; opacity: 0; }}
@@ -53,13 +96,13 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .row:hover {{ background-color: {hover}; }}
 .row.live {{ background-color: {wash}; }}
 .rowtitle {{ font-family: {font}; font-size: 13px; font-weight: normal; color: {rowfg}; }}
-.row.live .rowtitle {{ color: {ink}; font-weight: normal; }}
+.row.live .rowtitle {{ color: {liveink}; font-weight: bold; }}
 .tile {{ border-radius: 4px; background-color: {tilebg}; }}
 .tileletter {{ font-family: {font}; font-size: 11px; font-weight: bold; color: {tilefg}; }}
 .panel switch, .panel switch slider {{ min-width: 34px; min-height: 20px; border-radius: 10px; }}
 .panel switch {{ background-color: {switchoff}; border: none; }}
 .panel switch:checked {{ background-color: {ink}; }}
-.panel switch slider {{ background-color: {fieldbg}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.18); }}
+.panel switch slider {{ background-color: {knob}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.28); }}
 .panel switch:checked slider {{ background-color: {fieldbg}; }}
 .rowlivepin {{ color: {muted}; }}
 
@@ -75,7 +118,11 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .blank {{ background-color: {ground}; }}
 .blanktitle {{ font-family: {font}; font-size: 15px; font-weight: bold; color: {muted}; letter-spacing: -0.01em; }}
 .blankhint {{ font-family: {font}; font-size: 12px; color: {blankhint}; }}
-.empty {{ font-family: {font}; font-size: 13px; color: {emptyfg}; }}
+.erraddress {{ font-family: {mono}; font-size: 11px; color: {emptyfg}; margin-top: 4px; }}
+.blank button.act {{ background-color: {wash}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 6px 14px; }}
+.blank button.act:hover {{ background-color: {hairline}; }}
+.blank button.act label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+
 
 .scrim {{ background-color: {scrim}; }}
 .omni {{ background-color: {fieldbg}; border-radius: 12px; border: 1px solid {fieldborder}; box-shadow: 0 8px 24px rgba(0,0,0,0.10); }}
@@ -94,7 +141,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .suggest .sgurl {{ font-family: {font}; font-size: 11px; color: {muted}; }}
 .suggest .sgkind {{ font-family: {font}; font-size: 11px; color: {faint}; }}
 
-.panel {{ background-color: {fieldbg}; border-radius: 12px; border: 1px solid {fieldborder}; }}
+.panel {{ background-color: {fieldbg}; border-radius: 12px; border: 1px solid {fieldborder}; box-shadow: 0 18px 48px rgba(0,0,0,0.16); }}
 .panel .head {{ font-family: {font}; font-size: 15px; font-weight: bold; color: {ink}; }}
 .panel .sub {{ font-family: {font}; font-size: 11px; color: {muted}; }}
 .panel entry {{ background-color: {wash}; border-radius: 7px; border: 1px solid {fieldborder}; padding: 6px 10px; }}
@@ -103,7 +150,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel row:hover {{ background-color: {hover}; }}
 .panel .ptitle {{ font-family: {font}; font-size: 13px; color: {ink}; }}
 .panel .purl {{ font-family: {font}; font-size: 11px; color: {muted}; }}
-.panel button.tab {{ background: none; border: none; padding: 5px 10px; border-radius: 6px; }}
+.panel button.tab {{ background: none; background-image: none; box-shadow: none; border: none; padding: 5px 10px; border-radius: 6px; }}
 .panel button.tab label {{ font-family: {font}; font-size: 12px; color: {muted}; }}
 .panel button.tab:checked {{ background-color: {wash}; }}
 .panel button.tab:checked label {{ color: {ink}; font-weight: bold; }}
@@ -132,7 +179,6 @@ scrollbar trough {{ background: transparent; }}
 .mono {{ font-family: {mono}; }}
 .tooltip {{ background-color: {tooltipbg}; }}
 "#,
-        shell_bg = shell_bg,
         ground = ground,
         radius = radius,
         hairline = p.hairline.hex(),
@@ -146,17 +192,21 @@ scrollbar trough {{ background: transparent; }}
         tile = p.side_tile.hex(),
         pinlive = p.side_pin_live.hex(),
         pinfg = p.muted.hex(),
-        rowfg = if p.is_dark() { p.ink.mix(p.muted, 0.35).hex() } else { "#5E5E5E".to_string() },
+        rowfg = if p.is_dark() { p.ink.mix(p.muted, 0.35).hex() } else { "#7C7C7C".to_string() },
+        liveink = if p.is_dark() { p.ink.hex() } else { "#0E0E0E".to_string() },
         ink = p.ink.hex(),
         tilebg = if p.is_dark() { p.side_tile.hex() } else { "#F1F1F1".to_string() },
         tilefg = if p.is_dark() { p.muted.hex() } else { "#7C7C7C".to_string() },
         sidebg = p.side_bg().hex(),
+        sidehover = p.side_hover.hex(),
+        divider = if p.is_dark() { "#242424".to_string() } else { "#ECECEC".to_string() },
         switchoff = if p.is_dark() { "#2C2C2C".to_string() } else { "#DCDCDA".to_string() },
+        knob = if p.is_dark() { "#EDEDED".to_string() } else { "#FFFFFF".to_string() },
         emptyfg = if p.is_dark() { "#9A9A9A".to_string() } else { "#8A8A8A".to_string() },
         blankhint = if p.is_dark() { "#6E6E6E".to_string() } else { "#9E9E9E".to_string() },
         muted = p.muted.hex(),
         faint = if p.is_dark() { p.faint.hex() } else { "#ABABA9".to_string() },
-        scrim = if p.is_dark() { rgba(p.ground, 0.62) } else { rgba(p.card, 0.74) },
+        scrim = if p.is_dark() { rgba(crate::palette::Rgb(0x00, 0x00, 0x00), 0.80) } else { rgba(p.card, 0.74) },
         fieldbg = if p.is_dark() { "#1A1A1A".to_string() } else { "#FFFFFF".to_string() },
         fieldborder = if p.is_dark() { "#2A2A2A".to_string() } else { "#E6E6E4".to_string() },
         scroll = if p.is_dark() { "#3A3A3A".to_string() } else { "#D6D6D4".to_string() },

@@ -55,7 +55,7 @@ APP=$!
 trap 'kill $APP 2>/dev/null || true; [[ -n "${FIXTURES:-}" ]] && kill $FIXTURES 2>/dev/null || true' EXIT
 
 python3 - "$ROOT" "$OUT" "$PORT" <<'PY'
-import json, subprocess, sys, time, pathlib
+import json, os, subprocess, sys, time, pathlib
 
 root, out, port = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 sys.path.insert(0, str(root / "tools"))
@@ -75,14 +75,56 @@ wait_bench.ping = bench.must("ping")
 
 manifest = []
 
+def real_shot(path):
+    """A picture of the window as the desktop draws it, when there is a desktop."""
+    bench.command("activate")
+    time.sleep(0.25)
+    result = subprocess.run(
+        ["spectacle", "-b", "-n", "-a", "-o", str(path)],
+        capture_output=True,
+    )
+    if result.returncode != 0 or not path.exists():
+        return False
+    # A window capture carries the window's alpha. Lay it on the ground the
+    # browser paints, so a transparent edge is not read as a black border.
+    background = "0x0b0b0b" if os.environ.get("SHOT_DARK") == "1" else "0xffffff"
+    size = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", str(path)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if "x" not in size:
+        return False
+    flattened = path.with_suffix(".flat.png")
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c={background}:s={size}:d=1",
+            "-i", str(path),
+            "-filter_complex", "[0:v][1:v]overlay=format=auto:shortest=1",
+            "-frames:v", "1", str(flattened),
+        ],
+        capture_output=True,
+    )
+    if flattened.exists() and flattened.stat().st_size > 4000:
+        flattened.replace(path)
+    return path.exists() and path.stat().st_size > 4000
+
+
 def shot(name, note=""):
     # States that are *about* something being open must not be settled first:
     # settling puts away the very panel or field the shot is evidence for.
     if not name.startswith(("04", "05", "06", "07")):
         settle()
     path = out / f"{name}.png"
-    answer = bench.command(f"shot {path}")
-    ok = answer.get("ok", False)
+    if os.environ.get("SEARCH_SHOTS", "real") == "real":
+        ok = real_shot(path)
+        if not ok:
+            answer = bench.command(f"shot {path}")
+            ok = answer.get("ok", False)
+    else:
+        answer = bench.command(f"shot {path}")
+        ok = answer.get("ok", False)
     manifest.append({"name": name, "path": str(path), "ok": ok, "note": note})
     print(("  ok   " if ok else "  FAIL ") + name + (" — " + note if note else ""))
     return ok
@@ -143,6 +185,15 @@ bench.wait_loaded(timeout=25)
 bench.must("key omni")
 time.sleep(0.4)
 shot("04-omni", "the field with suggestions")
+bench.must("escape")
+
+# 4b. the field with a row picked, the way Up and Down leave it
+bench.must("key omni")
+time.sleep(0.3)
+bench.must("key down")
+bench.must("key down")
+time.sleep(0.3)
+shot("04b-omni-picked", "a suggestion picked by keyboard")
 bench.must("escape")
 
 # 5. the panels

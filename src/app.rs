@@ -43,6 +43,7 @@ pub struct Tab {
     pub loading: bool,
     pub can_back: bool,
     pub can_forward: bool,
+    pub failed: bool,
     pub asleep: bool,
     pub row: Option<TabRow>,
     pub pin: Option<ui::PinWidget>,
@@ -54,7 +55,9 @@ impl Tab {
         if let Some(first) = self.title.chars().find(|c| c.is_alphanumeric()) {
             return first;
         }
-        crate::shield::host_of(&self.url).chars().find(|c| c.is_alphanumeric()).unwrap_or('•')
+        let host = crate::shield::host_of(&self.url);
+        let text = if host.is_empty() { "New tab" } else { host.as_str() };
+        text.chars().find(|c| c.is_alphanumeric()).unwrap_or('N')
     }
 
     pub fn new(id: TabId) -> Tab {
@@ -67,6 +70,7 @@ impl Tab {
             loading: false,
             can_back: false,
             can_forward: false,
+            failed: false,
             asleep: false,
             row: None,
             pin: None,
@@ -82,8 +86,14 @@ pub struct DownloadRec {
     pub done: bool,
 }
 
+pub struct ErrorPage {
+    pub reason: String,
+    pub url: String,
+}
+
 pub struct State {
     pub tabs: Vec<Tab>,
+    pub errors: BTreeMap<TabId, ErrorPage>,
     pub active: TabId,
     pub next_id: TabId,
     pub history: Vec<crate::store::HistoryEntry>,
@@ -144,15 +154,10 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         .unwrap_or(false);
 
     let palette = Palette::for_look(prefs.appearance.clone(), prefs.desktop_dark);
-    let composited = gtk::prelude::GtkWindowExt::screen(&window).map(|s| s.is_composited()).unwrap_or(false);
-    if composited {
-        window.set_app_paintable(true);
-        if let Some(screen) = gtk::prelude::GtkWindowExt::screen(&window) {
-            if let Some(visual) = screen.rgba_visual() {
-                window.set_visual(Some(&visual));
-            }
-        }
-    }
+    let composited = gtk::prelude::GtkWindowExt::screen(&window).map(|s| s.is_composited()).unwrap_or(true);
+    // One opaque window colour, so a strip the shell does not cover is the
+    // window's own ground rather than whatever the compositor shows through.
+    window.set_app_paintable(true);
 
     let ui = ui::build(window.clone(), palette, &prefs, composited);
     window.add(&ui.overlay);
@@ -186,6 +191,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     let active = tabs[0].id;
 
     let state = State {
+        errors: BTreeMap::new(),
         tabs,
         active,
         next_id,
@@ -224,6 +230,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     app.wire();
     app.apply_style();
     app.render();
+    app.start_memory_timer();
     app
 }
 
@@ -270,6 +277,15 @@ impl App {
         let palette = Palette::for_look(look, self.prefs.borrow().desktop_dark);
         *self.palette.borrow_mut() = palette;
         self.apply_style();
+        // A page already open keeps the background it was made with unless it
+        // is told the appearance changed.
+        let page = if palette.is_dark() { (0.043, 0.043, 0.043) } else { (1.0, 1.0, 1.0) };
+        let ids: Vec<TabId> = self.state.borrow().tabs.iter().map(|tab| tab.id).collect();
+        for id in ids {
+            if let Some(view) = self.view(id) {
+                view.set_background_color(&gtk::gdk::RGBA::new(page.0, page.1, page.2, 1.0));
+            }
+        }
         self.render();
     }
 
@@ -401,8 +417,16 @@ impl App {
         self.render_pins();
         self.render_rows();
         self.refresh_helm();
-        let blank = self.state.borrow().active_tab().map(|t| t.url.is_empty()).unwrap_or(true);
-        if blank {
+        let (blank, has_error) = {
+            let state = self.state.borrow();
+            (
+                state.active_tab().map(|t| t.url.is_empty()).unwrap_or(true),
+                state.errors.contains_key(&state.active),
+            )
+        };
+        if has_error {
+            self.ui.stack.set_visible_child_name("error");
+        } else if blank {
             self.ui.stack.set_visible_child_name("blank");
         }
     }
@@ -425,6 +449,7 @@ impl App {
                     loading: t.loading,
                     can_back: t.can_back,
                     can_forward: t.can_forward,
+                    failed: t.failed,
                     asleep: t.asleep,
                     row: None,
                     pin: None,
@@ -446,7 +471,11 @@ impl App {
                 tab.title.clone()
             };
             let row = ui::tab_row(&title, palette, height, Some(tab.letter()), tab.id == active);
-            row.event.set_tooltip_text(Some(if tab.url.is_empty() { "New tab" } else { &tab.url }));
+            row.event.set_tooltip_text(Some(&if tab.url.is_empty() {
+                "New tab".to_string()
+            } else {
+                format!("{}\n{}", if title.is_empty() { "Untitled" } else { title.as_str() }, tab.url)
+            }));
             {
                 let weak = self.weak();
                 let id = tab.id;
@@ -803,6 +832,57 @@ impl App {
         }
     }
 
+    /// Tabs that have not been looked at let go of their page. The tab keeps
+    /// its address and title; the page is made again when it is selected.
+    pub fn sleep_others(&self) {
+        let (enabled, minutes) = {
+            let prefs = self.prefs.borrow();
+            (prefs.memory_saver, prefs.sleep_minutes as u64)
+        };
+        if !enabled {
+            return;
+        }
+        let now = crate::store::now_secs();
+        let active = self.active_id();
+        let sleeping: Vec<TabId> = {
+            let state = self.state.borrow();
+            state
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    tab.id != active
+                        && !tab.asleep
+                        && !tab.loading
+                        && now.saturating_sub(tab.last_seen) > minutes * 60
+                })
+                .map(|tab| tab.id)
+                .collect()
+        };
+        if sleeping.is_empty() {
+            return;
+        }
+        for id in &sleeping {
+            if let Some(view) = self.view(*id) {
+                self.ui.stack.remove(&view);
+            }
+            if let Some(tab) = self.state.borrow_mut().tab_mut(*id) {
+                tab.asleep = true;
+            }
+        }
+        self.render();
+    }
+
+    /// The tab-sleeping promise, kept: a minute's tick drops the pages of tabs
+    /// that have not been looked at for as long as the setting says.
+    pub fn start_memory_timer(&self) {
+        let weak = self.weak();
+        glib::timeout_add_seconds_local(60, move || {
+            let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
+            app.sleep_others();
+            glib::ControlFlow::Continue
+        });
+    }
+
     // ---- the field, panels, find ---------------------------------------
 
     pub fn open_omni(&self, over: bool) {
@@ -845,6 +925,7 @@ impl App {
                 break;
             }
             let hay = format!("{} {}", entry.title, entry.url).to_lowercase();
+            // One row per address: a page visited twice is not two suggestions.
             if (typed_lower.is_empty() || hay.contains(&typed_lower)) && !offers.iter().any(|o| o.url == entry.url) {
                 offers.push(Offer {
                     title: if entry.title.is_empty() {
@@ -1187,6 +1268,80 @@ impl App {
         self.flash_toast(message);
     }
 
+    /// A page that will not open, explained by the browser.
+    pub fn show_error(&self, id: TabId, reason: &str, url: &str) {
+        {
+            let mut state = self.state.borrow_mut();
+            // A tab holds its own failure: a 404 in one tab must not paint over
+            // the page in another, and Try again must reload the right one.
+            match state.errors.get_mut(&id) {
+                Some(existing) => {
+                    if existing.url.is_empty() && !url.is_empty() {
+                        existing.url = url.to_string();
+                    }
+                    return;
+                }
+                None => {
+                    state.errors.insert(
+                        id,
+                        ErrorPage { reason: reason.to_string(), url: url.to_string() },
+                    );
+                }
+            }
+        }
+        self.ui.error_title.set_text("That page did not open");
+        self.ui.error_reason.set_text(reason);
+        self.ui.error_address.set_text(url);
+        // A child added to a stack after the window was shown still has to be
+        // told it is visible before it can be the visible child.
+        self.ui.errorpage.show_all();
+        self.ui.stack.set_visible_child_name("error");
+    }
+
+    /// The engine says the load ended; only a load that did not fail takes the
+    /// error page away.
+    pub fn load_finished(&self, id: TabId) {
+        let failed = self.state.borrow().tab(id).map(|tab| tab.failed).unwrap_or(false);
+        if !failed {
+            self.clear_error();
+        }
+    }
+
+    pub fn mark_failed(&self, id: TabId) {
+        if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
+            tab.failed = true;
+        }
+    }
+
+    pub fn clear_error(&self) {
+        let id = self.active_id();
+        let had = {
+            let mut state = self.state.borrow_mut();
+            state.errors.remove(&id).is_some()
+        };
+        if had {
+            self.render();
+        }
+    }
+
+    pub fn retry(&self) {
+        let id = self.active_id();
+        let url = self
+            .state
+            .borrow()
+            .errors
+            .get(&id)
+            .map(|error| error.url.clone())
+            .unwrap_or_default();
+        {
+            let mut state = self.state.borrow_mut();
+            state.errors.remove(&id);
+        }
+        if !url.is_empty() {
+            self.navigate(id, &url);
+        }
+    }
+
     /// A picture of the window, without asking anything of the compositor:
     /// the browser's own widgets are drawn into a surface, and the page is
     /// taken from the engine's snapshot, then the two are laid together.
@@ -1245,7 +1400,15 @@ impl App {
             .map_err(|error| error.to_string())?;
         {
             let context = cairo::Context::new(&surface).map_err(|error| error.to_string())?;
-            context.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+            // A picture is opaque: the ground goes down first, so a viewer
+            // never renders an unpainted pixel as black.
+            let ground = self.palette.borrow().card;
+            context.set_source_rgba(
+                ground.0 as f64 / 255.0,
+                ground.1 as f64 / 255.0,
+                ground.2 as f64 / 255.0,
+                1.0,
+            );
             context.set_operator(cairo::Operator::Source);
             let _ = context.paint();
             // The window's own corners, as the desktop draws them.
@@ -1495,6 +1658,26 @@ impl App {
             self.ui.overlay.connect_size_allocate(move |_, allocation| {
                 if let Some(app) = weak.upgrade() {
                     app.layout_layers(allocation.width(), allocation.height());
+                }
+            });
+        }
+
+        // A blank page is a place to start: clicking it raises the field, so
+        // the browser can be used with a mouse alone.
+        {
+            let weak = self.weak();
+            self.ui.blank_holder.connect_button_press_event(move |_, _| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_omni(true);
+                }
+                crate::gtkx::inh(true)
+            });
+        }
+        {
+            let weak = self.weak();
+            self.ui.error_retry.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.retry();
                 }
             });
         }

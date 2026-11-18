@@ -7,7 +7,6 @@ use webkit2gtk::{
     UserContentInjectedFrames, UserContentManagerExt, UserStyleLevel, UserStyleSheet, WebView,
     WebViewExt,
 };
-
 pub fn selectors(app: &App, host: &str) -> Vec<String> {
     app.state
         .borrow()
@@ -16,7 +15,6 @@ pub fn selectors(app: &App, host: &str) -> Vec<String> {
         .cloned()
         .unwrap_or_default()
 }
-
 pub fn css_for(app: &App, host: &str) -> String {
     if !app.prefs.borrow().curtain {
         return String::new();
@@ -27,7 +25,6 @@ pub fn css_for(app: &App, host: &str) -> String {
     }
     format!("{}\n{{ display: none !important; }}", list.join(", "))
 }
-
 /// The style sheet the next document of the shared manager will wear.
 pub fn sync(app: &AppRef, host: &str) {
     let manager = crate::web::shared_manager(app);
@@ -45,7 +42,6 @@ pub fn sync(app: &AppRef, host: &str) {
     );
     manager.add_style_sheet(&sheet);
 }
-
 pub fn apply_for_tab(app: &App, id: TabId) {
     let Some(app_ref) = crate::app::current() else { return };
     let host = app
@@ -58,7 +54,6 @@ pub fn apply_for_tab(app: &App, id: TabId) {
         sync(&app_ref, &host);
     }
 }
-
 /// For a navigation WebKit starts itself: the style sheet has to be in place
 /// before the document begins, so it is set from the address being asked for.
 pub fn sync_for_url(app: &AppRef, url: &str) {
@@ -67,7 +62,6 @@ pub fn sync_for_url(app: &AppRef, url: &str) {
         sync(app, &host);
     }
 }
-
 /// Something added while the page is up: hide it now rather than on the next
 /// visit.
 pub fn apply_immediately(view: &webkit2gtk::WebView, app: &App, host: &str) {
@@ -82,7 +76,6 @@ pub fn apply_immediately(view: &webkit2gtk::WebView, app: &App, host: &str) {
     );
     view.run_javascript(&js, None::<&gtk::gio::Cancellable>, |_| {});
 }
-
 const PICK: &str = r#"
 (() => {
   if (window.__searchHideOn) {
@@ -138,7 +131,6 @@ const PICK: &str = r#"
   return 'on';
 })();
 "#;
-
 pub fn pick(_app: &App, view: &webkit2gtk::WebView, on: bool) {
     let js = if on {
         PICK.to_string()
@@ -147,7 +139,6 @@ pub fn pick(_app: &App, view: &webkit2gtk::WebView, on: bool) {
     };
     view.run_javascript(&js, None::<&gtk::gio::Cancellable>, |_| {});
 }
-
 /// A style sheet that hides what was hidden here, as the page begins.
 pub fn install(app: &AppRef, manager: &webkit2gtk::UserContentManager) {
     manager.register_script_message_handler("searchHide");

@@ -76,6 +76,7 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
     let slot = Arc::new(Mutex::new(Slot { filter: None, done: false }));
     let raw = Arc::into_raw(slot.clone()) as *mut c_void;
 
+    let mut stores: Vec<*mut ffi::WebKitUserContentFilterStore> = Vec::new();
     unsafe {
         let store = ffi::webkit_user_content_filter_store_new(store_path.as_ptr());
         if store.is_null() {
@@ -99,6 +100,11 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
         std::thread::sleep(Duration::from_millis(1));
     }
 
+    unsafe {
+        for store in stores {
+            glib::gobject_ffi::g_object_unref(store as *mut glib::gobject_ffi::GObject);
+        }
+    }
     let filter = slot.lock().unwrap().filter;
     let mut ok = false;
     unsafe {

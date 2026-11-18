@@ -17,6 +17,7 @@ pub struct Offer {
 
 pub struct Omnibox {
     pub offers: std::cell::RefCell<Vec<Offer>>,
+    column: std::cell::Cell<i32>,
     pub picked: std::cell::Cell<i32>,
     pub holder: gtk::Fixed,
     layer: Layer,
@@ -74,6 +75,7 @@ impl Omnibox {
 
         Omnibox {
             offers: std::cell::RefCell::new(Vec::new()),
+            column: std::cell::Cell::new(0),
             picked: std::cell::Cell::new(-1),
             holder,
             layer,
@@ -90,14 +92,17 @@ impl Omnibox {
     /// Where the field stands for a window of this size, and how much room the
     /// list under it has.
     pub fn layout(&self, width: i32, height: i32) {
-        self.layout_with_column(width, height, 0);
+        self.layout_with_column(width, height, self.column.get());
     }
 
     /// The scrim covers the page, not the column: the tabs stay readable while
     /// the field is up.
     pub fn layout_with_column(&self, width: i32, height: i32, column: i32) {
+        self.column.set(column);
         self.layer.place(&self.scrim, column, 0, (width - column).max(0), height);
-        let x = ((width - FIELD_WIDTH) / 2).max(12);
+        // Centred on the page, not on the window: the column is not part of
+        // the page the field is over.
+        let x = (column + (width - column - FIELD_WIDTH) / 2).max(column + 12);
         let block_height = FIELD_HEIGHT + if self.list.get_visible() { self.list_height() } else { 0 };
         let y = ((height - block_height) / 2 - 60).max(72);
         self.layer.place(&self.block, x, y, FIELD_WIDTH, block_height.max(FIELD_HEIGHT));
@@ -111,6 +116,9 @@ impl Omnibox {
 
     pub fn show(&self, ui: &crate::ui::Ui, over: bool, offers: Vec<Offer>) {
         self.visible.set(true);
+        // A new field starts with nothing picked: a pick from the last time is
+        // a pick the user did not make.
+        self.picked.set(-1);
         self.scrim.set_visible(over);
         self.layer.show();
         // The chip only exists when there is something to say about the page:

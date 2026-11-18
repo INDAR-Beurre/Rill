@@ -29,6 +29,12 @@ pub struct Ui {
     pub card: gtk::Box,
     pub stack: gtk::Stack,
     pub blank: gtk::Box,
+    pub blank_holder: gtk::EventBox,
+    pub errorpage: gtk::Box,
+    pub error_title: gtk::Label,
+    pub error_reason: gtk::Label,
+    pub error_address: gtk::Label,
+    pub error_retry: gtk::Button,
     pub palette: Palette,
 }
 
@@ -75,9 +81,9 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     // The lights and the page's own doors, in the band they share.
     let top = widget_box(gtk::Orientation::Horizontal, 0);
     top.set_size_request(-1, 40);
-    let lights = widget_box(gtk::Orientation::Horizontal, 9);
-    lights.set_margin_start(8);
-    lights.set_margin_top(8);
+    let lights = widget_box(gtk::Orientation::Horizontal, 8);
+    lights.set_margin_start(7);
+    lights.set_margin_top(31);
     lights.set_valign(gtk::Align::Start);
     let (light_red, light_amber, light_green) = traffic_lights();
     pack(&lights, &light_red, false);
@@ -107,7 +113,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     let pins_holder = widget_box(gtk::Orientation::Vertical, 0);
     pins_holder.set_margin_start(10);
     pins_holder.set_margin_end(10);
-    pins_holder.set_margin_top(2);
+    pins_holder.set_margin_top(24);
     let pins = gtk::Grid::new();
     pins.set_column_spacing(4);
     pins.set_row_spacing(4);
@@ -118,8 +124,9 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
 
     // The rows.
     let rows = widget_box(gtk::Orientation::Vertical, 2);
+    rows.set_margin_start(8);
+    rows.set_margin_end(9);
     rows.set_margin_start(10);
-    rows.set_margin_end(10);
     rows.set_margin_top(4);
     let rows_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     rows_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -152,6 +159,10 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     stack.set_hexpand(true);
     stack.set_vexpand(true);
     stack.set_vexpand_set(true);
+    let blank_holder = gtk::EventBox::new();
+    blank_holder.style_context().add_class("blank");
+    blank_holder.set_visible_window(false);
+    blank_holder.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
     let blank = widget_box(gtk::Orientation::Vertical, 6);
     blank.style_context().add_class("blank");
     blank.set_valign(gtk::Align::Center);
@@ -162,7 +173,33 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     blank_hint.style_context().add_class("blankhint");
     pack(&blank, &blank_title, false);
     pack(&blank, &blank_hint, false);
-    stack.add_named(&blank, "blank");
+    blank_holder.add(&blank);
+    stack.add_named(&blank_holder, "blank");
+
+    // A page that will not open is the browser's to explain, not the engine's
+    // to dump: the same quiet type, the reason, the address it tried, and one
+    // thing to do about it.
+    let errorpage = widget_box(gtk::Orientation::Vertical, 8);
+    errorpage.style_context().add_class("blank");
+    errorpage.set_valign(gtk::Align::Center);
+    errorpage.set_halign(gtk::Align::Center);
+    let error_title = gtk::Label::new(Some("That page did not open"));
+    error_title.style_context().add_class("blanktitle");
+    let error_reason = gtk::Label::new(None);
+    error_reason.style_context().add_class("blankhint");
+    let error_address = gtk::Label::new(None);
+    error_address.style_context().add_class("erraddress");
+    error_address.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    error_address.set_max_width_chars(52);
+    let error_retry = gtk::Button::with_label("Try again");
+    error_retry.style_context().add_class("act");
+    error_retry.set_halign(gtk::Align::Center);
+    error_retry.set_margin_top(10);
+    pack(&errorpage, &error_title, false);
+    pack(&errorpage, &error_reason, false);
+    pack(&errorpage, &error_address, false);
+    pack(&errorpage, &error_retry, false);
+    stack.add_named(&errorpage, "error");
     pack(&card, &stack, true);
     paned.pack2(&card, true, false);
 
@@ -190,6 +227,12 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
         card,
         stack,
         blank,
+        blank_holder,
+        errorpage,
+        error_title,
+        error_reason,
+        error_address,
+        error_retry,
         palette,
     };
     let _ = composited;
@@ -201,7 +244,7 @@ fn traffic_lights() -> (gtk::EventBox, gtk::EventBox, gtk::EventBox) {
         let e = gtk::EventBox::new();
         e.style_context().add_class("light");
         e.style_context().add_class(class);
-        e.set_size_request(14, 14);
+        e.set_size_request(15, 15);
         e.set_valign(gtk::Align::Center);
         e
     };
@@ -293,7 +336,7 @@ pub fn pin_tile(letter: char, palette: Palette, live: bool) -> PinWidget {
     if live {
         event.style_context().add_class("live");
     }
-    event.set_size_request(34, 34);
+    event.set_size_request(36, 36);
     let label = gtk::Label::new(Some(&letter.to_uppercase().to_string()));
     label.style_context().add_class("pinletter");
     label.set_halign(gtk::Align::Center);

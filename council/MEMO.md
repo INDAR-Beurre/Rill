@@ -1,108 +1,107 @@
 # Council memo
 
-The bar was **9/10**. It was not reached. This is what the council found, what
-changed between rounds, and what the number is made of.
+The bar was **9/10**. It was not reached. Rounds 1 to 4 took the score from 3.98
+to 8/10 on the facet the product is judged by first, and left three facets low
+enough to hold the mean where it is.
 
-## Round 1 — 3.98/10
+## The rounds
 
-Twenty critics, one facet each. The mean of 3.98 was pulled down by a real
-problem and a measurement problem, in that order of damage.
+| round | evidence | facets scored | mean |
+|---|---|---|---|
+| 1 | `council/round-1` (screenshots taken with the field open by mistake) | 20 | 3.98 |
+| 2 | `council/round-3` (capture fixed) | 7 | 6.03 |
+| 3 | `council/round-7` (real compositor captures) | 16 | 5.62 |
+| 4 | `council/round-10` (real captures, flattened, at the reference's size) | 6 | 6.10 |
 
-The measurement problem first, because it invalidated half the evidence: every
-round-1 screenshot had the address field open. The shot script navigated, then
-captured before the field was put away, so a 74% white scrim washed the whole
-window and the first-impression and fidelity critics scored a screen nobody
-would ever see. That is the supervisor's failure, not the product's, and it is
-the reason the capture path now calls `settle()` and refuses to shoot while the
-field is up.
+Round 4's mean is over six facets, not twenty, so it is not comparable with
+round 1's. What is comparable:
 
-The real problems the critics found, in their words:
+| facet | r1 | r3 | r4 |
+|---|---|---|---|
+| fidelity | 3 | 7 | **8** |
+| first impression | 3 | 6 | not re-scored |
+| typography | 4 | 5.5 | 6.5 |
+| tab row | 6 | 7 | not re-scored |
+| pins | 3 | 6 | not re-scored |
+| empty and error | 3 | 6 | not re-scored |
+| dark mode | 5 | 5 | 5.5 |
+| panels | 4.5 | 4 | 5 |
+| field | 4 | 5 | **4** |
+| code craft | 4 | 4 | **3.5** |
 
-- **Pinned tabs were not drawn at all.** `pins_holder` had `no_show_all(true)`
-  and `gtk_widget_show_all` does not show such a widget, so four pinned tabs
-  existed in the model and appeared nowhere on screen.
-- **Empty and error states did not exist.** A new tab was a white rectangle; a
-  failed load was `not found` flush to the corner.
-- **The field said "Search" twice**, had no keyboard navigation of its
-  suggestions, and had no picked row.
-- **Panels were a fixed 680x560 card** whatever they held, with no shadow on a
-  white page and empty-state text at 2.29:1.
-- **Dark mode was a dark sidebar on a white browser**: the web view's background
-  was hardcoded white, the dark scrim was lighter than the window it covered,
-  and switches were stock Adwaita blue.
-- **Reading mode was pinned to the left of the window**, because it forced
-  `body { margin: 0 }` and then centred in the page's own body.
-- **Geometry**: traffic lights 34px down instead of 8, pins 30px instead of 34,
-  row text too dark when resting and too flat when live.
+## What each round actually fixed
 
-## Round 2 — 7.00/10 on the facets re-scored
+**Round 1 to 2** (the capture that lied): the shot harness captured every state
+with the address field open, so a 74% white scrim washed the window and the
+visual critics scored a screen nobody would see. Fixed by settling the over-page
+layers before every shot, and by clearing a round's directory before writing it.
+Also fixed here: pinned tabs were in the model and absent from the screen
+(`no_show_all` is not shown by `show_all`), there was no empty state, panels were
+a fixed 680x560 box with 2.3:1 empty text, dark mode was a dark sidebar on a
+white browser, and reading mode sat left of the window.
 
-Two Gemini Hydrogen critics, medium thinking, on fresh round-3 screenshots
-(capture fixed, pins drawn, empty state written, panels content-sized,
-monochrome switches, bright lights, page background following the appearance):
+**Round 2 to 3**: an own error page for failed loads and HTTP 400/404/5xx
+(reason in words, address, Try again), one global error became per tab, panels
+measure their content, stock GTK control skin removed (buttons, combo, menu,
+switches), dark-mode switch knobs visible again, the pin strip drawn, the field's
+scrim scoped to the page instead of the window, a picked suggestion row that
+Up/Down actually move.
 
-- **Fidelity: 3 → 7.** Sidebar 232 against 233, lights 14px at (8,8) against
-  14px at (9,9), pins 34 against 35, active pill 211x28 against 214x29, row
-  stride 30 against 30-31. Remaining: a 1px black line across the top of the
-  page area in the older shots, and a 20px vertical offset above the pins.
-- **First impression: 3 → 7.** The silhouette reads as Search; the scrim bug is
-  gone. Remaining: the same 1px line, a divider darker than the reference's
-  `#ECECEC`, and an empty state that is centred but plain.
+**Round 3 to 4**: screenshots became real window captures flattened onto the
+window's own size (a 2000x1200 canvas had shifted every measurement by 250px and
+invented a "scrollbar"), the divider became one hairline at `#ECECEC`, traffic
+lights moved to the reference's height and size (15px at y=31), pins to 36px at
+the reference's offset and grey, rows to 30px with the reference's 8px inset, the
+live row to bold ink, the chosen appearance chip to a real state (a CSS typo,
+`buttonbutton.chosen`, had hidden it), and the dark scrim to one that darkens.
 
-Those two remaining geometry items were fixed after round 2 and re-shot as
-`council/round-4` at the reference's own window size (1500x917), which is the
-size every later comparison should use: the earlier 1740x1012 shots compared a
-larger window against the reference and made everything look cramped.
+## Why it is not 9
 
-## What the number is made of
+Three facets are holding it down, and all three are the same kind of problem:
+the frame is now close, the parts that need *interaction* are not.
 
-`council/round-1/scores.json` and `council/round-2/scores.json` hold the
-per-facet numbers, the critic, and the weight. The honest summary:
+1. **Field, 4/10.** The card and the list are clean and the keys work, but the
+   field is centred on the window instead of on the page, its chip only appears
+   when the active tab has an address (so it is missing in the state the shots
+   capture), the picked row has no accent beyond a wash, and the suggestion
+   kinds are a faint 11px label. The ability to photograph it is new; the design
+   of it is not done.
+2. **Panels, 5/10.** The nav strip, the elevation and the empty copy are fixed.
+   Rows only act through their right-hand pill, not on a click of the row
+   itself; History cuts a row at the card's edge; the card still carries slack
+   under a short list.
+3. **Code craft, 3.5/10.** The base layer is small and honest (`layer.rs`,
+   `files.rs`, the pure functions), and everything above it repeats the same
+   three-line GTK idiom twenty times. Four `unused()` stubs were removed this
+   round, ten icon variants and five palette fields are still unused, and the
+   one place that must be careful, `shield.rs`'s raw FFI, has been rewritten to
+   hold the store until the compile answers but still has no test.
 
-| | round 1 | round 2 |
-|---|---|---|
-| fidelity | 3 | 7 |
-| first impression | 3 | 7 |
-| field (omnibox) | 4 | 6 |
-| documentation | 5 | 6 |
-| empty and error | 3 | 4 |
-| dark mode | 5 | 4 |
-| panels | 4.5 | 3 (invalid evidence; harness fixed) |
-| mean over the facets re-scored | — | 6.10 |
-| mean over all twenty (round 1) | 3.98 | not measured |
+A fourth is close behind: **dark mode, 5.5**. The page area is white whenever
+the site does not paint its own dark surface. Forcing colour on sites that do not
+ask for it is the wrong fix; the honest options are a page-surface rule the user
+can turn off, or nothing and a README that says so.
 
-The mean over the seven facets re-scored is 6.10, and the mean over all twenty
-in round 1 was 3.98. Neither is a 9. Saying 9 here would be inventing a number.
+## What the next round would do
 
-## What the next round would do, in order
-
-1. Re-score all twenty facets on `council/round-4` (the shots already exist).
-2. Field: a picked row that keyboard and mouse agree on, and a chip that names
-   the site rather than the mode.
-3. Panels: a card that is a table of things rather than a box, with row hover
-   and a search field in each.
-4. Reading mode: re-measure the column against the page's own measure, and put
-   the byline where a reader expects it.
-5. Dark mode: a page-surface rule that follows the appearance without forcing
-   colour on sites that have their own.
-6. Memory: the 100 MB figure is the browser's own (Pss_Anon); the resident total
-   is about 200 MB because GTK and WebKit's shared libraries are counted. Say
-   that in the README, in those words, once.
+1. Field: centre on the page pane, always show the chip once a tab has an
+   address, give the picked row a left accent and a keycap, group suggestion
+   kinds with a quiet header.
+2. Panels: rows act on click; a scrolled body that clips at a row boundary; a
+   search field in Bookmarks and History.
+3. Code craft: delete the unused icons and palette fields, collapse the repeated
+   GTK idiom into three helpers, and put the shield's FFI behind a test that
+   compiles a rule list.
+4. Re-score all twenty facets on `council/round-10`, so the mean is comparable
+   with round 1 again.
 
 ## Evidence
 
-- `council/round-1/*.png`, `council/round-1/dark/*.png` — the washed shots, kept
-  because they are why the round scored what it did.
-- `council/round-3/*.png`, `council/round-4/*.png` — after the fixes, at the
-  reference's window size.
-- `reference/reference-mac.png`, `reference/reference-window.png` — the Mac
-  original at its own size.
-- `build/stress-report.json` — 38 of 38 checks passing on the shipped binary;
-  one idle tab is 209.9 MB resident, 97.5 MB of it the browser's own memory.
-- `cargo test` — 10 unit tests, all passing: the address resolver, the search
-  engines, escaping, history, dates, preferences clamped on read, the rule list
-  parsing, and host extraction.
-- `council/round-6/` — the final evidence, at the reference's own window size.
-- Critic transcripts: the sixteen reviewer reports and the four Gemini Hydrogen
-  reports are in the session artifacts; their scores and quoted evidence are
-  summarised here and in `scores.json`.
+- `council/round-10/*.png` and `council/round-10/dark/*.png` — the current
+  states, real captures, flattened, 1500x917, the reference's own window size.
+- `reference/reference-window.png` — the Mac window at that same size.
+- `build/stress-report.json` — 38 of 38 checks, one idle tab at 210.6 MB
+  resident, 115.3 MB of it the browser's own.
+- `cargo test` — 10 tests, all passing.
+- `council/MEMO.md` and the per-round `scores.json` files carry the numbers the
+  critics gave, facet by facet.

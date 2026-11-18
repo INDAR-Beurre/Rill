@@ -173,6 +173,10 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             ok("")
         }
         "key" => key(app, argument),
+        "activate" => {
+            app.ui.window.present();
+            ok("")
+        }
         "escape" => {
             app.close_omni();
             if app.find.borrow().visible {
@@ -341,6 +345,8 @@ fn tabs(app: &AppRef) -> String {
 fn key(app: &AppRef, name: &str) -> String {
     match name {
         "omni" => app.open_omni(true),
+        "down" => app.omni.step(1),
+        "up" => app.omni.step(-1),
         "newtab" => {
             app.new_tab(None, false, false);
         }
@@ -439,5 +445,3 @@ fn page_eval(app: &AppRef, code: &str, sender: &mpsc::Sender<String>) {
     });
 }
 
-#[allow(dead_code)]
-pub fn unused(_: &App) {}

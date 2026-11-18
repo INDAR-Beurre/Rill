@@ -6,7 +6,8 @@ use crate::curtain;
 use gtk::prelude::*;
 use webkit2gtk::{
     DownloadExt, HardwareAccelerationPolicy, NavigationPolicyDecisionExt, NavigationType,
-    PolicyDecisionExt, Settings, SettingsExt, URIRequestExt, URIResponseExt, UserContentManager,
+    PolicyDecisionExt, ResponsePolicyDecisionExt, Settings, SettingsExt, URIRequestExt, URIResponseExt,
+    UserContentManager,
     UserContentManagerExt, WebContext, WebContextExt, WebView, WebViewExt,
 };
 use std::cell::RefCell;
@@ -107,6 +108,9 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             match event {
                 webkit2gtk::LoadEvent::Started => {
                     app.set_loading(tab, true);
+                    if let Some(slot) = app.state.borrow_mut().tab_mut(tab) {
+                        slot.failed = false;
+                    }
                     if let Some(uri) = view.uri().map(|u| u.to_string()) {
                         curtain::sync_for_url(&app, &uri);
                     }
@@ -115,6 +119,7 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 webkit2gtk::LoadEvent::Finished => {
                     app.set_loading(tab, false);
                     app.sync_nav(tab, view);
+                    app.load_finished(tab);
                     app.record_visit(tab);
                 }
                 _ => {}
@@ -131,11 +136,60 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     }
     {
         let weak = app.weak();
-        view.connect_load_failed(move |_, _, _, _| {
+        view.connect_load_failed(move |_, event, uri, error| {
             if let Some(app) = weak.upgrade() {
-                app.flash_error("That page did not open");
+                // The engine's own error page is not the browser's voice: the
+                // browser explains it itself.
+                let reason = match event {
+                    webkit2gtk::LoadEvent::Started => {
+                        let cancelled = error.matches(gtk::gio::IOErrorEnum::Cancelled)
+                            || error.matches(webkit2gtk::NetworkError::Cancelled);
+                        if cancelled {
+                            return false;
+                        }
+                        message_for(error)
+                    }
+                    _ => return false,
+                };
+                app.mark_failed(tab);
+                app.show_error(tab, &reason, &uri);
             }
-            false
+            true
+        });
+    }
+    {
+        let weak = app.weak();
+        view.connect_decide_policy(move |_, decision, kind| {
+            if kind != webkit2gtk::PolicyDecisionType::Response {
+                return false;
+            }
+            let Some(policy) = decision.downcast_ref::<webkit2gtk::ResponsePolicyDecision>() else {
+                return false;
+            };
+            let Some(response) = policy.response() else { return false };
+            let status = response.status_code();
+            if status < 400 {
+                return false;
+            }
+            let reason = match status {
+                400 => "The site did not understand the request (400).".to_string(),
+                401 | 403 => format!("The site would not let this page be read ({status})."),
+                404 => "There is nothing at this address (404).".to_string(),
+                408 => "The site took too long to answer (408).".to_string(),
+                429 => "The site is asking for fewer requests (429).".to_string(),
+                500..=599 => format!("The site broke while answering ({status})."),
+                _ => format!("The site answered with {status}."),
+            };
+            if let Some(app) = weak.upgrade() {
+                let uri = response.uri().map(|uri| uri.to_string()).unwrap_or_default();
+                app.mark_failed(tab);
+                if !uri.is_empty() {
+                    app.set_uri(tab, &uri);
+                }
+                app.show_error(tab, &reason, &uri);
+            }
+            decision.ignore();
+            true
         });
     }
     // The page asks, the browser answers: a fresh address syncs what is hidden
@@ -280,6 +334,30 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(name)
 }
 
+/// A failure's reason, in the words a person would use.
+fn message_for(error: &glib::Error) -> String {
+    let text = error.message().to_lowercase();
+    if text.contains("name or service not known")
+        || text.contains("resolve")
+        || text.contains("not found")
+        || text.contains("dns")
+    {
+        "That address could not be found.".to_string()
+    } else if text.contains("refused") {
+        "The site refused the connection.".to_string()
+    } else if text.contains("timed out") || text.contains("timeout") {
+        "The site took too long to answer.".to_string()
+    } else if text.contains("certificate") || text.contains("tls") || text.contains("ssl") {
+        "The site's security could not be verified.".to_string()
+    } else if text.contains("restricted network port") {
+        "That address is not one a page may open.".to_string()
+    } else if text.contains("network is unreachable") || text.contains("network") {
+        "There is no network to reach it on.".to_string()
+    } else {
+        "The page could not be loaded.".to_string()
+    }
+}
+
 pub fn load(view: &WebView, url: &str) {
     if url.is_empty() {
         return;
@@ -291,5 +369,3 @@ pub fn load(view: &WebView, url: &str) {
     }
 }
 
-#[allow(dead_code)]
-pub fn ignore(_: &App) {}

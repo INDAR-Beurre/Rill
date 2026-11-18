@@ -1,0 +1,92 @@
+{
+  "round": 3,
+  "target": 9.0,
+  "bar_met": false,
+  "evidence": "council/round-7 (real compositor screenshots, 1500x917)",
+  "note": "Twenty critics re-scored the frame and the craft on real screenshots after the capture fixes. The frame rose; the field, panels and code did not.",
+  "facets": [
+    {
+      "facet": "fidelity",
+      "score": 7.0,
+      "weight": 0.15,
+      "critic": "gemini-4-hydrogen"
+    },
+    {
+      "facet": "first impression",
+      "score": 6.0,
+      "weight": 0.0231,
+      "critic": "gemini-4-hydrogen"
+    },
+    {
+      "facet": "typography",
+      "score": 5.5,
+      "weight": 0.0231
+    },
+    {
+      "facet": "tab row",
+      "score": 7.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "pins",
+      "score": 6.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "field",
+      "score": 5.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "panels",
+      "score": 4.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "settings",
+      "score": 5.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "empty and error",
+      "score": 6.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "dark mode",
+      "score": 5.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "keyboard",
+      "score": 6.0,
+      "weight": 0.0231
+    },
+    {
+      "facet": "performance",
+      "score": 6.0,
+      "weight": 0.1
+    },
+    {
+      "facet": "memory",
+      "score": 5.0,
+      "weight": 0.1
+    },
+    {
+      "facet": "core loop",
+      "score": 6.0,
+      "weight": 0.1
+    },
+    {
+      "facet": "code craft",
+      "score": 4.0,
+      "weight": 0.08
+    },
+    {
+      "facet": "documentation",
+      "score": 4.5,
+      "weight": 0.07
+    }
+  ],
+  "mean": 5.62
+}

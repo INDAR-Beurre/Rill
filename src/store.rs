@@ -94,7 +94,7 @@ impl Prefs {
         if self.roomy_tabs {
             36
         } else {
-            28
+            30
         }
     }
 

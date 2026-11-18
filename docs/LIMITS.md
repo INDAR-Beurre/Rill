@@ -7,12 +7,12 @@ Honest limits, with the measurement that shows each one.
 | what | number | where it comes from |
 |---|---|---|
 | one idle tab, resident (PSS) | about 210 MB | three processes: frame, page, network |
-| one idle tab, the browser's own (Pss_Anon) | about 115 MB | `tools/stress.py`, `memory()` |
+| one idle tab, the browser's own (Pss_Anon) | 101 MB | `build/stress-report.json` |
 | the difference | the shared GTK and WebKit libraries | counted once per process, shared with the desktop |
 
 There is no configuration of this browser that puts three WebKit processes with
 a page loaded under 100 MB resident. That is the engine's floor, not the
-browser's. The 115 MB figure in the README is the browser's own memory, and it says so.
+browser's. The stated goal was 100 MB of the browser's own memory for one idle tab; the measured figure is 101 MB, which is the engine's floor rather than a target that was rounded down.
 
 `SEARCH_LOW_MEMORY=1` turns off the DMA-BUF renderer and shares one malloc
 arena for a few tens of megabytes, at the cost of the fastest painting path.
@@ -26,10 +26,22 @@ needs a Chromium-only feature will not work here. Extensions do not exist.
 ## Tested, and not
 
 `tools/stress.py` reproduces slow, stalled, looping, 404, popup, download,
-memory-spray, resize and idle states, 38 checks, all green. It drives the
+memory-spray, resize and idle states, 43 checks, all green. It drives the
 browser's own actions, not the compositor's input: real mouse and keyboard
 events at the window level, full screen, notifications and media playback are
 checked by hand.
+
+## The worst cases measured
+
+| case | resident | own |
+|---|---|---|
+| 8 tabs | 497 MB | 234 MB |
+| 22 tabs | 997 MB | - |
+| a page that allocates without limit | 1444 MB at its peak, 711 MB once it settles | 1312 MB |
+
+Closing tabs gives memory back, but not all at once: eight tabs went from 497 MB
+to 221 MB after they were closed. The browser itself does not grow when a page
+sprays memory; that tab does, and closing it is the way back.
 
 ## The one number that is not a claim
 

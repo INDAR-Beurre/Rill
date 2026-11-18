@@ -362,9 +362,45 @@ class Run:
             self.check("panels open and close", statistics.mean(timings) < 200,
                        f"mean {statistics.mean(timings):.0f}ms over {len(timings)}")
 
-            bench.must("omni")
-            time.sleep(0.2)
+            # `omni` is "go to this address"; the field is opened by `key omni`.
+            bench.must("key omni")
+            time.sleep(0.4)
+            probe = bench.probe()
+            self.check("the field opens on the address you are on",
+                       probe["omniText"].endswith("/long"),
+                       f"field holds {probe['omniText'][-24:]!r}")
+            bench.must("key down")
+            time.sleep(0.3)
+            probe = bench.probe()
+            self.check("down picks a suggestion",
+                       probe["omniPicked"] >= 0 or probe["omniCount"] == 0,
+                       f"picked {probe['omniPicked']} of {probe['omniCount']}")
             bench.must("escape")
+
+            # A panel's own search has to filter, keep its words, and clear.
+            planning = bench.open(self.url("/plain"))
+            bench.wait_loaded(planning, timeout=20)
+            bench.must("key bookmark")
+            time.sleep(0.3)
+            bench.must("key bookmarks")
+            time.sleep(0.4)
+            bench.must("filter quiet")
+            time.sleep(0.4)
+            probe = bench.probe()
+            self.check("a panel filters as you type",
+                       probe["panelFilter"] == "quiet" and probe["panel"] == "Bookmarks",
+                       f"filter {probe['panelFilter']!r} in {probe['panel']}")
+            bench.must("filter ")
+            time.sleep(0.4)
+            probe = bench.probe()
+            self.check("clearing the filter shows everything again",
+                       probe["panelFilter"] == "", f"filter {probe['panelFilter']!r}")
+            bench.must("key closepanel")
+            bench.must("key shortcuts")
+            time.sleep(0.4)
+            probe = bench.probe()
+            self.check("Ctrl / lists every key", probe["panel"] == "Shortcuts", probe["panel"])
+            bench.must("key closepanel")
             answer = bench.command("find Paragraph 5")
             self.check("find searches", answer.get("ok"), str(answer)[:80])
             time.sleep(1)

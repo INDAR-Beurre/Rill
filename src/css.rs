@@ -12,27 +12,22 @@ pub fn build(p: &Palette, _composited: bool, row_height: i32) -> String {
     format!(
         r#"
 window {{ background-color: {ground}; }}
-window.csd, .csd {{ padding: 0; margin: 0; border-width: 0; }}
 headerbar.nobar {{ background-color: {ground}; }}
 headerbar.nobar, headerbar {{ min-height: 0; padding: 0; margin: 0; border: none; background: none; box-shadow: none; }}
 headerbar.nobar button, headerbar button {{ min-height: 0; padding: 0; margin: 0; }}
 decoration {{ box-shadow: none; border-width: 0; margin: 0; padding: 0; background: none; border-radius: {radius}px; }}
-.csd {{ box-shadow: none; }}
 headerbar.nobar > box {{ min-height: 0; padding: 0; margin: 0; border: none; }}
 .shell {{ background-color: {ground}; border-radius: {radius}px; }}
 .shell > separator, paned > separator {{ background-color: {divider}; background-image: none; min-width: 1px; min-height: 1px; border: none; }}
 .shell > separator:hover, paned > separator:hover {{ background-color: {hairline}; }}
 
 .side {{ background-color: {sidebg}; }}
-.side.noline {{ border-right: none; }}
 
-.lights {{ }}
 .light {{ min-width: 15px; min-height: 15px; border-radius: 15px; background-color: {hairline}; }}
 .light.red {{ background-color: {red}; }}
 .light.amber {{ background-color: {amber}; }}
 .light.green {{ background-color: {green}; }}
 window.unfocused .light.red, window.unfocused .light.amber, window.unfocused .light.green {{ background-color: {resting}; }}
-.lightlabel {{ color: {resting_ink}; font-family: {font}; font-size: 9px; font-weight: bold; }}
 
 /* GTK brings its own skin for every control. The browser has one, so the
    stock skin is taken off first and only what is wanted is put back. */
@@ -105,7 +100,6 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel switch:checked {{ background-color: {ink}; }}
 .panel switch slider {{ background-color: {knob}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.28); }}
 .panel switch:checked slider {{ background-color: {fieldbg}; }}
-.rowlivepin {{ color: {muted}; }}
 
 .newtab {{ border-radius: 7px; }}
 .newtab:hover {{ background-color: {hover}; }}
@@ -113,7 +107,6 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .newtab:hover .newtablabel {{ color: {muted}; }}
 
 .helm {{ }}
-.hairline {{ background-color: {hairline}; }}
 
 .card {{ background-color: {ground}; }}
 .blank {{ background-color: {ground}; }}
@@ -137,6 +130,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .suggest .sgrow.picked {{ background-color: {wash}; }}
 .suggest .sgrow.picked .sgtitle {{ font-weight: bold; }}
 .suggest .sghead {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {faint}; letter-spacing: 0.06em; }}
+.suggest .sgrow {{ min-height: 44px; }}
 .suggest .sgrow {{ border-left: 2px solid transparent; }}
 .suggest .sgrow.picked {{ border-left: 2px solid {ink}; border-top-left-radius: 0; border-bottom-left-radius: 0; }}
 .panel .ptrow {{ border-radius: 7px; }}
@@ -177,15 +171,11 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 
 .dlbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; }}
 .dlbar label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
-.errorbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; }}
-.errorbar label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
 
 scrollbar {{ background: transparent; }}
 scrollbar slider {{ background-color: {scroll}; border-radius: 6px; min-width: 6px; min-height: 6px; }}
 scrollbar slider:hover {{ background-color: {scrollhover}; }}
 scrollbar trough {{ background: transparent; }}
-.mono {{ font-family: {mono}; }}
-.tooltip {{ background-color: {tooltipbg}; }}
 "#,
         ground = ground,
         radius = radius,
@@ -194,7 +184,6 @@ scrollbar trough {{ background: transparent; }}
         amber = p.light_amber.hex(),
         green = p.light_green.hex(),
         resting = p.faint.hex(),
-        resting_ink = p.muted.hex(),
         hover = p.hover.hex(),
         wash = p.wash.hex(),
         tile = p.side_tile.hex(),
@@ -219,7 +208,6 @@ scrollbar trough {{ background: transparent; }}
         fieldborder = if p.is_dark() { "#2A2A2A".to_string() } else { "#E6E6E4".to_string() },
         scroll = if p.is_dark() { "#3A3A3A".to_string() } else { "#D6D6D4".to_string() },
         scrollhover = if p.is_dark() { "#4A4A4A".to_string() } else { "#C2C2C0".to_string() },
-        tooltipbg = if p.is_dark() { "#222222".to_string() } else { "#FFFFFF".to_string() },
         font = FONT,
         mono = MONO,
         row_height = row_height,

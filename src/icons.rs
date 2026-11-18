@@ -101,7 +101,7 @@ pub fn button(kind: Icon, size: i32, color: Rgb, class: &str) -> gtk::Button {
     button.set_relief(gtk::ReliefStyle::None);
     button.add(&area(kind, size, color));
     button.style_context().add_class(class);
-    button.style_context().add_class("mark");
+    crate::ui::class(&button, "mark");
     button.set_can_focus(false);
     button
 }

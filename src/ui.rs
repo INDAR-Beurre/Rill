@@ -37,6 +37,14 @@ fn widget_box(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
     gtk::Box::new(orientation, spacing)
 }
 
+/// Give a widget one of the browser's classes. Every style in this browser is
+/// a class in one stylesheet, so this is the only door between code and look.
+pub fn class<W: IsA<gtk::Widget>>(widget: &W, name: &str) -> gtk::StyleContext {
+    let context = widget.style_context();
+    context.add_class(name);
+    context
+}
+
 /// Add a child to a box with the expansion it should have. GtkBox's own
 /// container-add stretches everything it is given, which is never what a
 /// column of fixed rows and one page wants.
@@ -51,13 +59,13 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     // The column and the page, with the column's edge between them: a paned
     // window keeps the width the column was given, and lets it be dragged.
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    paned.style_context().add_class("shell");
+    crate::ui::class(&paned, "shell");
     paned.set_wide_handle(false);
     paned.set_hexpand(true);
     paned.set_vexpand(true);
     let side_width = prefs.side_width.round() as i32;
     let side = widget_box(gtk::Orientation::Vertical, 0);
-    side.style_context().add_class("side");
+    crate::ui::class(&side, "side");
     side.set_size_request(if prefs.sidebar { side_width } else { 0 }, -1);
 
     // The lights and the page's own doors, in the band they share.
@@ -77,7 +85,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     helm.set_margin_start(16);
     helm.set_margin_top(6);
     helm.set_valign(gtk::Align::Start);
-    helm.style_context().add_class("helm");
+    crate::ui::class(&helm, "helm");
     helm.set_no_show_all(true);
     let ink_muted = palette.muted;
     let back = icons::button(Icon::Back, 14, ink_muted, "door");
@@ -136,27 +144,27 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     let card = widget_box(gtk::Orientation::Vertical, 0);
     card.set_hexpand(true);
     card.set_vexpand(true);
-    card.style_context().add_class("card");
+    crate::ui::class(&card, "card");
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
     stack.set_vexpand_set(true);
     let blank_holder = gtk::EventBox::new();
-    blank_holder.style_context().add_class("blank");
+    crate::ui::class(&blank_holder, "blank");
     blank_holder.set_visible_window(false);
     blank_holder.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
     let blank = widget_box(gtk::Orientation::Vertical, 6);
-    blank.style_context().add_class("blank");
+    crate::ui::class(&blank, "blank");
     blank.set_valign(gtk::Align::Center);
     blank.set_halign(gtk::Align::Center);
     let blank_title = gtk::Label::new(Some("Search"));
-    blank_title.style_context().add_class("blanktitle");
+    crate::ui::class(&blank_title, "blanktitle");
     let blank_hint_row = widget_box(gtk::Orientation::Horizontal, 6);
     blank_hint_row.set_halign(gtk::Align::Center);
     let blank_hint = gtk::Label::new(Some("Type an address, or a few words."));
-    blank_hint.style_context().add_class("blankhint");
+    crate::ui::class(&blank_hint, "blankhint");
     let keycap = gtk::Label::new(Some("Ctrl L"));
-    keycap.style_context().add_class("keyhint");
+    crate::ui::class(&keycap, "keyhint");
     pack(&blank_hint_row, &blank_hint, false);
     pack(&blank_hint_row, &keycap, false);
     pack(&blank, &blank_title, false);
@@ -168,19 +176,19 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
     // to dump: the same quiet type, the reason, the address it tried, and one
     // thing to do about it.
     let errorpage = widget_box(gtk::Orientation::Vertical, 8);
-    errorpage.style_context().add_class("blank");
+    crate::ui::class(&errorpage, "blank");
     errorpage.set_valign(gtk::Align::Center);
     errorpage.set_halign(gtk::Align::Center);
     let error_title = gtk::Label::new(Some("That page did not open"));
-    error_title.style_context().add_class("blanktitle");
+    crate::ui::class(&error_title, "blanktitle");
     let error_reason = gtk::Label::new(None);
-    error_reason.style_context().add_class("blankhint");
+    crate::ui::class(&error_reason, "blankhint");
     let error_address = gtk::Label::new(None);
-    error_address.style_context().add_class("erraddress");
+    crate::ui::class(&error_address, "erraddress");
     error_address.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     error_address.set_max_width_chars(52);
     let error_retry = gtk::Button::with_label("Try again");
-    error_retry.style_context().add_class("act");
+    crate::ui::class(&error_retry, "act");
     error_retry.set_halign(gtk::Align::Center);
     error_retry.set_margin_top(10);
     pack(&errorpage, &error_title, false);
@@ -225,7 +233,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs,
 fn traffic_lights() -> (gtk::EventBox, gtk::EventBox, gtk::EventBox) {
     let make = |class: &str| {
         let e = gtk::EventBox::new();
-        e.style_context().add_class("light");
+        crate::ui::class(&e, "light");
         e.style_context().add_class(class);
         e.set_size_request(15, 15);
         e.set_valign(gtk::Align::Center);
@@ -244,9 +252,9 @@ pub struct TabRow {
 
 pub fn tab_row(title: &str, palette: Palette, row_height: i32, letter: Option<char>, live: bool) -> TabRow {
     let event = gtk::EventBox::new();
-    event.style_context().add_class("row");
+    crate::ui::class(&event, "row");
     if live {
-        event.style_context().add_class("live");
+        crate::ui::class(&event, "live");
     }
     event.set_size_request(-1, row_height);
 
@@ -261,11 +269,11 @@ pub fn tab_row(title: &str, palette: Palette, row_height: i32, letter: Option<ch
     match letter {
         Some(c) => {
             let tile = gtk::EventBox::new();
-            tile.style_context().add_class("tile");
+            crate::ui::class(&tile, "tile");
             tile.set_size_request(18, 18);
             tile.set_valign(gtk::Align::Center);
             let label = gtk::Label::new(Some(&c.to_uppercase().to_string()));
-            label.style_context().add_class("tileletter");
+            crate::ui::class(&label, "tileletter");
             label.set_halign(gtk::Align::Center);
             label.set_valign(gtk::Align::Center);
             label.set_width_chars(1);
@@ -283,7 +291,7 @@ pub fn tab_row(title: &str, palette: Palette, row_height: i32, letter: Option<ch
     pack(&hbox, &icon, false);
 
     let label = gtk::Label::new(Some(title));
-    label.style_context().add_class("rowtitle");
+    crate::ui::class(&label, "rowtitle");
     if live {
         // GTK's CSS wants keywords, so the weight that sits between normal and
         // bold is set as a Pango attribute instead.
@@ -301,8 +309,8 @@ pub fn tab_row(title: &str, palette: Palette, row_height: i32, letter: Option<ch
     let close = gtk::Button::new();
     close.set_relief(gtk::ReliefStyle::None);
     close.add(&icons::area(Icon::Close, 12, palette.muted.mix(palette.faint, 0.4)));
-    close.style_context().add_class("loupe");
-    close.style_context().add_class("close");
+    crate::ui::class(&close, "loupe");
+    crate::ui::class(&close, "close");
     close.set_valign(gtk::Align::Center);
     close.set_size_request(18, 18);
     close.set_can_focus(false);
@@ -318,18 +326,17 @@ pub struct PinWidget {
     pub letter: gtk::Label,
 }
 
-pub fn pin_tile(letter: char, palette: Palette, live: bool) -> PinWidget {
+pub fn pin_tile(letter: char, _palette: Palette, live: bool) -> PinWidget {
     let event = gtk::EventBox::new();
-    event.style_context().add_class("pin");
+    crate::ui::class(&event, "pin");
     if live {
-        event.style_context().add_class("live");
+        crate::ui::class(&event, "live");
     }
     event.set_size_request(35, 35);
     let label = gtk::Label::new(Some(&letter.to_uppercase().to_string()));
-    label.style_context().add_class("pinletter");
+    crate::ui::class(&label, "pinletter");
     label.set_halign(gtk::Align::Center);
     label.set_valign(gtk::Align::Center);
-    let _ = palette;
     event.add(&label);
     PinWidget { event, letter: label }
 }
@@ -338,7 +345,7 @@ pub fn pin_tile(letter: char, palette: Palette, live: bool) -> PinWidget {
 /// box: it needs no window of its own, so it stacks where it is put.
 pub fn scrim(palette: &Palette) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
-    area.style_context().add_class("scrim");
+    crate::ui::class(&area, "scrim");
     area.set_hexpand(true);
     area.set_vexpand(true);
     area.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);

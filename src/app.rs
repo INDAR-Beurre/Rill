@@ -126,6 +126,9 @@ pub struct App {
     pub private_ctx: RefCell<Option<webkit2gtk::WebContext>>,
     pub palette: RefCell<Palette>,
     pub last_layout: RefCell<(i32, i32)>,
+    /// Reading mode is a state of the tab, not of the page, so the browser has
+    /// to remember it to be able to leave it.
+    pub reading: std::cell::Cell<bool>,
 }
 
 pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
@@ -137,7 +140,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     let bar = gtk::HeaderBar::new();
     bar.set_show_close_button(false);
     bar.set_has_subtitle(false);
-    bar.style_context().add_class("nobar");
+    crate::ui::class(&bar, "nobar");
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_size_request(-1, 0);
     bar.set_custom_title(Some(&spacer));
@@ -221,6 +224,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         private_ctx: RefCell::new(None),
         palette: RefCell::new(palette),
         last_layout: RefCell::new((0, 0)),
+        reading: std::cell::Cell::new(false),
     });
 
     app.ui.shell.set_position(prefs_side_width);
@@ -512,7 +516,7 @@ impl App {
         }
         // The row that makes another.
         let new_tab = gtk::EventBox::new();
-        new_tab.style_context().add_class("newtab");
+        crate::ui::class(&new_tab, "newtab");
         new_tab.set_size_request(-1, height);
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         hbox.set_margin_start(8);
@@ -520,7 +524,7 @@ impl App {
         plus.set_valign(gtk::Align::Center);
         ui::pack(&hbox, &plus, false);
         let label = gtk::Label::new(Some("New tab"));
-        label.style_context().add_class("newtablabel");
+        crate::ui::class(&label, "newtablabel");
         label.set_xalign(0.0);
         label.set_valign(gtk::Align::Center);
         ui::pack(&hbox, &label, true);
@@ -1016,21 +1020,24 @@ impl App {
         self.find.borrow().layout(width);
     }
 
-    #[allow(dead_code)]
-    fn layout_layers_unused(&self, width: i32, height: i32) {
-        self.omni.holder.set_size_request(width, height);
-        self.omni.layout(width, height);
-        self.panels.borrow().holder.set_size_request(width, height);
-        self.panels.borrow().layout(width, height);
-        self.find.borrow().holder.set_size_request(width, height);
-        self.find.borrow().layout(width);
-    }
 
     /// A search inside a panel re-opens it with the filter applied.
+    ///
+    /// Setting the field back to what it already says is not a change, and
+    /// acting on it would rebuild the panel inside the borrow that is
+    /// rebuilding it. Empty is a real change: clearing the words shows
+    /// everything again.
     pub fn filter_panel(&self, kind: PanelKind, text: &str) {
-        if text.is_empty() {
+        let wanted = text.to_lowercase();
+        // A panel is rebuilding: the change that arrives is its own field
+        // being given back what was typed, not a new search.
+        let Ok(panels) = self.panels.try_borrow() else {
+            return;
+        };
+        if wanted == *panels.filter.borrow() {
             return;
         }
+        drop(panels);
         if let Some(app) = current() {
             self.panels.borrow_mut().set_filter(&app, kind, text);
         }
@@ -1133,6 +1140,7 @@ impl App {
     }
 
     pub fn reader(&self) {
+        self.reading.set(!self.reading.get());
         let Some(app) = current() else { return };
         let Some(view) = self.view(self.active_id()) else { return };
         crate::reader::enter(&app, &view);
@@ -1282,6 +1290,25 @@ impl App {
             ("Downloads", Box::new(|app: &App| app.toggle_panel(PanelKind::Downloads))),
             ("Settings", Box::new(|app: &App| app.toggle_panel(PanelKind::Settings))),
             ("Shortcuts", Box::new(|app: &App| app.toggle_panel(PanelKind::Shortcuts))),
+            ("Blocker Off Here", Box::new(|app: &App| {
+                let host = app
+                    .state
+                    .borrow()
+                    .active_tab()
+                    .map(|tab| crate::shield::host_of(&tab.url))
+                    .unwrap_or_default();
+                if host.is_empty() {
+                    return;
+                }
+                let off = crate::shield::allowed(&host);
+                crate::shield::set_allowed(&host, !off);
+                app.flash_toast(if off {
+                    "Blocker on here again."
+                } else {
+                    "Blocker off here."
+                });
+                app.reload();
+            })),
         ];
         for (label, action) in items {
             let item = gtk::MenuItem::with_label(label);
@@ -1299,7 +1326,7 @@ impl App {
 
     pub fn flash_toast(&self, message: &str) {
         let toast = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        toast.style_context().add_class("dlbar");
+        crate::ui::class(&toast, "dlbar");
         toast.set_margin_bottom(24);
         toast.set_halign(gtk::Align::Center);
         toast.set_valign(gtk::Align::End);

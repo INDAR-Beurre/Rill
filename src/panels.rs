@@ -57,7 +57,7 @@ impl Panels {
         let scrim = crate::ui::scrim(palette);
 
         let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        card.style_context().add_class("panel");
+        crate::ui::class(&card, "panel");
         card.set_size_request(680, 420);
 
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -66,7 +66,7 @@ impl Panels {
         head.set_margin_top(16);
         head.set_margin_bottom(10);
         let title = gtk::Label::new(Some("Bookmarks"));
-        title.style_context().add_class("head");
+        crate::ui::class(&title, "head");
         title.set_xalign(0.0);
         title.set_hexpand(true);
         head.add(&title);
@@ -122,28 +122,45 @@ impl Panels {
         panels
     }
 
-    /// A filter typed into a panel: the panel is rebuilt with it applied.
+    /// A filter typed into a panel: the panel is rebuilt with it applied, and
+    /// the field is given back what was typed so the caret stays where it was.
     pub fn set_filter(&mut self, app: &AppRef, kind: PanelKind, text: &str) {
         *self.filter.borrow_mut() = text.to_lowercase();
-        self.open_panel_with(app, kind);
+        let caret = text.chars().count() as i32;
+        let entry = self.open_panel_with(app, kind);
+        if let Some(entry) = entry {
+            entry.set_text(text);
+            entry.grab_focus();
+            entry.set_position(caret);
+        }
     }
 
-    fn open_panel_with(&mut self, app: &AppRef, kind: PanelKind) {
+    fn open_panel_with(&mut self, app: &AppRef, kind: PanelKind) -> Option<gtk::Entry> {
         self.open = Some(kind.clone());
         self.title.set_text(kind.title());
         self.build_nav(app, &kind);
-        match kind {
+        let field = match kind {
             PanelKind::Bookmarks => self.build_bookmarks(app),
             PanelKind::History => self.build_history(app),
-            PanelKind::Downloads => self.build_downloads(app),
-            PanelKind::Settings => self.build_settings(app),
-            PanelKind::Shortcuts => self.build_shortcuts(),
-        }
+            PanelKind::Downloads => {
+                self.build_downloads(app);
+                None
+            }
+            PanelKind::Settings => {
+                self.build_settings(app);
+                None
+            }
+            PanelKind::Shortcuts => {
+                self.build_shortcuts();
+                None
+            }
+        };
         let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
         let wanted = self.body.preferred_height_for_width(card_width - 32).0 + 132;
         self.wanted_height.set(wanted.clamp(300, 640));
         self.layer.show();
         self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
+        field
     }
 
     fn matches(&self, text: &str) -> bool {
@@ -153,24 +170,7 @@ impl Panels {
 
     pub fn open_panel(&mut self, app: &AppRef, kind: PanelKind) {
         *self.filter.borrow_mut() = String::new();
-        self.open = Some(kind.clone());
-        self.title.set_text(kind.title());
-        self.layer.show();
-        self.build_nav(app, &kind);
-        match kind {
-            PanelKind::Bookmarks => self.build_bookmarks(app),
-            PanelKind::History => self.build_history(app),
-            PanelKind::Downloads => self.build_downloads(app),
-            PanelKind::Settings => self.build_settings(app),
-            PanelKind::Shortcuts => self.build_shortcuts(),
-        }
-        // Measured here, not during an allocation pass: asking a widget for
-        // its preferred size while GTK is allocating is how a UI wedges.
-        let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
-        let wanted = self.body.preferred_height_for_width(card_width - 32).0 + 132;
-        self.wanted_height.set(wanted.clamp(300, 640));
-        self.layer.show();
-        self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
+        self.open_panel_with(app, kind);
     }
 
     /// The card stands in the middle of the page it covers.
@@ -214,12 +214,12 @@ impl Panels {
         }
         for kind in PanelKind::all() {
             let button = gtk::Button::new();
-            button.style_context().add_class("tab");
+            crate::ui::class(&button, "tab");
             let label = gtk::Label::new(Some(kind.title()));
             button.add(&label);
             if &kind == current {
                 button.set_state_flags(gtk::StateFlags::CHECKED, false);
-                button.style_context().add_class("on");
+                crate::ui::class(&button, "on");
             }
             let app_weak = app.weak();
             let target = kind.clone();
@@ -256,13 +256,13 @@ impl Panels {
         entry
     }
 
-    fn build_bookmarks(&self, app: &AppRef) {
+    fn build_bookmarks(&self, app: &AppRef) -> Option<gtk::Entry> {
         self.clear_body();
         let bookmarks = app.state.borrow().bookmarks.clone();
         if bookmarks.is_empty() {
             self.body.add(&self.empty_state("Nothing kept yet. ⌘D, or Ctrl+D, keeps the page you are on."));
             self.body.show_all();
-            return;
+            return None;
         }
         let filter = self.filter_field("Search bookmarks", |text| {
             if let Some(app) = crate::app::current() {
@@ -280,25 +280,26 @@ impl Panels {
         }
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
+        Some(filter)
     }
 
-    fn build_history(&self, app: &AppRef) {
+    fn build_history(&self, app: &AppRef) -> Option<gtk::Entry> {
         self.clear_body();
         let history = app.state.borrow().history.clone();
         if history.is_empty() {
             self.body.add(&self.empty_state("The pages you visit show up here, on this machine only."));
             self.body.show_all();
-            return;
+            return None;
         }
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         header.set_margin_bottom(8);
         let count = gtk::Label::new(Some(&format!("{} pages", history.len())));
-        count.style_context().add_class("sub");
+        crate::ui::class(&count, "sub");
         count.set_xalign(0.0);
         count.set_hexpand(true);
         header.add(&count);
         let clear = gtk::Button::with_label("Clear History");
-        clear.style_context().add_class("act");
+        crate::ui::class(&clear, "act");
         {
             let app_weak = app.weak();
             clear.connect_clicked(move |_| {
@@ -335,6 +336,7 @@ impl Panels {
         }
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
+        Some(filter)
     }
 
     fn build_downloads(&self, app: &AppRef) {
@@ -376,16 +378,16 @@ impl Panels {
         appearance.set_margin_top(4);
         appearance.set_margin_bottom(14);
         let label = gtk::Label::new(Some("Appearance"));
-        label.style_context().add_class("setting");
+        crate::ui::class(&label, "setting");
         label.set_xalign(0.0);
         appearance.add(&label);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        buttons.style_context().add_class("segmented");
+        crate::ui::class(&buttons, "segmented");
         for look in [crate::store::Look::Light, crate::store::Look::Dark, crate::store::Look::System] {
             let button = gtk::Button::with_label(look.title());
-            button.style_context().add_class("act");
+            crate::ui::class(&button, "act");
             if look == prefs.appearance {
-                button.style_context().add_class("chosen");
+                crate::ui::class(&button, "chosen");
             }
             let app_weak = app.weak();
             let chosen = look.clone();
@@ -401,7 +403,7 @@ impl Panels {
         list.add(&appearance);
 
         let browsing = gtk::Label::new(Some("BROWSING"));
-        browsing.style_context().add_class("group");
+        crate::ui::class(&browsing, "group");
         browsing.set_xalign(0.0);
         list.add(&browsing);
         list.add(&self.setting_switch(app, "Block ads and trackers", "Rules enforced inside the engine, before a request is made.", prefs.shield, |app, on| {
@@ -431,7 +433,7 @@ impl Panels {
         ));
 
         let tabs_head = gtk::Label::new(Some("TABS"));
-        tabs_head.style_context().add_class("group");
+        crate::ui::class(&tabs_head, "group");
         tabs_head.set_xalign(0.0);
         list.add(&tabs_head);
         list.add(&self.setting_switch(
@@ -467,10 +469,10 @@ impl Panels {
         let texts = gtk::Box::new(gtk::Orientation::Vertical, 2);
         texts.set_hexpand(true);
         let title = gtk::Label::new(Some("Search engine"));
-        title.style_context().add_class("setting");
+        crate::ui::class(&title, "setting");
         title.set_xalign(0.0);
         let sub = gtk::Label::new(Some("What words in the field search with"));
-        sub.style_context().add_class("settingdesc");
+        crate::ui::class(&sub, "settingdesc");
         sub.set_xalign(0.0);
         texts.add(&title);
         texts.add(&sub);
@@ -509,16 +511,16 @@ impl Panels {
         let unhide_text = gtk::Box::new(gtk::Orientation::Vertical, 2);
         unhide_text.set_hexpand(true);
         let unhide_title = gtk::Label::new(Some("Hidden here"));
-        unhide_title.style_context().add_class("setting");
+        crate::ui::class(&unhide_title, "setting");
         unhide_title.set_xalign(0.0);
         let unhide_sub = gtk::Label::new(Some(&format!("{count} things hidden on {hidden}")));
-        unhide_sub.style_context().add_class("settingdesc");
+        crate::ui::class(&unhide_sub, "settingdesc");
         unhide_sub.set_xalign(0.0);
         unhide_text.add(&unhide_title);
         unhide_text.add(&unhide_sub);
         crate::ui::pack(&unhide_row, &unhide_text, true);
         let show_all = gtk::Button::with_label("Show them");
-        show_all.style_context().add_class("act");
+        crate::ui::class(&show_all, "act");
         {
             let weak = app.weak();
             show_all.connect_clicked(move |_| {
@@ -538,7 +540,7 @@ impl Panels {
             "Search {} · WebKitGTK · Rust · this machine only",
             env!("CARGO_PKG_VERSION")
         )));
-        about.style_context().add_class("settingdesc");
+        crate::ui::class(&about, "settingdesc");
         about.set_xalign(0.0);
         about.set_margin_top(16);
         list.add(&about);
@@ -553,7 +555,7 @@ impl Panels {
     /// keys is a browser whose keys nobody learns.
     fn build_shortcuts(&self) {
         self.clear_body();
-        let keys: [(&str, &str); 18] = [
+        let keys: [(&str, &str); 27] = [
             ("Ctrl L", "The field"),
             ("Ctrl T", "New tab"),
             ("Ctrl W", "Close tab"),
@@ -567,11 +569,20 @@ impl Panels {
             ("Ctrl Y", "History"),
             ("Ctrl Shift B", "Bookmarks"),
             ("Ctrl J", "Downloads"),
-            ("Ctrl Shift R", "Reading mode"),
+            ("Ctrl Shift R", "Reading mode (again to leave)"),
             ("Ctrl Shift H", "Hide something on this site"),
             ("Ctrl Shift U", "Show what is hidden here"),
             ("Ctrl ,", "Settings"),
             ("Ctrl Shift I", "The inspector"),
+            ("Ctrl N", "New tab (Ctrl Shift N: private)"),
+            ("Ctrl Shift Tab", "Previous tab"),
+            ("Ctrl Page Up Down", "Move between tabs"),
+            ("Ctrl Shift C", "Copy the address"),
+            ("Ctrl + - 0", "Zoom in, out, reset"),
+            ("F5", "Reload (Ctrl F5 skips the cache)"),
+            ("F12", "The inspector"),
+            ("Alt Left Right", "Back and forward"),
+            ("Escape", "Close the field, find, a panel, or reading mode"),
         ];
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         for (key, what) in keys {
@@ -579,12 +590,12 @@ impl Panels {
             row.set_margin_top(4);
             row.set_margin_bottom(4);
             let keycap = gtk::Label::new(Some(key));
-            keycap.style_context().add_class("keycap");
+            crate::ui::class(&keycap, "keycap");
             keycap.set_xalign(0.0);
             keycap.set_size_request(150, -1);
             crate::ui::pack(&row, &keycap, false);
             let label = gtk::Label::new(Some(what));
-            label.style_context().add_class("setting");
+            crate::ui::class(&label, "setting");
             label.set_xalign(0.0);
             crate::ui::pack(&row, &label, true);
             list.add(&row);
@@ -607,10 +618,10 @@ impl Panels {
         let texts = gtk::Box::new(gtk::Orientation::Vertical, 2);
         texts.set_hexpand(true);
         let name = gtk::Label::new(Some(title));
-        name.style_context().add_class("setting");
+        crate::ui::class(&name, "setting");
         name.set_xalign(0.0);
         let sub = gtk::Label::new(Some(subtitle));
-        sub.style_context().add_class("settingdesc");
+        crate::ui::class(&sub, "settingdesc");
         sub.set_xalign(0.0);
         sub.set_line_wrap(true);
         texts.add(&name);
@@ -632,7 +643,7 @@ impl Panels {
 
     fn empty_state(&self, text: &str) -> gtk::Label {
         let label = gtk::Label::new(Some(text));
-        label.style_context().add_class("empty");
+        crate::ui::class(&label, "empty");
         label.set_line_wrap(true);
         label.set_margin_top(40);
         label.set_justify(gtk::Justification::Center);
@@ -648,7 +659,7 @@ impl Panels {
         run: impl Fn(&AppRef) + 'static,
     ) -> gtk::EventBox {
         let row = gtk::EventBox::new();
-        row.style_context().add_class("ptrow");
+        crate::ui::class(&row, "ptrow");
         row.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         hbox.set_margin_top(7);
@@ -659,9 +670,9 @@ impl Panels {
         let letter = gtk::Label::new(Some(
             &title.chars().next().unwrap_or('\u{2022}').to_uppercase().to_string(),
         ));
-        letter.style_context().add_class("tileletter");
+        crate::ui::class(&letter, "tileletter");
         let tile = gtk::EventBox::new();
-        tile.style_context().add_class("tile");
+        crate::ui::class(&tile, "tile");
         tile.set_size_request(18, 18);
         tile.set_valign(gtk::Align::Center);
         tile.add(&letter);
@@ -670,11 +681,11 @@ impl Panels {
         let texts = gtk::Box::new(gtk::Orientation::Vertical, 1);
         texts.set_hexpand(true);
         let name = gtk::Label::new(Some(title));
-        name.style_context().add_class("ptitle");
+        crate::ui::class(&name, "ptitle");
         name.set_xalign(0.0);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         let url = gtk::Label::new(Some(subtitle));
-        url.style_context().add_class("purl");
+        crate::ui::class(&url, "purl");
         url.set_xalign(0.0);
         url.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         texts.add(&name);
@@ -682,7 +693,7 @@ impl Panels {
         crate::ui::pack(&hbox, &texts, true);
 
         let button = gtk::Button::with_label(action);
-        button.style_context().add_class("act");
+        crate::ui::class(&button, "act");
         button.set_valign(gtk::Align::Center);
         crate::ui::pack(&hbox, &button, false);
 

@@ -67,6 +67,10 @@ pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
                 app.toggle_panel(PanelKind::Bookmarks);
                 return crate::gtkx::inh(true);
             }
+            ("slash", _) => {
+                app.toggle_panel(crate::panels::PanelKind::Shortcuts);
+                return crate::gtkx::inh(true);
+            }
             ("comma", _) => {
                 app.toggle_panel(PanelKind::Settings);
                 return crate::gtkx::inh(true);
@@ -155,6 +159,12 @@ pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
             }
             if app.panels.borrow().open.is_some() {
                 app.close_panels();
+                return crate::gtkx::inh(true);
+            }
+            // Reading mode is the last thing standing between Escape and the
+            // page, so it is the last thing Escape takes away.
+            if app.reading.get() {
+                app.reader();
                 return crate::gtkx::inh(true);
             }
         }

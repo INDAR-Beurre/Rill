@@ -27,6 +27,7 @@ pub struct Omnibox {
     pub entry: gtk::Entry,
     pub site: gtk::Label,
     pub list: gtk::Box,
+    pub list_scroll: gtk::ScrolledWindow,
     pub visible: std::cell::Cell<bool>,
 }
 
@@ -37,16 +38,23 @@ impl Omnibox {
         let scrim = crate::ui::scrim(palette);
         layer.add(&scrim);
 
+        // The list scrolls inside a cap instead of being cropped by one: eight
+        // kinds of suggestion must not run off the bottom of the screen.
+        let list_scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        list_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        crate::ui::class(&list_scroll, "suggestscroll");
+        list_scroll.set_no_show_all(true);
+
         let block = gtk::Box::new(gtk::Orientation::Vertical, 8);
         block.set_halign(gtk::Align::Start);
         block.set_valign(gtk::Align::Start);
 
         let field = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        field.style_context().add_class("omni");
+        crate::ui::class(&field, "omni");
         field.set_size_request(FIELD_WIDTH, FIELD_HEIGHT);
 
         let site = gtk::Label::new(None);
-        site.style_context().add_class("omnisite");
+        crate::ui::class(&site, "omnisite");
         site.set_margin_start(18);
         site.set_ellipsize(gtk::pango::EllipsizeMode::End);
         site.set_max_width_chars(14);
@@ -54,7 +62,7 @@ impl Omnibox {
         crate::ui::pack(&field, &site, false);
 
         let entry = gtk::Entry::new();
-        entry.style_context().add_class("omnitext");
+        crate::ui::class(&entry, "omnitext");
         entry.set_placeholder_text(Some("Search or enter address"));
         entry.set_hexpand(true);
         entry.set_margin_end(18);
@@ -64,11 +72,12 @@ impl Omnibox {
         block.add(&field);
 
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        list.style_context().add_class("suggest");
+        crate::ui::class(&list, "suggest");
         list.set_size_request(FIELD_WIDTH, -1);
         list.set_halign(gtk::Align::Start);
         list.set_no_show_all(true);
-        block.add(&list);
+        list_scroll.add(&list);
+        block.add(&list_scroll);
 
         layer.add(&block);
         let holder = layer.root.clone();
@@ -85,6 +94,7 @@ impl Omnibox {
             entry,
             site,
             list,
+            list_scroll,
             visible: std::cell::Cell::new(false),
         }
     }
@@ -103,15 +113,20 @@ impl Omnibox {
         // Centred on the page, not on the window: the column is not part of
         // the page the field is over.
         let x = (column + (width - column - FIELD_WIDTH) / 2).max(column + 12);
-        let block_height = FIELD_HEIGHT + if self.list.get_visible() { self.list_height() } else { 0 };
+        let block_height = FIELD_HEIGHT + if self.list_scroll.get_visible() { self.list_height() + 8 } else { 0 };
         let y = ((height - block_height) / 2 - 60).max(72);
         self.layer.place(&self.block, x, y, FIELD_WIDTH, block_height.max(FIELD_HEIGHT));
+        if self.list_scroll.get_visible() {
+            self.list_scroll.set_size_request(FIELD_WIDTH, self.list_height());
+        }
         self.field.set_size_request(FIELD_WIDTH, FIELD_HEIGHT);
     }
 
+    /// The list's own preferred height, not a guess: group headers are shorter
+    /// than rows, and the cap has to be a scroll, not a crop.
     fn list_height(&self) -> i32 {
-        let rows = self.list.children().len() as i32;
-        (rows * 52).min(420)
+        let wanted = self.list.preferred_height_for_width(FIELD_WIDTH).0;
+        wanted.clamp(0, 420)
     }
 
     pub fn show(&self, ui: &crate::ui::Ui, over: bool, offers: Vec<Offer>) {
@@ -158,15 +173,19 @@ impl Omnibox {
         }
         if offers.is_empty() {
             self.list.hide();
+            self.list_scroll.hide();
             return;
         }
         self.list.set_no_show_all(false);
+        self.list_scroll.set_no_show_all(false);
+        self.list_scroll.show();
+        self.list.show_all();
         let mut last_kind = String::new();
         for (index, offer) in offers.into_iter().enumerate() {
             if offer.kind != last_kind {
                 last_kind = offer.kind.clone();
                 let head = gtk::Label::new(Some(&last_kind));
-                head.style_context().add_class("sghead");
+                crate::ui::class(&head, "sghead");
                 head.set_xalign(0.0);
                 head.set_margin_start(12);
                 head.set_margin_top(6);
@@ -174,9 +193,11 @@ impl Omnibox {
                 self.list.add(&head);
             }
             let row = gtk::EventBox::new();
-            row.style_context().add_class("sgrow");
+            crate::ui::class(&row, "sgrow");
+            row.set_can_focus(true);
+            row.set_tooltip_text(Some(&format!("{} — {}", offer.title, offer.kind)));
             if index as i32 == picked {
-                row.style_context().add_class("picked");
+                crate::ui::class(&row, "picked");
             }
             let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
             hbox.set_margin_start(12);
@@ -187,9 +208,9 @@ impl Omnibox {
             let letter = gtk::Label::new(Some(
                 &offer.title.chars().next().unwrap_or('•').to_uppercase().to_string(),
             ));
-            letter.style_context().add_class("tileletter");
+            crate::ui::class(&letter, "tileletter");
             let tile = gtk::EventBox::new();
-            tile.style_context().add_class("tile");
+            crate::ui::class(&tile, "tile");
             tile.set_size_request(18, 18);
             tile.set_valign(gtk::Align::Center);
             tile.add(&letter);
@@ -197,11 +218,11 @@ impl Omnibox {
 
             let texts = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let title = gtk::Label::new(Some(&offer.title));
-            title.style_context().add_class("sgtitle");
+            crate::ui::class(&title, "sgtitle");
             title.set_xalign(0.0);
             title.set_ellipsize(gtk::pango::EllipsizeMode::End);
             let url = gtk::Label::new(Some(&offer.url));
-            url.style_context().add_class("sgurl");
+            crate::ui::class(&url, "sgurl");
             url.set_xalign(0.0);
             url.set_ellipsize(gtk::pango::EllipsizeMode::End);
             texts.add(&title);
@@ -209,7 +230,7 @@ impl Omnibox {
             crate::ui::pack(&hbox, &texts, true);
 
             let kind = gtk::Label::new(Some(&offer.kind));
-            kind.style_context().add_class("sgkind");
+            crate::ui::class(&kind, "sgkind");
             kind.set_valign(gtk::Align::Center);
             crate::ui::pack(&hbox, &kind, false);
 

@@ -133,6 +133,16 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             app.ui.pins.children().len(),
             app.state.borrow().tabs.iter().filter(|tab| tab.pinned).count()
         )),
+        "filter" => {
+            // The borrow is released before the panel is asked to rebuild: a
+            // match on a `borrow()` keeps it alive for the whole arm.
+            let kind = app.panels.borrow().open.clone();
+            match kind {
+                Some(kind) => app.filter_panel(kind, argument),
+                None => return fail("no panel is open"),
+            }
+            ok("")
+        }
         "open" => {
             if argument.is_empty() {
                 return fail("open needs an address");
@@ -284,14 +294,17 @@ fn probe(app: &AppRef) -> String {
     let panels = app.panels.borrow();
     let hide_mode = app.state.borrow().hide_mode;
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"find\":{},\"findText\":\"{}\",\"hideMode\":{},\"maximised\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{}}}",
+        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"hideMode\":{},\"maximised\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{}}}",
         active,
         json_escape(&url),
         json_escape(&title),
         tabs.join(","),
         app.omni.visible.get(),
+        app.omni.offers.borrow().len(),
+        app.omni.picked.get(),
         json_escape(&app.omni.entry.text()),
         panels.open.as_ref().map(|kind| format!("{kind:?}")).unwrap_or_default(),
+        json_escape(&panels.filter.borrow()),
         find.visible,
         json_escape(&find.entry.text()),
         hide_mode,

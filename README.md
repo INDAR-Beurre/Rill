@@ -13,7 +13,7 @@ Chromium to download, update and keep in memory.
 
 * about 850 KB of binary
 * three processes with a tab open, as in Safari: the frame, a page, a network.
-  115 MB of that is the browser's own memory and 211 MB is resident in total,
+  101 MB of that is the browser's own memory and 210 MB is resident in total,
   the difference being the shared GTK and WebKit libraries the desktop already
   has. Both numbers are measured by `tools/stress.py`, not estimated
 * every page runs in WebKit's own process

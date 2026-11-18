@@ -22,7 +22,7 @@ impl FindBar {
         let holder = layer.root.clone();
 
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        bar.style_context().add_class("findbar");
+        crate::ui::class(&bar, "findbar");
         bar.set_size_request(BAR_WIDTH, 34);
 
         let entry = gtk::Entry::new();
@@ -34,7 +34,7 @@ impl FindBar {
         crate::ui::pack(&bar, &entry, true);
 
         let count = gtk::Label::new(Some(""));
-        count.style_context().add_class("empty");
+        crate::ui::class(&count, "empty");
         count.set_valign(gtk::Align::Center);
         crate::ui::pack(&bar, &count, false);
 

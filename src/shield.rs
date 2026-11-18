@@ -7,7 +7,7 @@
 use crate::files;
 use glib::translate::ToGlibPtr;
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_void, CString};
 use webkit2gtk::gio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -76,7 +76,6 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
     let slot = Arc::new(Mutex::new(Slot { filter: None, done: false }));
     let raw = Arc::into_raw(slot.clone()) as *mut c_void;
 
-    let stores: Vec<*mut ffi::WebKitUserContentFilterStore> = Vec::new();
     unsafe {
         let store = ffi::webkit_user_content_filter_store_new(store_path.as_ptr());
         if store.is_null() {
@@ -100,11 +99,6 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    unsafe {
-        for store in stores {
-            glib::gobject_ffi::g_object_unref(store as *mut glib::gobject_ffi::GObject);
-        }
-    }
     let filter = slot.lock().unwrap().filter;
     let mut ok = false;
     unsafe {
@@ -125,11 +119,17 @@ pub fn allow_path() -> std::path::PathBuf {
     files::path_in(&files::data_dir(), "shield-off.json")
 }
 
+/// Whether the blocker is off for this host.
+pub fn allowed(host: &str) -> bool {
+    allow_list().get(host).copied().unwrap_or(false)
+}
+
 pub fn allow_list() -> BTreeMap<String, bool> {
     files::read_json(&allow_path()).unwrap_or_default()
 }
 
-#[allow(dead_code)]
+/// Turn the blocker off for one host, and on again. The curtain menu uses
+/// this; the allowlist it writes is read at load time.
 pub fn set_allowed(host: &str, off: bool) {
     let mut list = allow_list();
     if off {
@@ -151,9 +151,6 @@ pub fn host_of(url: &str) -> String {
     let host = host.split('@').last().unwrap_or(host);
     host.split(':').next().unwrap_or(host).to_lowercase()
 }
-
-#[allow(dead_code)]
-fn unused(_: *mut c_char) {}
 
 #[cfg(test)]
 mod tests {

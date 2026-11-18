@@ -122,6 +122,15 @@ line. It is the same idea as the Mac build's `./bench`.
 - `src/bench.rs` is the socket tests drive the browser through; `tools/shots.sh`
   takes a picture of every state without needing a compositor.
 
+## Why this and not another browser
+
+If you have one window open all day with a handful of pages and you want the
+window to be a column of tabs and the page, this is the whole of it. It does not
+download an engine: it uses the one your desktop already has, so a release
+upgrade is a `cargo build`, and starting it is one process until a page loads.
+If you want extensions, sync or a second window, it will disappoint you on
+purpose (see [What it does not do](#what-it-does-not-do)).
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).

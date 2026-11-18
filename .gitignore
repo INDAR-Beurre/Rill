@@ -9,3 +9,7 @@ council/*/raw*
 
 # nothing else: the screenshots and reports under council/ are the evidence
 # the scores refer to, so they stay in the repository.
+
+# python bytecode from the tools
+__pycache__/
+*.pyc

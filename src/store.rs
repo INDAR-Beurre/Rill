@@ -41,7 +41,37 @@ pub struct Prefs {
     pub restore_session: bool,
     pub search_engine: String,
     pub show_bookmarks_bar: bool,
+    /// The window's size as it was left: a browser that opens the size you
+    /// last had it is a browser that respects what you were doing. Not its
+    /// place, though: the window opens in the middle of the screen whatever
+    /// the last one did, because a coordinate is only meaningful on the
+    /// monitor it was recorded on.
+    #[serde(default = "default_window")]
+    pub window_size: (i32, i32),
+    /// Whether it was maximised when it was closed. Saved as its own answer
+    /// rather than as a size, because a maximised window reports the size of
+    /// the screen it filled, which means nothing on a different one.
+    #[serde(default)]
+    pub window_maximised: bool,
     pub darken_pages: bool,
+    /// Turn off the one painting path that is worth a switch.
+    ///
+    /// What it does, before GTK starts: sets WEBKIT_DISABLE_COMPOSITING_MODE=1.
+    /// WebKit reads that once, when its processes are forked, so changing this
+    /// takes effect at the next launch and not before. Two other knobs used to
+    /// be part of this switch and are now always on, because they were measured
+    /// to help with nothing lost: WEBKIT_DISABLE_DMABUF_RENDERER=1 and
+    /// MALLOC_ARENA_MAX=2. See main() for the four-run numbers.
+    ///
+    /// What it is worth, measured over four runs of one idle tab: 87.0, 96.9,
+    /// 102.7 and 104.0 MB of the browser's own memory with nothing set;
+    /// 60.4, 75.1, 75.2 and 87.8 MB with the two always-on knobs; and 61.8,
+    /// 62.2, 64.5 and 66.4 MB with this one added. The last is the steadiest,
+    /// which is the reason to keep it. Compositing off on its own, without the
+    /// other two, was worse than leaving everything alone: 77.6, 78.2, 80.2
+    /// and 88.1 MB. The cost is a slower first paint on pages with many images.
+    #[serde(default)]
+    pub low_memory: bool,
     /// Filled in by the browser at launch: whether the desktop is dark.
     #[serde(skip)]
     pub desktop_dark: bool,
@@ -51,6 +81,10 @@ pub struct Prefs {
     /// them meant a --fresh start never wrote a session at all.
     #[serde(skip)]
     pub skip_restore: bool,
+}
+
+fn default_window() -> (i32, i32) {
+    (1180, 760)
 }
 
 impl Default for Prefs {
@@ -67,7 +101,10 @@ impl Default for Prefs {
             restore_session: true,
             search_engine: "DuckDuckGo".into(),
             show_bookmarks_bar: false,
+            window_size: default_window(),
+            window_maximised: false,
             darken_pages: false,
+            low_memory: false,
             desktop_dark: false,
             skip_restore: false,
         }
@@ -199,7 +236,7 @@ impl Records {
     /// A visit is written before the page has said its name, so the address
     /// field used to offer four rows called "127.0.0.1". When the title does
     /// arrive, it goes onto the newest entry for that address.
-    pub fn name_visit(history: &mut Vec<HistoryEntry>, url: &str, title: &str) {
+    pub fn name_visit(history: &mut [HistoryEntry], url: &str, title: &str) {
         if title.is_empty() {
             return;
         }
@@ -214,6 +251,25 @@ impl Records {
 
     pub fn save_bookmarks(bookmarks: &[Bookmark]) {
         files::write_json(&Self::file("bookmarks.json"), &bookmarks.to_vec());
+    }
+
+    /// The download list survives a restart, like history and bookmarks. The
+    /// files are still in the Downloads folder either way; a panel that forgets
+    /// them makes the browser look like it lost them.
+    pub fn load_downloads() -> Vec<crate::app::DownloadRec> {
+        files::read_json(&Self::file("downloads.json")).unwrap_or_default()
+    }
+
+    pub fn save_downloads(downloads: &[crate::app::DownloadRec]) {
+        // Only what finished or failed is worth keeping: a half-written file
+        // from a session that ended is not a download anyone can open.
+        let settled: Vec<crate::app::DownloadRec> = downloads
+            .iter()
+            .filter(|entry| entry.done || entry.failed)
+            .take(200)
+            .cloned()
+            .collect();
+        files::write_json(&Self::file("downloads.json"), &settled);
     }
 
     pub fn load_hidden() -> BTreeMap<String, Vec<String>> {
@@ -233,6 +289,37 @@ pub fn now_secs() -> u64 {
 }
 
 /// "3 days ago", the way a history list says it.
+/// The heading a visit belongs under: Today, Yesterday, or a date.
+///
+/// "43 days ago" is honest and useless. A person looking for something they
+/// read last Tuesday needs a calendar, and the local one at that — a UTC date
+/// would put an evening's reading under the wrong day for half the world.
+pub fn day_of(at: u64, now: u64) -> String {
+    let local = |secs: u64| {
+        gtk::glib::DateTime::from_unix_utc(secs as i64)
+            .ok()
+            .and_then(|utc| utc.to_local().ok())
+    };
+    let Some(then) = local(at) else {
+        return "Earlier".to_string();
+    };
+    let today = local(now);
+    if let Some(today) = &today {
+        let same = then.year() == today.year() && then.day_of_year() == today.day_of_year();
+        if same {
+            return "Today".to_string();
+        }
+        if let Ok(yesterday) = today.add_days(-1) {
+            if then.year() == yesterday.year() && then.day_of_year() == yesterday.day_of_year() {
+                return "Yesterday".to_string();
+            }
+        }
+    }
+    then.format("%e %B %Y")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "Earlier".to_string())
+}
+
 pub fn ago(at: u64, now: u64) -> String {
     let s = now.saturating_sub(at);
     match s {
@@ -304,6 +391,119 @@ mod tests {
         let fixed = loaded.sanitised();
         assert!((176.0..=440.0).contains(&fixed.side_width));
         assert_eq!(fixed.side_width, 440.0);
+    }
+
+    /// A folder of this test's own under the temp dir. Nothing in this file
+    /// may read or write the real config folder: a test that saved there would
+    /// rewrite the preferences of whoever ran it.
+    fn scratch(test: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "search-store-{}-{test}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp folder");
+        dir
+    }
+
+    #[test]
+    fn preferences_survive_a_trip_through_a_file() {
+        let dir = scratch("round-trip");
+        let path = dir.join("prefs.json");
+
+        let prefs = Prefs {
+            appearance: Look::Dark,
+            sidebar: false,
+            side_width: 301.0,
+            roomy_tabs: true,
+            shield: false,
+            curtain: false,
+            memory_saver: false,
+            sleep_minutes: 90,
+            restore_session: false,
+            search_engine: "Startpage".into(),
+            show_bookmarks_bar: true,
+            window_size: (1280, 720),
+            window_maximised: true,
+            darken_pages: true,
+            low_memory: true,
+            // Neither of these is written: one is answered at launch, the
+            // other belongs to this run alone.
+            desktop_dark: true,
+            skip_restore: true,
+        };
+
+        files::write_json(&path, &prefs);
+        let back: Prefs = files::read_json(&path).expect("the file this test just wrote parses");
+
+        assert_eq!(back.window_size, (1280, 720));
+        assert!(back.window_maximised);
+        assert!(back.low_memory);
+        assert!(back.show_bookmarks_bar);
+        assert_eq!(back.side_width, 301.0);
+        assert_eq!(back.sleep_minutes, 90);
+        assert_eq!(back.search_engine, "Startpage");
+        assert!(back.roomy_tabs && back.darken_pages);
+        assert!(!back.sidebar && !back.shield && !back.curtain && !back.memory_saver);
+        assert!(!back.restore_session);
+        assert!(matches!(back.appearance, Look::Dark));
+        // The two skipped fields come back as defaults, not as what was saved.
+        assert!(!back.desktop_dark && !back.skip_restore);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_an_older_version_still_loads() {
+        let dir = scratch("older");
+        let path = dir.join("prefs.json");
+        // What a build that predates window_size, window_maximised, low_memory
+        // and show_bookmarks_bar wrote. Every one of them has to arrive as its
+        // default rather than as a parse error, or an upgrade would silently
+        // throw the whole file away.
+        std::fs::write(
+            &path,
+            r#"{"appearance":"light","sidebar":false,"side_width":260.0,
+                "roomy_tabs":true,"shield":false,"curtain":false,
+                "memory_saver":false,"sleep_minutes":15,
+                "restore_session":false,"search_engine":"Bing",
+                "darken_pages":true}"#,
+        )
+        .expect("write the older file");
+
+        let back: Prefs = files::read_json(&path).expect("an older file still parses");
+
+        assert_eq!(back.window_size, default_window());
+        assert_eq!(back.window_size, (1180, 760));
+        assert!(!back.window_maximised);
+        assert!(!back.low_memory);
+        assert!(!back.show_bookmarks_bar);
+        // The fields that were there are honoured.
+        assert_eq!(back.side_width, 260.0);
+        assert_eq!(back.sleep_minutes, 15);
+        assert_eq!(back.search_engine, "Bing");
+        assert!(back.roomy_tabs && back.darken_pages);
+        assert!(!back.sidebar);
+        assert!(matches!(back.appearance, Look::Light));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_does_not_parse() {
+        let dir = scratch("garbage");
+        let path = dir.join("prefs.json");
+        std::fs::write(&path, b"not json at all").expect("write it");
+
+        // read_json answers None rather than panicking, and load() turns that
+        // into the defaults. Nothing in that path may unwrap a user's file.
+        assert!(files::read_json::<Prefs>(&path).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -76,11 +76,24 @@ impl Tab {
     }
 }
 
-#[derive(Clone)]
+/// One file the browser was asked to save.
+///
+/// The byte counts are here so the panel can say how far along a download is
+/// rather than only whether it has finished: "Downloading to /a/path" for a
+/// 40 MB file is a sentence that tells the reader nothing they want to know.
+/// `failed` is separate from `done` because a download that failed used to
+/// stay "Downloading" for the rest of the session.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct DownloadRec {
     pub name: String,
     pub path: String,
     pub done: bool,
+    #[serde(default)]
+    pub failed: bool,
+    #[serde(default)]
+    pub got: u64,
+    #[serde(default)]
+    pub total: u64,
 }
 
 pub struct ErrorPage {
@@ -136,6 +149,45 @@ pub struct App {
     /// asked for during a redraw: a redraw happens while the rows are being
     /// rebuilt, and the view may not exist yet.
     pub icons: RefCell<std::collections::BTreeMap<TabId, cairo::Surface>>,
+    /// What the bookmarks bar currently shows, so it is rebuilt on a change to
+    /// the bookmarks rather than on every repaint.
+    bmarks_shown: RefCell<Vec<(String, String)>>,
+    /// The modifiers the last key carried, for the one shortcut whose meaning
+    /// depends on a modifier the entry cannot report (Shift Return in find).
+    pub last_modifiers: std::cell::Cell<gtk::gdk::ModifierType>,
+    /// Whether this browser put the window in full screen, so F11 can undo
+    /// exactly that and nothing else.
+    pub fullscreen: std::cell::Cell<bool>,
+}
+
+/// A kept page's title, short enough for a chip in a row. A long title is cut
+/// at a word boundary rather than mid-word, because a chip that reads "The
+/// Guardian vie" looks broken.
+fn short_title(title: &str) -> String {
+    let title = if title.is_empty() { "Untitled" } else { title };
+    let chars: Vec<char> = title.chars().collect();
+    if chars.len() <= 26 {
+        return title.to_string();
+    }
+    let head: String = chars.iter().take(24).collect();
+    match head.rsplit_once(' ') {
+        Some((left, _)) if left.chars().count() > 12 => format!("{left}\u{2026}"),
+        _ => format!("{}\u{2026}", head.trim_end()),
+    }
+}
+
+/// The size to open at next time. A maximised window reports the size of its
+/// screen, so remembering that would leave the browser filling the screen the
+/// next time it opens in a normal frame.
+fn remembered_size(window: &gtk::Window) -> Option<(i32, i32)> {
+    if window.is_maximized() {
+        return None;
+    }
+    let (width, height) = window.size();
+    if width < 400 || height < 300 {
+        return None;
+    }
+    Some((width, height))
 }
 
 pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
@@ -153,7 +205,8 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     bar.set_custom_title(Some(&spacer));
     bar.set_size_request(-1, 0);
     window.set_titlebar(Some(&bar));
-    window.set_default_size(1180, 760);
+    window.set_resizable(true);
+    window.set_default_size(prefs.window_size.0, prefs.window_size.1);
     window.set_position(gtk::WindowPosition::Center);
 
     prefs.desktop_dark = gtk::Settings::default()
@@ -165,6 +218,22 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     // window's own ground rather than whatever the compositor shows through.
     window.set_app_paintable(true);
 
+    // The window as it was left. Saved on the way out rather than on every
+    // resize, because a resize drag is dozens of events and one write at the
+    // end is the same answer.
+    {
+        let prefs_ref = prefs.clone();
+        window.connect_delete_event(move |window, _event| {
+            let mut saved = prefs_ref.clone();
+            saved.window_maximised = window.is_maximized();
+            if let Some((width, height)) = remembered_size(window) {
+                saved.window_size = (width, height);
+            }
+            saved.save();
+            glib::Propagation::Proceed
+        });
+    }
+
     let ui = ui::build(window.clone(), palette, &prefs);
     window.add(&ui.overlay);
 
@@ -173,7 +242,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         gtk::StyleContext::add_provider_for_screen(
             &screen,
             &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
         );
     }
 
@@ -204,7 +273,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         history: Records::load_history(),
         bookmarks: Records::load_bookmarks(),
         hidden: Records::load_hidden(),
-        downloads: Vec::new(),
+        downloads: Records::load_downloads(),
         hide_mode: false,
     };
 
@@ -230,11 +299,39 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         private_ctx: RefCell::new(None),
         palette: RefCell::new(palette),
         icons: RefCell::new(std::collections::BTreeMap::new()),
+        bmarks_shown: RefCell::new(Vec::new()),
+        last_modifiers: std::cell::Cell::new(gtk::gdk::ModifierType::empty()),
+        fullscreen: std::cell::Cell::new(false),
         last_layout: RefCell::new((0, 0)),
         reading: std::cell::Cell::new(false),
     });
 
-    app.ui.shell.set_position(prefs_side_width);
+    // Installed before `wire`, because every handler that calls `weak()` reads
+    // this slot. Wired first and installed after, all of them got an empty
+    // handle: clicks, keys on the controls and the drag did nothing at all.
+    install_self(&app);
+    app.ui.paned.set_position(prefs_side_width);
+    {
+        // A dragged divider is a choice, so it is written down. Without this
+        // the column snapped back to its saved width on the next launch and
+        // the pin wrap, which now measures the real column, disagreed with it.
+        let weak = app.weak();
+        app.ui.paned.connect_position_notify(move |paned| {
+            let Some(app) = weak.upgrade() else { return };
+            let width = paned.position() as f64;
+            if width < 40.0 {
+                return;
+            }
+            let mut prefs = app.prefs.borrow_mut();
+            if (prefs.side_width - width).abs() < 0.5 {
+                return;
+            }
+            prefs.side_width = width;
+            prefs.save();
+            drop(prefs);
+            app.render_pins();
+        });
+    }
     app.wire();
     app.apply_style();
     app.render();
@@ -255,6 +352,9 @@ impl App {
         let css = crate::css::build(&self.palette.borrow(), self.prefs.borrow().row_height());
         if let Err(error) = self.provider.load_from_data(css.as_bytes()) {
             eprintln!("search: the stylesheet did not load: {error}");
+        }
+        if std::env::var_os("SEARCH_CSS_DUMP").is_some() {
+            let _ = std::fs::write("/tmp/search-dump.css", &css);
         }
         // Pages follow the same appearance the frame does, which WebKit takes
         // from the toolkit's own preference. Only a look the person chose is
@@ -379,11 +479,60 @@ impl App {
         if let Some(view) = self.view(id) {
             view.grab_focus();
         }
+        // A tab chosen from the address field's list is still a tab chosen:
+        // leaving the field open over the page it just opened would mean the
+        // next keystroke goes into an address box nobody is looking at.
+        if self.omni.visible.get() {
+            self.omni.hide(&self.ui);
+        }
         self.render();
+        self.scroll_active_into_view();
         self.schedule_session();
     }
 
+    /// Bring the row that was just selected inside the visible part of the
+    /// list. Ctrl Tab past the bottom used to change the page and leave the
+    /// highlight off-screen, which reads as "nothing happened".
+    fn scroll_active_into_view(&self) {
+        let active = self.state.borrow().active;
+        let row = self.state.borrow().tab(active).and_then(|tab| tab.row.as_ref().map(|row| row.event.clone()));
+        let Some(row) = row else { return };
+        let adjust = self.ui.rows_scroll.vadjustment();
+        let Some((_, y)) = row.translate_coordinates(&self.ui.rows, 0, 0) else { return };
+        let height = row.allocated_height().max(1);
+        let top = adjust.value();
+        let page = adjust.page_size();
+        let wanted = if (y as f64) < top {
+            y as f64
+        } else if (y + height) as f64 > top + page {
+            (y + height) as f64 - page
+        } else {
+            return;
+        };
+        adjust.set_value(wanted.clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+    }
+
+    /// How many views the stack is still holding for tabs that no longer
+    /// exist. A view dropped without being removed from its container keeps a
+    /// whole engine inside the window, so the count is worth being able to read.
+    pub fn orphan_views(&self) -> usize {
+        let live: Vec<TabId> = self.state.borrow().tabs.iter().map(|tab| tab.id).collect();
+        self.ui
+            .stack
+            .children()
+            .iter()
+            .filter(|child| child.widget_name().starts_with("page-"))
+            .filter(|child| {
+                let name = child.widget_name();
+                let id: TabId = name.trim_start_matches("page-").parse().unwrap_or(0);
+                !live.contains(&id)
+            })
+            .count()
+    }
+
     pub fn close_tab(&self, id: TabId) {
+        let trace = std::env::var_os("SEARCH_TRACE_CLOSE").is_some();
+        let started = std::time::Instant::now();
         let (index, was_active) = {
             let state = self.state.borrow();
             match state.position(id) {
@@ -392,8 +541,19 @@ impl App {
             }
         };
         if let Some(view) = self.view(id) {
+            // Removing it from the stack is not enough: the view is still a
+            // child of the window and keeps its process, its page and its
+            // rendering alive. It has to be destroyed.
             self.ui.stack.remove(&view);
+            // SAFETY: the view was just taken out of its container and nothing
+            // else holds a reference to it in this scope beyond the local
+            // binding, which is not used again.
+            unsafe { view.destroy() };
         }
+        // Tab ids only ever go up, so a map keyed by id that is not pruned
+        // here grows for as long as the session lasts.
+        self.icons.borrow_mut().remove(&id);
+        self.state.borrow_mut().errors.remove(&id);
         let next_active = {
             let mut state = self.state.borrow_mut();
             state.tabs.remove(index);
@@ -408,6 +568,13 @@ impl App {
             state.active
         };
         self.select(next_active);
+        if trace {
+            eprintln!(
+                "search: close {id} took {}ms (views left: {})",
+                started.elapsed().as_millis(),
+                self.ui.stack.children().len()
+            );
+        }
     }
 
     pub fn close_tab_of_view(&self, view: &webkit2gtk::WebView) -> bool {
@@ -477,10 +644,27 @@ impl App {
         self.reload();
     }
 
+    /// Every view is built on a content manager that carries the extensions, so
+    /// installing, removing or switching one on has to build them again. The
+    /// pages reload from cache; nothing is lost.
+    pub fn rebuild_every_view(&self) {
+        let ids: Vec<TabId> = self.state.borrow().tabs.iter().map(|tab| tab.id).collect();
+        for id in ids {
+            self.rebuild_view(id);
+        }
+    }
+
     pub fn rebuild_view(&self, id: TabId) {
         let name = format!("tab-{id}");
         if let Some(view) = self.view(id) {
+            // Removing it from the stack is not enough: the view is still a
+            // child of the window and keeps its process, its page and its
+            // rendering alive. It has to be destroyed.
             self.ui.stack.remove(&view);
+            // SAFETY: the view was just taken out of its container and nothing
+            // else holds a reference to it in this scope beyond the local
+            // binding, which is not used again.
+            unsafe { view.destroy() };
         }
         if let Some(old) = self.ui.stack.child_by_name(&name) {
             self.ui.stack.remove(&old);
@@ -494,8 +678,63 @@ impl App {
         }
     }
 
+    /// The bookmarks bar: one chip per kept page, in the order they were kept.
+    ///
+    /// Rebuilt only when the set changes, because a row of buttons rebuilt on
+    /// every title is a row of buttons that flickers while a page loads.
+    pub fn render_bmarks(&self) {
+        let (items, wanted): (Vec<(String, String)>, bool) = {
+            let prefs = self.prefs.borrow();
+            let state = self.state.borrow();
+            let items: Vec<(String, String)> = state
+                .bookmarks
+                .iter()
+                .map(|b| (b.title.clone(), b.url.clone()))
+                .collect();
+            // The switch has to mean what it says. `||` here meant that
+            // turning "Show the bookmarks bar" off did nothing at all as soon
+            // as one page had been kept.
+            (items, prefs.show_bookmarks_bar && !state.bookmarks.is_empty())
+        };
+        let built = self.bmarks_shown.borrow().clone();
+        if built != items {
+            for child in self.ui.bmarks.children() {
+                self.ui.bmarks.remove(&child);
+            }
+            for (title, url) in &items {
+                let chip = gtk::Button::with_label(&short_title(title));
+                crate::ui::class(&chip, "bmark");
+                chip.set_tooltip_text(Some(url));
+                chip.set_relief(gtk::ReliefStyle::None);
+                let target = url.clone();
+                let weak = self.weak();
+                chip.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        // A kept page opens in the tab you are in, which is
+                        // what a bookmarks bar does everywhere else.
+                        let id = app.active_id();
+                        if app.state.borrow().tab(id).map(|t| t.url.is_empty()).unwrap_or(false) {
+                            app.navigate(id, &target);
+                        } else {
+                            app.new_tab(Some(&target), false, false);
+                        }
+                    }
+                });
+                self.ui.bmarks.add(&chip);
+            }
+            self.ui.bmarks.show_all();
+            *self.bmarks_shown.borrow_mut() = items;
+        }
+        if wanted {
+            self.ui.bmarkbar.show_all();
+        } else {
+            self.ui.bmarkbar.hide();
+        }
+    }
+
     pub fn render(&self) {
         self.render_pins();
+        self.render_bmarks();
         self.render_rows();
         self.refresh_helm();
         let (blank, has_error) = {
@@ -510,6 +749,7 @@ impl App {
             if let Some(error) = self.state.borrow().errors.get(&active) {
                 self.ui.error_reason.set_text(&error.reason);
                 self.ui.error_address.set_text(&error.url);
+                self.ui.error_retry.set_label(error_action(&error.reason));
             }
             self.ui.errorpage.show_all();
             self.ui.stack.set_visible_child_name("error");
@@ -612,11 +852,22 @@ impl App {
             } else {
                 tab.title.clone()
             };
-            let row = ui::tab_row(&title, *self.palette.borrow(), height, Some(tab.letter()), tab.id == active);
+            let row = ui::tab_row(
+                &title,
+                *self.palette.borrow(),
+                height,
+                Some(tab.letter()),
+                tab.id == active,
+                ui::TabState { asleep: tab.asleep, loading: tab.loading, private: tab.private },
+            );
             // A page with its own mark shows it; one without keeps its letter.
             let icon = self.icons.borrow().get(&tab.id).cloned();
             if let Some(surface) = icon.as_ref() {
-                ui::mark(&row.icon, tab.letter(), Some(surface), 16);
+                // The mask and the spinner outrank the site's own mark: what
+                // the tab is doing matters more than whose page it is.
+                if !tab.private && !tab.loading {
+                    ui::mark(&row.icon, tab.letter(), Some(surface), 16);
+                }
             }
             row.event.set_tooltip_text(Some(&if tab.url.is_empty() {
                 "New tab".to_string()
@@ -704,11 +955,26 @@ impl App {
         // is the one being asked: the flag comes off first.
         self.ui.pins_holder.set_no_show_all(false);
         self.ui.pins_holder.show_all();
+        // As many pins in a row as the column can hold: six 35px tiles and
+        // their spacing run past the 210px a 232px column leaves, so the sixth
+        // used to be clipped at the edge.
+        let across = {
+            // The column's real width, not the preference: the divider can be
+            // dragged, and a wrap computed from a stale number clipped the
+            // last tile in every row after the first drag.
+            let measured = self.ui.pins.allocated_width();
+            let usable = if measured > 40 { measured } else { (self.prefs.borrow().side_width as i32) - 20 };
+            (((usable + 3) / (35 + 3)).max(1)) as usize
+        };
         for (index, (id, letter, title)) in pinned.iter().enumerate() {
             let tile = ui::pin_tile(*letter, *id == active, *self.palette.borrow());
-            let icon = self.icons.borrow().get(id).cloned();
-            if let Some(surface) = icon.as_ref() {
-                ui::mark(&tile.icon, *letter, Some(surface), 22);
+            // A page that offers a mark shows it and drops the letter; a page
+            // with neither keeps the letter, which is at least its own.
+            if let Some(surface) = self.icons.borrow().get(id).cloned() {
+                ui::mark(&tile.icon, *letter, Some(&surface), 22);
+                tile.icon.set_no_show_all(false);
+                tile.icon.show_all();
+                tile.letter.hide();
             }
             tile.event.set_tooltip_text(Some(title));
             {
@@ -720,13 +986,17 @@ impl App {
                         match button.button() {
                             1 => app.select(id),
                             2 => app.close_tab(id),
+                            // Pinned tabs are not in the rows, so the row's
+                            // menu is the only place "Unpin" lived: pinning
+                            // was a one-way door.
+                            3 => app.tab_menu(id, event),
                             _ => {}
                         }
                     }
                     crate::gtkx::inh(false)
                 });
             }
-            self.ui.pins.attach(&tile.event, (index % 6) as i32, (index / 6) as i32, 1, 1);
+            self.ui.pins.attach(&tile.event, (index % across) as i32, (index / across) as i32, 1, 1);
             if let Some(slot) = self.state.borrow_mut().tab_mut(*id) {
                 slot.pin = Some(tile);
             }
@@ -979,6 +1249,42 @@ impl App {
         }
     }
 
+    /// The page's own source, written out and opened: the browser has no
+    /// second window to put it in, and a file is honest about that.
+    pub fn view_source(&self) {
+        let Some(view) = self.view(self.active_id()) else { return };
+        let weak = self.weak();
+        crate::js::run(&view, "document.documentElement.outerHTML", move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            let body = match result {
+                Ok(text) => text,
+                Err(error) => {
+                    app.flash_toast(&format!("No source: {error}"));
+                    return;
+                }
+            };
+            let path = std::env::temp_dir().join("search-source.html");
+            if std::fs::write(&path, body).is_err() {
+                app.flash_toast("No source: could not write it");
+                return;
+            }
+            app.new_tab(Some(&format!("file://{}", path.display())), false, false);
+        });
+    }
+
+    /// Full screen, and back. The window is the only thing that changes.
+    pub fn toggle_fullscreen(&self) {
+        // A window that is already filling the screen is one the user put
+        // there; the state lives on the window, so ask it.
+        let filling = self.fullscreen.get();
+        if filling {
+            self.ui.window.unfullscreen();
+        } else {
+            self.ui.window.fullscreen();
+        }
+        self.fullscreen.set(!filling);
+    }
+
     pub fn copy_address(&self) {
         let url = self.state.borrow().active_tab().map(|t| t.url.clone()).unwrap_or_default();
         let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
@@ -1059,7 +1365,12 @@ impl App {
         }
         for id in &sleeping {
             if let Some(view) = self.view(*id) {
+                // Same rule as closing: out of the stack is not gone. A slept
+                // tab that keeps its view keeps its whole engine.
                 self.ui.stack.remove(&view);
+                // SAFETY: the view was just taken out of its container and the
+                // local binding is not used again.
+                unsafe { view.destroy() };
             }
             if let Some(tab) = self.state.borrow_mut().tab_mut(*id) {
                 tab.asleep = true;
@@ -1122,6 +1433,24 @@ impl App {
                 });
             }
         }
+        // Kept pages come first, with three seats of their own: history is
+        // longer, so letting it fill the list is what kept a page somebody
+        // saved on purpose from ever appearing.
+        let mut kept = 0;
+        for bookmark in &state.bookmarks {
+            if kept >= 3 {
+                break;
+            }
+            let hay = format!("{} {}", bookmark.title, bookmark.url).to_lowercase();
+            if (typed_lower.is_empty() || hay.contains(&typed_lower)) && !offers.iter().any(|o| o.url == bookmark.url) {
+                offers.push(Offer {
+                    title: bookmark.title.clone(),
+                    url: bookmark.url.clone(),
+                    kind: "Bookmark".into(),
+                });
+                kept += 1;
+            }
+        }
         for entry in &state.history {
             if offers.len() >= 8 {
                 break;
@@ -1140,20 +1469,25 @@ impl App {
                 });
             }
         }
-        for bookmark in &state.bookmarks {
-            if offers.len() >= 10 {
-                break;
-            }
-            let hay = format!("{} {}", bookmark.title, bookmark.url).to_lowercase();
-            if (typed_lower.is_empty() || hay.contains(&typed_lower)) && !offers.iter().any(|o| o.url == bookmark.url) {
-                offers.push(Offer {
-                    title: bookmark.title.clone(),
-                    url: bookmark.url.clone(),
-                    kind: "Kept".into(),
+        offers.truncate(8);
+        // What Return would do, offered as a row. Typing words that are not an
+        // address used to empty the list while Return still searched: the
+        // field looked broken exactly when it was about to do the right thing.
+        let words = typed.trim();
+        if !words.is_empty() {
+            let prefs = self.prefs.borrow();
+            let target = plain_target(words, &|query| prefs.search_url(query));
+            let is_search = target == prefs.search_url(words);
+            drop(prefs);
+            if is_search && !offers.iter().any(|o| o.url == target) {
+                offers.insert(0, Offer {
+                    title: format!("Search for \"{words}\""),
+                    url: target,
+                    kind: "Search".into(),
                 });
+                offers.truncate(8);
             }
         }
-        offers.truncate(8);
         offers
     }
 
@@ -1169,9 +1503,19 @@ impl App {
     /// The page tone, applied to one view. Kept separate from the loop so a tab
     /// opened after the switch gets the same sheet as the ones already open.
     fn tone_for(&self, view: &webkit2gtk::WebView) {
-        let on = self.prefs.borrow().darken_pages && self.dark();
+        // The switch means what it says. It used to be gated on the frame
+        // being dark as well, so in Light it flipped, saved, and did nothing —
+        // a control that lies about its own state.
+        let on = self.prefs.borrow().darken_pages;
+        // Forcing the ground without forcing the ink is what made a page of
+        // #222 text on #0b0b0b: 1.24:1, unreadable. The two go together or
+        // not at all.
         let sheet = if on {
-            "html { background: #0b0b0b !important; }\nbody { background-color: transparent !important; }\n:root { color-scheme: dark; }"
+            "html { background: #0b0b0b !important; color: #ededed !important; }\n\
+             body { background-color: transparent !important; color: #ededed !important; }\n\
+             p, span, div, li, dt, dd, td, th, h1, h2, h3, h4, h5, h6, blockquote, label, figcaption { color: #ededed !important; }\n\
+             a, a:visited { color: #9ecbff !important; }\n\
+             :root { color-scheme: dark; }"
         } else {
             ""
         };
@@ -1330,6 +1674,7 @@ impl App {
                 state.bookmarks.retain(|b| b.url != url);
                 self.flash_toast("No longer kept");
             } else {
+                let first = state.bookmarks.is_empty();
                 state.bookmarks.insert(
                     0,
                     crate::store::Bookmark {
@@ -1337,10 +1682,19 @@ impl App {
                         title: if title.is_empty() { url } else { title },
                     },
                 );
+                // Keeping the first page turns the bar on, so the thing just
+                // kept is visible. After that the switch is the person's: it
+                // is read with `&&`, so off means off even with pages kept.
+                if first {
+                    let mut prefs = self.prefs.borrow_mut();
+                    prefs.show_bookmarks_bar = true;
+                    prefs.save();
+                }
                 self.flash_toast("Kept");
             }
             Records::save_bookmarks(&state.bookmarks);
         }
+        self.render_bmarks();
         if self.panels.borrow().open.clone() == Some(PanelKind::Bookmarks) {
             self.open_panel(PanelKind::Bookmarks);
         }
@@ -1499,6 +1853,7 @@ impl App {
             ("Bookmarks", Box::new(|app: &App| app.toggle_panel(PanelKind::Bookmarks))),
             ("History", Box::new(|app: &App| app.toggle_panel(PanelKind::History))),
             ("Downloads", Box::new(|app: &App| app.toggle_panel(PanelKind::Downloads))),
+            ("Extensions", Box::new(|app: &App| app.toggle_panel(PanelKind::Extensions))),
             ("Settings", Box::new(|app: &App| app.toggle_panel(PanelKind::Settings))),
             ("Shortcuts", Box::new(|app: &App| app.toggle_panel(PanelKind::Shortcuts))),
             ("Blocker Off Here", Box::new(|app: &App| app.toggle_blocker())),
@@ -1513,8 +1868,10 @@ impl App {
             });
             menu.append(&item);
         }
+        // At the pointer, not in the corner: a menu that opens far from where
+        // you clicked reads as a different menu.
         menu.show_all();
-        menu.popup_easy(1, 0);
+        menu.popup_at_pointer(None);
     }
 
     pub fn flash_toast(&self, message: &str) {
@@ -1579,6 +1936,7 @@ impl App {
         self.ui.error_title.set_text("That page did not open");
         self.ui.error_reason.set_text(reason);
         self.ui.error_address.set_text(url);
+        self.ui.error_retry.set_label(error_action(reason));
         // A child added to a stack after the window was shown still has to be
         // told it is visible before it can be the visible child.
         self.ui.errorpage.show_all();
@@ -1610,6 +1968,9 @@ impl App {
         }
     }
 
+    /// The failed address, asked for again. For a server error or a dead
+    /// connection the address is still the right one, so this is the whole
+    /// retry; a 4xx goes the other way, through error_pressed.
     pub fn retry(&self) {
         let id = self.active_id();
         let url = self
@@ -1619,12 +1980,42 @@ impl App {
             .get(&id)
             .map(|error| error.url.clone())
             .unwrap_or_default();
-        {
-            let mut state = self.state.borrow_mut();
-            state.errors.remove(&id);
-        }
+        self.state.borrow_mut().errors.remove(&id);
         if !url.is_empty() {
             self.navigate(id, &url);
+        }
+    }
+
+    /// The one button on the error page. A 4xx is the address's fault, so the
+    /// way out is a different address in the field; anything else is worth
+    /// asking for again. The failure is read when the button is pressed, so
+    /// the caption and the work cannot drift apart.
+    pub fn error_pressed(&self) {
+        let id = self.active_id();
+        let (reason, url) = self
+            .state
+            .borrow()
+            .errors
+            .get(&id)
+            .map(|error| (error.reason.clone(), error.url.clone()))
+            .unwrap_or_default();
+        if !error_is_client(&reason) {
+            self.retry();
+            return;
+        }
+        // Dropping the failure puts the browser back on the tab, and show_error
+        // keeps what it already has, so a stale one would answer the next
+        // failure with this address's reason.
+        let had = self.state.borrow_mut().errors.remove(&id).is_some();
+        if had {
+            self.render();
+        }
+        self.open_omni(true);
+        if !url.is_empty() {
+            // The field abbreviates a page you are on; an address that did not
+            // open has to be whole, or Return would search for "/missing".
+            self.omni.entry.set_text(&url);
+            self.omni.entry.select_region(0, -1);
         }
     }
 
@@ -1652,9 +2043,19 @@ impl App {
             while context.iteration(false) {}
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
+        // A rebuild of the suggestion list, or a pick that changes a row's
+        // fill, leaves an allocation pending, and GTK silently drops a draw
+        // call on a widget that needs one. Run the pass until nothing is
+        // pending any more, or a capture of a state reached by a keystroke
+        // documents the state before it.
+        for _ in 0..6 {
+            self.ui.window.check_resize();
+            self.ui.overlay.check_resize();
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
         }
+
         // Everything is drawn in the overlay's own coordinates: the window's
         // client area starts a pixel below the top of the frame, and a picture
         // should not have a transparent line where a window edge is.
@@ -1671,17 +2072,6 @@ impl App {
             }
             None => None,
         };
-        eprintln!(
-            "search: probe win={}x{} ov={}x{} shell={}x{}@{:?} side={}",
-            self.ui.window.allocated_width(),
-            self.ui.window.allocated_height(),
-            self.ui.overlay.allocated_width(),
-            self.ui.overlay.allocated_height(),
-            self.ui.shell.allocated_width(),
-            self.ui.shell.allocated_height(),
-            self.ui.shell.translate_coordinates(&self.ui.window, 0, 0),
-            self.ui.side.allocated_width()
-        );
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)
             .map_err(|error| error.to_string())?;
         {
@@ -1697,16 +2087,26 @@ impl App {
             );
             context.set_operator(cairo::Operator::Source);
             let _ = context.paint();
-            // The window's own corners, as the desktop draws them.
-            let radius = 12.0;
-            rounded_rectangle(&context, 0.0, 0.0, width as f64, height as f64, radius);
-            context.clip();
+            // Square, because the window is: a rounded clip here cut one
+            // corner off every picture. No clip at all, in fact — the shell
+            // fills the surface, and a clip set on a context that later saves
+            // and restores per widget leaked into the page composite and left
+            // the column the colour of the band above it.
+            context.reset_clip();
             context.set_operator(cairo::Operator::Over);
             context.translate(offset.0 as f64, offset.1 as f64);
 
-            // 1. the frame and the column. The whole overlay is drawn, so
-            // every windowed row and light comes with it.
-            self.ui.overlay.draw(&context);
+            // 1. the frame and the column. Only the shell: drawing the
+            // overlay itself would walk into its overlay children, and the page
+            // is painted over that in step 2, so the field's scrim would end up
+            // underneath the page it is meant to cover.
+            // The shell is drawn without its WebView. The page is composited
+            // from the engine's own snapshot in step 2, and a GTK draw of the
+            // WebView paints a stale copy of the same page at the same place:
+            // two pictures of one page, half a pixel apart, which reads as a
+            // ghost behind the field.
+            let page_widget = self.view(self.active_id()).map(|view| view.upcast::<gtk::Widget>());
+            draw_shell(&context, &self.ui.shell, &self.ui.overlay, page_widget.as_ref());
 
             // 2. the page, from the engine's own snapshot.
             if let Some((page, x, y, page_width, page_height)) = page.as_ref() {
@@ -1715,8 +2115,27 @@ impl App {
                 context.clip();
                 context.translate(*x as f64, *y as f64);
                 let _ = context.set_source_surface(page, 0.0, 0.0);
+                // Source, not Over. A snapshot is not opaque everywhere: a page
+                // with no background of its own leaves holes, and painting it
+                // over whatever is already there leaves the frame's earlier
+                // copy of the same page showing through those holes.
+                context.set_operator(cairo::Operator::Source);
                 let _ = context.paint();
+                context.set_operator(cairo::Operator::Over);
                 let _ = context.restore();
+            }
+
+            // 2b. the scrim, painted rather than drawn. Its widget is a
+            // GtkDrawingArea inside a GtkFixed, and GTK drops a draw call on a
+            // child whose allocation is still pending, which is exactly the
+            // state a layer is in at capture time. A solid rectangle over the
+            // page is the whole of what the scrim is, so fill it here.
+            if self.omni.visible.get() {
+                let (red, green, blue, alpha) = crate::ui::scrim_colour(&self.palette.borrow());
+                context.set_source_rgba(red, green, blue, alpha);
+                let column = self.ui.side.allocated_width().max(0) as f64;
+                context.rectangle(column, 0.0, width as f64 - column, height as f64);
+                let _ = context.fill();
             }
 
             // 3. whatever is over the page: the field, find, a panel.
@@ -1730,6 +2149,7 @@ impl App {
             }
         }
         surface.flush();
+        cut_top_left(&surface, width, height);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1777,7 +2197,10 @@ impl App {
     fn wire(&self) {
         let weak = self.weak();
         self.ui.window.connect_key_press_event(move |_, event| match weak.upgrade() {
-            Some(app) => crate::keys::handle(&app, event),
+            Some(app) => {
+                app.last_modifiers.set(event.state());
+                crate::keys::handle(&app, event)
+            }
             None => crate::gtkx::inh(false),
         });
         {
@@ -1855,12 +2278,31 @@ impl App {
             });
         }
 
-        // Drag the window by the band above the pins.
+        // Drag the window by the band at the top of the column. The three
+        // controls sit inside it, so they swallow their own clicks first;
+        // everything from the last control to the page is the handle.
         {
             let weak = self.weak();
-            self.ui.lights.connect_button_press_event(move |_, event| {
+            self.ui.top.connect_button_press_event(move |_, event| {
                 if let Some(app) = weak.upgrade() {
                     app.begin_drag(event);
+                }
+                crate::gtkx::inh(false)
+            });
+        }
+        // The band above the window is chrome, so it drags the window and a
+        // double click on it maximises, exactly as the strip inside the column
+        // does. A band that looks like a title bar and does nothing is worse
+        // than no band.
+        {
+            let weak = self.weak();
+            self.ui.desk.connect_button_press_event(move |_, event| {
+                if let Some(app) = weak.upgrade() {
+                    if event.event_type() == gtk::gdk::EventType::DoubleButtonPress {
+                        app.toggle_maximised();
+                    } else {
+                        app.begin_drag(event);
+                    }
                 }
                 crate::gtkx::inh(false)
             });
@@ -1902,6 +2344,7 @@ impl App {
             self.omni.entry.connect_changed(move |entry| {
                 if let Some(app) = weak.upgrade() {
                     app.refresh_offers(&entry.text());
+                    app.omni.chip_for_text(&entry.text());
                 }
             });
         }
@@ -1915,13 +2358,16 @@ impl App {
             });
         }
 
-        // Find: Return searches again.
+        // Find: Return goes to the next match, Shift Return to the one before,
+        // which is what the two small arrows do and what every other browser
+        // does with the key.
         {
             let entry = self.find.borrow().entry.clone();
             let weak = self.weak();
             entry.connect_activate(move |entry| {
                 if let Some(app) = weak.upgrade() {
-                    app.find_query(&entry.text());
+                    let backward = app.last_modifiers.get().contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                    app.find_step(&entry.text(), !backward);
                 }
             });
         }
@@ -1970,11 +2416,53 @@ impl App {
                 crate::gtkx::inh(true)
             });
         }
+        // The error page is a Box, and a Box has no window of its own, so
+        // there is no press event to give it: the press lands on the window
+        // and is offered to nothing below it, so the door is cut here instead.
+        // The gate is the error being the child that is drawn, the page's own
+        // frame, and anything floating over it, so a press on a real page, on
+        // the field or on the button is not answered twice.
+        {
+            let weak = self.weak();
+            self.ui.window.connect_button_press_event(move |_, event| {
+                let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                if app.ui.stack.visible_child_name().as_deref() != Some("error") {
+                    return crate::gtkx::inh(false);
+                }
+                // The field, the find bar and a panel all float over the page.
+                // A press there belongs to them, not to the page underneath.
+                if app.omni.visible.get()
+                    || app.find.borrow().visible
+                    || app.panels.borrow().open.is_some()
+                {
+                    return crate::gtkx::inh(false);
+                }
+                let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() else {
+                    return crate::gtkx::inh(false);
+                };
+                if button.button() != 1 {
+                    return crate::gtkx::inh(false);
+                }
+                // Inside the page's own frame, and not the button, which has
+                // its own click to answer with.
+                let (x, y) = button.position();
+                let page: &gtk::Widget = app.ui.error_holder.upcast_ref();
+                let retry: &gtk::Widget = app.ui.error_retry.upcast_ref();
+                if !over_widget(page, &app.ui.window, x, y) || over_widget(retry, &app.ui.window, x, y) {
+                    return crate::gtkx::inh(false);
+                }
+                // The same door as the blank page: the field, over this page, so
+                // an address can be typed without knowing that Ctrl L exists.
+                // Pressing the button is left to the button, which asks again.
+                app.open_omni(true);
+                crate::gtkx::inh(true)
+            });
+        }
         {
             let weak = self.weak();
             self.ui.error_retry.connect_clicked(move |_| {
                 if let Some(app) = weak.upgrade() {
-                    app.retry();
+                    app.error_pressed();
                 }
             });
         }
@@ -2012,25 +2500,248 @@ pub fn install_self(app: &AppRef) {
 }
 
 /// Draw a widget where it stands inside an ancestor.
+/// Draw a widget and everything inside it, windowed or not.
+///
+/// GTK draws a widget with its own `GdkWindow` in that window, and a container's
+/// draw handler does not walk into such children, so calling `draw` on the
+/// holder alone paints nothing: the field, the find bar and every panel have
+/// entries and boxes with their own windows. Walking the tree and drawing each
+/// one at its own offset is what makes a capture of a layer look like the layer.
+/// The frame, without the page inside it.
+///
+/// The page is composited separately from the engine's own snapshot, because a
+/// GTK draw of a WebView does not produce the page: it produces whatever the
+/// widget last cached. Drawing both put two copies of one page in the picture,
+/// offset by a fraction of a pixel, which showed as a ghost of a button behind
+/// the address field. `skip` is left out of the walk entirely.
+/// Whether a widget is worth drawing at all.
+///
+/// Two ways a widget can be in the tree and not on the screen. A GtkStack
+/// keeps every page realised, so the error page is walked even while the blank
+/// page is showing — and its label, at its natural width, painted "That page
+/// did not open" across the top of every picture. And an overlay layer that
+/// has never been allocated sits at 1x1 with its children at their natural
+/// size, which paints the same way. A 1px separator is legitimate, so only a
+/// widget small in BOTH directions is treated as unallocated.
+fn not_shown(widget: &gtk::Widget) -> bool {
+    if !widget.is_visible() {
+        return true;
+    }
+    if widget.allocated_width() < 2 && widget.allocated_height() < 2 {
+        return true;
+    }
+    if let Some(parent) = widget.parent() {
+        if let Some(stack) = parent.dynamic_cast_ref::<gtk::Stack>() {
+            return stack.visible_child().as_ref() != Some(widget);
+        }
+    }
+    false
+}
+
+fn draw_shell(
+    context: &cairo::Context,
+    widget: &impl IsA<gtk::Widget>,
+    ancestor: &impl IsA<gtk::Widget>,
+    skip: Option<&gtk::Widget>,
+) {
+    let widget = widget.clone().upcast::<gtk::Widget>();
+    if skip == Some(&widget) || not_shown(&widget) {
+        return;
+    }
+    let offset = widget.translate_coordinates(ancestor, 0, 0).unwrap_or((0, 0));
+    paint_one(context, &widget, offset);
+    if layout_only(&widget) {
+        if let Some(container) = widget.dynamic_cast_ref::<gtk::Container>() {
+            for child in container.children() {
+                draw_shell(context, &child, ancestor, skip);
+            }
+        }
+    }
+}
+
+/// The window's own top-left corner, cut the way the original's is.
+///
+/// The band above the window is the desktop's, and the original's white sheet
+/// curves away from it at one corner only. A CSS radius cannot do it: GTK
+/// rounds a widget's background but not its border, so the column's hairline
+/// would be drawn straight through the curve. So it is cut here, out of the
+/// finished picture, with the band's colour put back into the sliver.
+fn cut_top_left(surface: &cairo::Surface, width: i32, height: i32) {
+    let r = 14.0;
+    let Ok(context) = cairo::Context::new(surface) else { return };
+    // The sliver outside the curve, in the band's own grey.
+    context.set_source_rgb(234.0 / 255.0, 234.0 / 255.0, 233.0 / 255.0);
+    context.set_operator(cairo::Operator::Source);
+    context.move_to(0.0, 23.0);
+    context.line_to(r, 23.0);
+    context.arc_negative(r, 23.0 + r, r, -std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+    context.line_to(0.0, 23.0);
+    context.close_path();
+    let _ = context.fill();
+    let _ = width;
+    let _ = height;
+}
+
 fn draw_at(context: &cairo::Context, widget: &impl IsA<gtk::Widget>, ancestor: &impl IsA<gtk::Widget>) {
+    let widget = widget.clone().upcast::<gtk::Widget>();
+    draw_into(context, &widget, ancestor);
+}
+
+fn opacity_of(widget: &gtk::Widget) -> f64 {
+    if widget.style_context().has_class("close") {
+        // `.row:hover button.close` is the only rule that shows it, and a
+        // capture is taken with no pointer over a row.
+        let hovered = widget
+            .parent()
+            .map(|parent| parent.state_flags().contains(gtk::StateFlags::PRELIGHT))
+            .unwrap_or(false);
+        if !hovered {
+            return 0.0;
+        }
+    }
+    widget.opacity()
+}
+
+/// A container whose whole appearance is its own fill and border, with every
+/// mark inside it belonging to a child widget.
+///
+/// This is the distinction the capture turns on. `gtk_widget_draw` on one of
+/// these paints the children too, and painting them again by hand — which is
+/// what walking the tree used to do — draws every label twice, a fraction of a
+/// pixel apart. Two passes of the same glyphs is a bold weight nobody asked
+/// for: the stylesheet said `font-weight: normal` and the picture said bold.
+/// So these are painted with `gtk_render_background`/`frame`, which is their
+/// own share of the work, and their children are drawn once each, by
+/// themselves, where a label renders at the weight it was given.
+fn layout_only(widget: &gtk::Widget) -> bool {
+    widget.is::<gtk::Box>()
+        || widget.is::<gtk::EventBox>()
+        || widget.is::<gtk::Grid>()
+        || widget.is::<gtk::Fixed>()
+        || widget.is::<gtk::Overlay>()
+        || widget.is::<gtk::Stack>()
+        || widget.is::<gtk::Paned>()
+        || widget.is::<gtk::Viewport>()
+        || widget.is::<gtk::ScrolledWindow>()
+}
+
+fn draw_into(context: &cairo::Context, widget: &gtk::Widget, ancestor: &impl IsA<gtk::Widget>) {
+    if not_shown(widget) {
+        return;
+    }
+    // `gtk_widget_draw` ignores the widget's opacity, so a control the
+    // stylesheet hides until hover (a tab's close button) would be drawn as
+    // though it were showing. A capture has to respect what the stylesheet
+    // asked for, or it documents a state the user never sees.
+    let opacity = opacity_of(widget);
+    if opacity <= 0.001 {
+        return;
+    }
     let offset = widget.translate_coordinates(ancestor, 0, 0).unwrap_or((0, 0));
     // A capture is best effort: a surface that is already unusable has
     // nothing to report that the caller could act on.
+    //
+    // Only opacity needs a group. A translate and a clip put on the context
+    // here and taken off again after the paint were not balanced against the
+    // saves inside `paint_one`, and the leftovers accumulated down the walk
+    // until the page composite ran against a stale transform.
+    if opacity < 0.999 {
+        let _status = context.save();
+        context.translate(offset.0 as f64, offset.1 as f64);
+        context.push_group();
+        paint_one(context, widget, (0, 0));
+        let _status = context.pop_group_to_source();
+        let _status = context.paint_with_alpha(opacity);
+        let _status = context.restore();
+    } else {
+        paint_one(context, widget, offset);
+    }
+    // A layout container has had its own fill and border painted and nothing
+    // else, so its children are still owed a draw. Anything else has already
+    // painted its children itself, at their own weights, and drawing them
+    // again is how a normal label came out bold.
+    if layout_only(widget) {
+        if let Some(container) = widget.dynamic_cast_ref::<gtk::Container>() {
+            for child in container.children() {
+                draw_into(context, &child, ancestor);
+            }
+        }
+    }
+}
+
+/// One widget's own share of the picture.
+fn paint_one(context: &cairo::Context, widget: &gtk::Widget, offset: (i32, i32)) {
+    let style = widget.style_context();
     let _status = context.save();
     context.translate(offset.0 as f64, offset.1 as f64);
+    let (width, height) = (
+        widget.allocated_width() as f64,
+        widget.allocated_height() as f64,
+    );
+    if layout_only(widget) {
+        gtk::render_background(&style, context, 0.0, 0.0, width, height);
+        gtk::render_frame(&style, context, 0.0, 0.0, width, height);
+        let _status = context.restore();
+        return;
+    }
+    // A leaf is drawn with its own style context pushed onto the stack.
+    // `gtk_widget_draw` alone resolves the colour against whatever context is
+    // current, so a tab title on the active row came out the resting grey
+    // instead of near-black, and never bold. `render_layout` takes the colour
+    // and the weight from the context it is given.
+    if let Some(label) = widget.dynamic_cast_ref::<gtk::Label>() {
+        style.save();
+        style.set_state(widget.state_flags());
+        gtk::render_background(&style, context, 0.0, 0.0, width, height);
+        gtk::render_frame(&style, context, 0.0, 0.0, width, height);
+        if let Some(layout) = label.layout() {
+            let (lw, lh) = layout.pixel_size();
+            let x = label.xalign() as f64 * (width - lw as f64).max(0.0);
+            let y = ((height - lh as f64) / 2.0).max(0.0);
+            gtk::render_layout(&style, context, x, y, &layout);
+        }
+        let _status = context.restore();
+        return;
+    }
     widget.draw(context);
     let _status = context.restore();
 }
 
-fn rounded_rectangle(context: &cairo::Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
-    let radius = radius.min(width / 2.0).min(height / 2.0);
-    let pi = std::f64::consts::PI;
-    context.new_sub_path();
-    context.arc(x + width - radius, y + radius, radius, -pi / 2.0, 0.0);
-    context.arc(x + width - radius, y + height - radius, radius, 0.0, pi / 2.0);
-    context.arc(x + radius, y + height - radius, radius, pi / 2.0, pi);
-    context.arc(x + radius, y + radius, radius, pi, 3.0 * pi / 2.0);
-    context.close_path();
+/// Whether a point given in window coordinates lands on a widget. A widget
+/// that has not been allocated yet answers no: a click cannot be on it.
+fn over_widget(widget: &gtk::Widget, window: &gtk::Window, x: f64, y: f64) -> bool {
+    match widget.translate_coordinates(window, 0, 0) {
+        Some((left, top)) => {
+            let right = left + widget.allocated_width();
+            let bottom = top + widget.allocated_height();
+            x >= left as f64 && y >= top as f64 && x < right as f64 && y < bottom as f64
+        }
+        None => false,
+    }
+}
+
+/// The status in a failure's sentence. src/web.rs writes the code into the
+/// reason and nowhere else, so it is read back rather than becoming a field in
+/// a struct another builder owns.
+fn http_status(reason: &str) -> Option<u16> {
+    reason
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|run| run.len() == 3)
+        .and_then(|run| run.parse().ok())
+}
+
+/// A 4xx is the address's fault: there is nothing there to ask again.
+fn error_is_client(reason: &str) -> bool {
+    matches!(http_status(reason), Some(status) if (400..500).contains(&status))
+}
+
+/// What the one button on the error page should say.
+fn error_action(reason: &str) -> &'static str {
+    if error_is_client(reason) {
+        "Change address"
+    } else {
+        "Try again"
+    }
 }
 
 /// What a field's text means, apart from any browser: the pure half of the
@@ -2075,5 +2786,28 @@ mod tests {
         assert_eq!(crate::app::plain_target("localhost:8099", &engine), "https://localhost:8099");
         assert!(crate::app::plain_target("two words", &engine).contains("duckduckgo"));
         assert_eq!(crate::app::plain_target("   ", &engine), "");
+    }
+
+    #[test]
+    fn a_missing_page_offers_a_new_address_and_a_broken_one_another_try() {
+        // The reason is the only place a 4xx announces itself, so this pins the
+        // sentences src/web.rs writes: if they change shape, the button would
+        // quietly go back to reloading a dead address.
+        assert_eq!(error_action("There is nothing at this address (404)."), "Change address");
+        assert_eq!(error_action("The site would not let this page be read (403)."), "Change address");
+        assert_eq!(error_action("The site broke while answering (503)."), "Try again");
+        assert_eq!(error_action("The site refused the connection."), "Try again");
+        assert_eq!(error_action("That address could not be found."), "Try again");
+        assert_eq!(error_action("The page stopped arriving. (There is no network to reach it on.)"), "Try again");
+    }
+
+    #[test]
+    fn a_number_in_a_sentence_is_not_by_itself_a_client_error() {
+        assert_eq!(http_status("The site answered with 100."), Some(100));
+        assert_eq!(http_status("The site refused the connection."), None);
+        // A port is a number too, so the test is not that it parses nothing but
+        // that what it parses is never a client error: a 404's reload must not
+        // come from an address that happens to have three digits in it.
+        assert_eq!(error_action("There is nothing at 127.0.0.1:8099 (going nowhere)."), "Try again");
     }
 }

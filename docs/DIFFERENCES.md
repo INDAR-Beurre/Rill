@@ -14,8 +14,10 @@ builds, and a browser that looks like a Mac on Linux looks like a port.
 The Mac window is an `NSWindow` with real traffic lights, a real titlebar, and
 the system's own window shadows and corners. On Linux the browser draws its own:
 a `GtkWindow` with no desktop titlebar, a zero-height client-side `HeaderBar`
-kept alive only so a drag can move the window, and three coloured circles drawn
-in a `GtkEventBox` and wired to close, minimise and maximise.
+kept alive only so a drag can move the window, and three 22px marks drawn by
+`ui::window_controls` in `GtkEventBox`es, wired to close, minimise and maximise.
+The marks are drawn glyphs, not coloured circles, and each carries a tooltip and
+an accessible name because there is no text in it to read.
 
 That is the largest fidelity decision in this build, and it is deliberate: a
 desktop titlebar above a Mac-style frame reads as two windows stacked. The cost
@@ -34,8 +36,9 @@ will fail only here.
 
 Memory is the visible consequence. Safari's WebKit shares a great deal between
 processes because the OS was built for it; on Linux each WebKit process maps the
-same shared libraries again, which is why the resident total is about 210 MB for
-one tab while the browser's own anonymous memory is about 101 MB.
+same shared libraries again, which is why the resident total is about 208 MB for
+one tab while the browser's own anonymous memory is 62 to 119 MB depending on
+the page and the host.
 
 ## Keys, menus and the system
 
@@ -67,6 +70,16 @@ and scripts that the page relies on to keep running do not keep running.
 - A bench socket (`$XDG_RUNTIME_DIR/search-bench.sock`) and `tools/bench.py`,
   so the browser can be driven and measured while it runs. The Mac build has a
   bench tool as well; this one is not a port of it, and its commands are its own.
-- `tools/stress.py`, 60 checks, which measures memory and timing per scenario,
+- `tools/stress.py`, which measures memory and timing per scenario and fails a
+  run that misses one of the documented thresholds. The last run that passed
+  every check is the one `docs/LIMITS.md` quotes; the run itself prints how many
+  checks it made.
+- `tools/extensions.py`, which builds three extensions and asserts what the
+  loader says about each one, and `tools/check_shield.py`, which compiles the
+  generated filter lists with the engine's own parser. The Mac build has no
+  equivalent, because neither problem exists there.
+- The filter lists here are built from EasyList and EasyPrivacy by
+  `tools/build_shield.py` and checked into the repository as JSON, so a rule
+  this engine would reject fails a test instead of failing silently.
 - `--shot`, `--size`, `--appearance`, `--fresh` and `--bench` flags, for taking
   pictures of the browser and for reproducing a failure on a clean profile.

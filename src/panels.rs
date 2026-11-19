@@ -2,14 +2,19 @@
 // what you brought down, and how the browser is set up.
 use crate::app::AppRef;
 use crate::palette::Palette;
-use crate::store::{ago, now_secs, Records};
+use crate::store::{ago, day_of, now_secs, Records};
 use gtk::prelude::*;
+
+/// The card's horizontal inset: head, tab strip and body all start and end
+/// here, so nothing hangs further out than anything else.
+const INSET: i32 = 16;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PanelKind {
     Bookmarks,
     History,
     Downloads,
+    Extensions,
     Settings,
     Shortcuts,
 }
@@ -20,15 +25,17 @@ impl PanelKind {
             PanelKind::Bookmarks => "Bookmarks",
             PanelKind::History => "History",
             PanelKind::Downloads => "Downloads",
+            PanelKind::Extensions => "Extensions",
             PanelKind::Settings => "Settings",
             PanelKind::Shortcuts => "Shortcuts",
         }
     }
-    fn all() -> [PanelKind; 5] {
+    fn all() -> [PanelKind; 6] {
         [
             PanelKind::Bookmarks,
             PanelKind::History,
             PanelKind::Downloads,
+            PanelKind::Extensions,
             PanelKind::Settings,
             PanelKind::Shortcuts,
         ]
@@ -62,8 +69,10 @@ impl Panels {
         card.set_size_request(680, 420);
 
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        head.set_margin_start(20);
-        head.set_margin_end(14);
+        // One inset for the whole card: the title's left edge and the last
+        // control's right edge sit the same distance from the border.
+        head.set_margin_start(INSET);
+        head.set_margin_end(INSET);
         head.set_margin_top(16);
         head.set_margin_bottom(10);
         let title = gtk::Label::new(Some("Bookmarks"));
@@ -77,14 +86,14 @@ impl Panels {
         card.add(&head);
 
         let nav = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        nav.set_margin_start(16);
-        nav.set_margin_end(16);
+        nav.set_margin_start(INSET);
+        nav.set_margin_end(INSET);
         nav.set_margin_bottom(8);
         card.add(&nav);
 
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        body.set_margin_start(16);
-        body.set_margin_end(16);
+        body.set_margin_start(INSET);
+        body.set_margin_end(INSET);
         body.set_margin_bottom(16);
         body.set_vexpand(true);
         card.add(&body);
@@ -147,6 +156,10 @@ impl Panels {
                 self.build_downloads(app);
                 None
             }
+            PanelKind::Extensions => {
+                self.build_extensions(app);
+                None
+            }
             PanelKind::Settings => {
                 self.build_settings(app);
                 None
@@ -157,7 +170,21 @@ impl Panels {
             }
         };
         let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
-        let wanted = self.measure_content(card_width - 40).max(self.body.preferred_height_for_width(card_width - 32).0) + 140;
+        // Ask the widgets above the list how tall they are instead of adding a
+        // round 140 and hoping. The guess was 34px short, which cut the last
+        // row of a list in half and made a scrollable card look broken.
+        let mut above = 0;
+        for child in self.card.children() {
+            if child == self.body.clone().upcast::<gtk::Widget>() {
+                continue;
+            }
+            above += child.preferred_height().0;
+        }
+        above += 16; // the body's bottom margin
+        let wanted = self
+            .measure_content(card_width - 40)
+            .max(self.body.preferred_height_for_width(card_width - 32).0)
+            + above;
         // An empty panel should be a note, not a slab: the floor used to be
         // 300px of nothing under one line of text.
         self.wanted_height.set(wanted.clamp(200, 640));
@@ -291,12 +318,25 @@ impl Panels {
         });
         self.body.add(&filter);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let mut shown = 0;
         for bookmark in bookmarks.into_iter().filter(|bookmark| self.matches(&format!("{} {}", bookmark.title, bookmark.url))) {
-            let row = self.link_row(app, &bookmark.title, &bookmark.url, "Open", {
+            shown += 1;
+            let remove_url = bookmark.url.clone();
+            let row = self.row_with(app, &bookmark.title, &bookmark.url, "Open", {
                 let url = bookmark.url.clone();
                 move |app: &AppRef| app.navigate_active(&url)
-            });
+            }, Some(("Remove", Box::new(move |app: &AppRef| {
+                {
+                    let mut state = app.state.borrow_mut();
+                    state.bookmarks.retain(|kept| kept.url != remove_url);
+                    Records::save_bookmarks(&state.bookmarks);
+                }
+                app.toggle_panel_switch(PanelKind::Bookmarks);
+            }))));
             list.add(&row);
+        }
+        if shown == 0 {
+            list.add(&self.empty_state("Nothing kept matches what you typed."));
         }
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
@@ -313,7 +353,11 @@ impl Panels {
         }
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         header.set_margin_bottom(8);
-        let count = gtk::Label::new(Some(&format!("{} pages", history.len())));
+        let count = gtk::Label::new(Some(&if history.len() == 1 {
+            "1 page".to_string()
+        } else {
+            format!("{} pages", history.len())
+        }));
         crate::ui::class(&count, "sub");
         count.set_xalign(0.0);
         count.set_hexpand(true);
@@ -341,18 +385,52 @@ impl Panels {
         self.body.add(&filter);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let now = now_secs();
-        for entry in history.iter().take(300).filter(|entry| self.matches(&format!("{} {}", entry.title, entry.url))) {
+        // The filter runs before the cap, not after: taking the newest 300 and
+        // then searching them made every older page unfindable while the
+        // header still counted it.
+        let mut shown = 0;
+        let mut day = String::new();
+        for entry in history
+            .iter()
+            .filter(|entry| self.matches(&format!("{} {}", entry.title, entry.url)))
+            .take(300)
+        {
+            // A flat list of "43 days ago" cannot answer "what did I read on
+            // Tuesday". A heading per day costs one label and makes the list
+            // scannable.
+            let which = day_of(entry.at, now);
+            if which != day {
+                day = which.clone();
+                let head = gtk::Label::new(Some(&day));
+                crate::ui::class(&head, "ptgroup");
+                head.set_xalign(0.0);
+                head.set_margin_top(if shown == 0 { 0 } else { 10 });
+                head.set_margin_bottom(4);
+                list.add(&head);
+            }
+            shown += 1;
             let title = if entry.title.is_empty() {
                 crate::shield::host_of(&entry.url)
             } else {
                 entry.title.clone()
             };
             let when = ago(entry.at, now);
-            let row = self.link_row(app, &title, &format!("{} · {}", entry.url, when), "Open", {
+            let remove_url = entry.url.clone();
+            let row = self.row_with(app, &title, &format!("{} · {}", entry.url, when), "Open", {
                 let url = entry.url.clone();
                 move |app: &AppRef| app.navigate_active(&url)
-            });
+            }, Some(("Remove", Box::new(move |app: &AppRef| {
+                {
+                    let mut state = app.state.borrow_mut();
+                    state.history.retain(|kept| kept.url != remove_url);
+                    Records::save_history(&state.history);
+                }
+                app.toggle_panel_switch(PanelKind::History);
+            }))));
             list.add(&row);
+        }
+        if shown == 0 {
+            list.add(&self.empty_state("No page here matches what you typed."));
         }
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
@@ -371,19 +449,169 @@ impl Panels {
             self.body.show_all();
             return;
         }
+        let where_to = gtk::Label::new(Some(&format!(
+            "Saved in {}",
+            crate::web::downloads_dir().to_string_lossy()
+        )));
+        crate::ui::class(&where_to, "sub");
+        where_to.set_xalign(0.0);
+        where_to.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        where_to.set_margin_bottom(8);
+        self.body.add(&where_to);
+
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         for download in downloads {
-            let sub = if download.done { download.path.clone() } else { format!("Downloading to {}", download.path) };
-            let row = self.link_row(app, &download.name, &sub, "Reveal", {
+            let sub = download_subtitle(&download);
+            let remove_path = download.path.clone();
+            // "Open" only when there is a file to open: a button that does
+            // nothing on a half-written download is worse than no button.
+            let action = if download.done { "Open" } else { "Reveal" };
+            let row = self.row_with(app, &download.name, &sub, action, {
                 let path = download.path.clone();
+                let finished = download.done;
                 move |_app: &AppRef| {
-                    let _ = std::process::Command::new("xdg-open")
-                        .arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/")))
-                        .spawn();
+                    let target = std::path::Path::new(&path);
+                    let target = if finished {
+                        target.to_path_buf()
+                    } else {
+                        target.parent().unwrap_or(std::path::Path::new("/")).to_path_buf()
+                    };
+                    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+                }
+            }, Some(("Remove", Box::new(move |app: &AppRef| {
+                // Removes the row, not the file. Deleting someone's file from
+                // a list of records is not what "Remove" means here.
+                {
+                    let mut state = app.state.borrow_mut();
+                    state.downloads.retain(|kept| kept.path != remove_path);
+                    Records::save_downloads(&state.downloads);
+                }
+                app.toggle_panel_switch(PanelKind::Downloads);
+            }))));
+            list.add(&row);
+        }
+        self.body.add(&self.body_scroll(&list));
+        self.body.show_all();
+    }
+
+    /// Extensions, and the truth about them.
+    ///
+    /// A browser without a WebExtensions API cannot run most of what the stores
+    /// list, so this panel shows every extension it has, which ones actually do
+    /// something here, and the sentence saying why not for the others. Anything
+    /// else would be a lie a person only discovers when their passwords do not
+    /// fill in.
+    fn build_extensions(&self, app: &AppRef) {
+        self.clear_body();
+        let installed = crate::extensions::registry().extensions;
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+        let head = gtk::Label::new(Some("INSTALLED"));
+        crate::ui::class(&head, "group");
+        head.set_xalign(0.0);
+        list.add(&head);
+
+        if installed.is_empty() {
+            list.add(&self.empty_state(
+                "Nothing installed. Put a .crx, an .xpi or an unpacked extension folder below.",
+            ));
+        }
+        for entry in installed {
+            let mut notes = vec![entry.why_not.replace('\n', " ")];
+            notes.extend(crate::extensions::not_drawn(&entry));
+            notes.retain(|note| !note.trim().is_empty());
+            let subtitle = if entry.runs {
+                format!("{}  ·  runs on the sites it asks for  ·  {}", entry.version, notes.join("; "))
+            } else {
+                format!("{}  ·  {}", entry.version, notes.join("; "))
+            };
+            let row = self.link_row(app, &entry.name, &subtitle, if entry.enabled { "Off" } else { "On" }, {
+                let id = entry.id.clone();
+                let on = entry.enabled;
+                move |app: &AppRef| {
+                    crate::extensions::set_enabled(&id, !on);
+                    app.rebuild_every_view();
+                    app.toggle_panel_switch(PanelKind::Extensions);
                 }
             });
             list.add(&row);
+            // An extension that ships an options page gets a way to open it.
+            // It is a file on disk, so it opens as a page, which is what it is.
+            if let Some(page) = crate::extensions::options_page(&entry) {
+                let row = self.link_row(app, &format!("{} options", entry.name), "Opens the page the extension ships", "Options", {
+                    let url = format!("file://{page}");
+                    move |app: &AppRef| {
+                        app.toggle_panel_switch(PanelKind::Extensions);
+                        app.new_tab(Some(&url), false, false);
+                    }
+                });
+                list.add(&row);
+            }
+            let remove = self.link_row(app, &format!("Remove {}", entry.name), &entry.source, "Remove", {
+                let id = entry.id.clone();
+                move |app: &AppRef| {
+                    crate::extensions::remove(&id);
+                    app.rebuild_every_view();
+                    app.toggle_panel_switch(PanelKind::Extensions);
+                }
+            });
+            list.add(&remove);
         }
+
+        // What is acting on the page in front of you, which is the question a
+        // person actually has when they install something.
+        let current = app.state.borrow().tab(app.active_id()).map(|tab| tab.url.clone()).unwrap_or_default();
+        let acting = if current.is_empty() { Vec::new() } else { crate::extensions::here(&current) };
+        if !acting.is_empty() {
+            let head = gtk::Label::new(Some("ON THIS PAGE"));
+            crate::ui::class(&head, "group");
+            head.set_xalign(0.0);
+            list.add(&head);
+            let line = gtk::Label::new(Some(&acting.join(", ")));
+            crate::ui::class(&line, "settingdesc");
+            line.set_xalign(0.0);
+            line.set_line_wrap(true);
+            list.add(&line);
+        }
+
+        let how = gtk::Label::new(Some("FROM A STORE OR A FOLDER"));
+        crate::ui::class(&how, "group");
+        how.set_xalign(0.0);
+        list.add(&how);
+
+        let field = gtk::Entry::new();
+        field.set_placeholder_text(Some("A .crx, an .xpi, or a folder with a manifest.json"));
+        field.set_margin_bottom(8);
+        let app_field = app.weak();
+        field.connect_activate(move |field| {
+            let Some(app) = app_field.upgrade() else { return };
+            let path = std::path::PathBuf::from(field.text().to_string());
+            match crate::extensions::install(&path) {
+                Ok(entry) => {
+                    let message = if entry.runs {
+                        format!("{} installed", entry.name)
+                    } else {
+                        format!("{} installed, but {}", entry.name, entry.why_not.replace('\n', " "))
+                    };
+                    app.rebuild_every_view();
+                    app.flash_toast(&message);
+                    app.toggle_panel_switch(PanelKind::Extensions);
+                    app.toggle_panel_switch(PanelKind::Extensions);
+                }
+                Err(why) => app.flash_toast(&format!("Could not install: {why}")),
+            }
+        });
+        list.add(&field);
+
+        let note = gtk::Label::new(Some(
+            "This engine has no WebExtensions API, so an extension runs the part of itself that is a content script: its scripts and its styles, on the sites its manifest names. Downloading a .crx from the Chrome Web Store or an .xpi from addons.mozilla.org and choosing it here installs what that part can do. An extension that lives entirely in a background page is installed and shown as not running rather than silently ignored.",
+        ));
+        crate::ui::class(&note, "settingdesc");
+        note.set_xalign(0.0);
+        note.set_line_wrap(true);
+        note.set_margin_top(10);
+        list.add(&note);
+
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
     }
@@ -452,6 +680,30 @@ impl Panels {
             },
         ));
 
+        list.add(&self.setting_switch(
+            app,
+            "Show the bookmarks bar",
+            "The row of kept pages above every tab. Shown on its own as soon as you keep something.",
+            prefs.show_bookmarks_bar,
+            |app, on| {
+                app.prefs.borrow_mut().show_bookmarks_bar = on;
+                app.prefs.borrow().save();
+                app.render_bmarks();
+            },
+        ));
+
+        list.add(&self.setting_switch(
+            app,
+            "Use less memory",
+            "Turns off the one graphics path the engine can do without. Across four runs of one idle tab, the browser's own memory went from 60-88 MB to a steadier 62-66 MB, and pages with many images paint a little slower. Applies the next time the browser opens.",
+            prefs.low_memory,
+            |app, on| {
+                app.prefs.borrow_mut().low_memory = on;
+                app.prefs.borrow().save();
+                app.flash_toast(if on { "Less memory from the next launch" } else { "Full rendering from the next launch" });
+            },
+        ));
+
         let tabs_head = gtk::Label::new(Some("TABS"));
         crate::ui::class(&tabs_head, "group");
         tabs_head.set_xalign(0.0);
@@ -459,7 +711,7 @@ impl Panels {
         list.add(&self.setting_switch(
             app,
             "Darken pages that stay white",
-            "Sites that do not offer a dark page get one from the browser. Off by default: a page's colour is the site's to choose.",
+            "Gives every page the browser's dark ground and light text, whatever the frame's own appearance — including pages that are already dark. Off by default: a page's colour is the site's to choose.",
             prefs.darken_pages,
             |app, on| {
                 app.prefs.borrow_mut().darken_pages = on;
@@ -482,7 +734,11 @@ impl Panels {
             app.prefs.borrow().save();
         }));
 
-        // Search engine
+        let search_head = gtk::Label::new(Some("SEARCH"));
+        crate::ui::class(&search_head, "group");
+        search_head.set_xalign(0.0);
+        list.add(&search_head);
+
         let engine_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         engine_row.set_margin_top(8);
         engine_row.set_margin_bottom(8);
@@ -518,13 +774,26 @@ impl Panels {
         engine_row.add(&combo);
         list.add(&engine_row);
 
+        // This row is about the page in front of you, not about a tab
+        // setting, so it gets a head of its own rather than trailing TABS.
+        let page_head = gtk::Label::new(Some("THIS PAGE"));
+        crate::ui::class(&page_head, "group");
+        page_head.set_xalign(0.0);
+        list.add(&page_head);
+
+        // The same helper the tab column and the curtain use, so the name here
+        // is the name the sidebar would show for this tab.
         let hidden = app
             .state
             .borrow()
             .active_tab()
             .map(|t| crate::shield::host_of(&t.url))
             .unwrap_or_default();
-        let count = app.state.borrow().hidden.get(&hidden).map(|v| v.len()).unwrap_or(0);
+        let count = if hidden.is_empty() {
+            0
+        } else {
+            app.state.borrow().hidden.get(&hidden).map(|v| v.len()).unwrap_or(0)
+        };
         let unhide_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         unhide_row.set_margin_top(7);
         unhide_row.set_margin_bottom(7);
@@ -533,7 +802,7 @@ impl Panels {
         let unhide_title = gtk::Label::new(Some("Hidden here"));
         crate::ui::class(&unhide_title, "setting");
         unhide_title.set_xalign(0.0);
-        let unhide_sub = gtk::Label::new(Some(&format!("{count} things hidden on {hidden}")));
+        let unhide_sub = gtk::Label::new(Some(&hidden_sentence(&hidden, count)));
         crate::ui::class(&unhide_sub, "settingdesc");
         unhide_sub.set_xalign(0.0);
         unhide_text.add(&unhide_title);
@@ -541,6 +810,8 @@ impl Panels {
         crate::ui::pack(&unhide_row, &unhide_text, true);
         let show_all = gtk::Button::with_label("Show them");
         crate::ui::class(&show_all, "act");
+        // A button that cannot do anything is not offered as if it could.
+        show_all.set_sensitive(count > 0);
         {
             let weak = app.weak();
             show_all.connect_clicked(move |_| {
@@ -553,9 +824,6 @@ impl Panels {
         crate::ui::pack(&unhide_row, &show_all, false);
         list.add(&unhide_row);
 
-        // Group headings, so a list of switches is not a wall of switches.
-        
-
         let about = gtk::Label::new(Some(&format!(
             "Search {} · WebKitGTK · Rust · this machine only",
             env!("CARGO_PKG_VERSION")
@@ -565,9 +833,11 @@ impl Panels {
         about.set_margin_top(16);
         list.add(&about);
 
-        // Settings is a list of rows, not a document: give it to the body
-        // directly so the card can measure it and be as tall as it.
-        self.body.add(&list);
+        // Settings has grown past the tallest card the window allows, so it
+        // scrolls like every other panel. Given to the body directly, its last
+        // rows — the search engine, this page's hidden elements, the version —
+        // were painted past the card's edge and could not be reached.
+        self.body.add(&self.body_scroll(&list));
         self.body.show_all();
     }
 
@@ -654,6 +924,21 @@ impl Panels {
         action: &str,
         run: impl Fn(&AppRef) + 'static,
     ) -> gtk::EventBox {
+        self.row_with(app, title, subtitle, action, run, None)
+    }
+
+    /// A row with a second, quieter action at the end — "Remove" beside
+    /// "Open". A list you can only add to is not a list anyone keeps.
+    #[allow(clippy::type_complexity)]
+    fn row_with(
+        &self,
+        app: &AppRef,
+        title: &str,
+        subtitle: &str,
+        action: &str,
+        run: impl Fn(&AppRef) + 'static,
+        second: Option<(&str, Box<dyn Fn(&AppRef)>)>,
+    ) -> gtk::EventBox {
         let row = gtk::EventBox::new();
         crate::ui::class(&row, "ptrow");
         row.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
@@ -693,6 +978,20 @@ impl Panels {
         button.set_valign(gtk::Align::Center);
         crate::ui::pack(&hbox, &button, false);
 
+        if let Some((label, run_second)) = second {
+            let other = gtk::Button::with_label(label);
+            crate::ui::class(&other, "act quiet");
+            other.set_valign(gtk::Align::Center);
+            other.set_tooltip_text(Some(label));
+            crate::ui::pack(&hbox, &other, false);
+            let app_weak = app.weak();
+            other.connect_clicked(move |_| {
+                if let Some(app) = app_weak.upgrade() {
+                    run_second(&app);
+                }
+            });
+        }
+
         row.add(&hbox);
 
         // The whole row runs the row's action: a row that lights up under the
@@ -720,5 +1019,130 @@ impl Panels {
             });
         }
         row
+    }
+}
+
+/// What the "Hidden here" row says. A count of nothing is said plainly rather
+/// than as "0 things hidden", which reads like a number nobody needs.
+fn hidden_sentence(host: &str, count: usize) -> String {
+    if host.is_empty() {
+        return "Nothing to hide yet: this tab has no page of its own".to_string();
+    }
+    match count {
+        0 => format!("Nothing hidden on {host}"),
+        1 => format!("1 thing hidden on {host}"),
+        n => format!("{n} things hidden on {host}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_count_is_told_in_words() {
+        assert_eq!(hidden_sentence("example.com", 0), "Nothing hidden on example.com");
+        assert_eq!(hidden_sentence("example.com", 1), "1 thing hidden on example.com");
+        assert_eq!(hidden_sentence("example.com", 4), "4 things hidden on example.com");
+    }
+
+    #[test]
+    fn a_tab_with_no_page_says_so() {
+        assert_eq!(hidden_sentence("", 3), "Nothing to hide yet: this tab has no page of its own");
+    }
+}
+
+/// What a download row says under its name.
+///
+/// A file name and a path is not progress. "12.4 of 40 MB" is, and when the
+/// server never declared a length the honest thing is the byte count alone
+/// rather than a percentage of nothing.
+fn download_subtitle(download: &crate::app::DownloadRec) -> String {
+    if download.failed {
+        return format!("Failed · {}", download.path);
+    }
+    if download.done {
+        let size = bytes(download.got.max(download.total));
+        return if size.is_empty() {
+            download.path.clone()
+        } else {
+            format!("{} · {}", size, download.path)
+        };
+    }
+    let got = bytes(download.got);
+    let total = bytes(download.total);
+    match (got.is_empty(), total.is_empty()) {
+        (true, _) => format!("Downloading to {}", download.path),
+        (false, true) => format!("{got} so far"),
+        (false, false) => format!("{got} of {total}"),
+    }
+}
+
+/// Bytes in the units a person reads. Empty for zero, so a caller can tell
+/// "no size known" from "no bytes yet".
+fn bytes(n: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    const KB: f64 = 1024.0;
+    let n = n as f64;
+    if n <= 0.0 {
+        String::new()
+    } else if n >= MB {
+        format!("{:.1} MB", n / MB)
+    } else if n >= KB {
+        format!("{:.0} KB", n / KB)
+    } else {
+        format!("{n:.0} B")
+    }
+}
+
+#[cfg(test)]
+mod download_words {
+    use super::{bytes, download_subtitle};
+    use crate::app::DownloadRec;
+
+    fn rec(got: u64, total: u64, done: bool, failed: bool) -> DownloadRec {
+        DownloadRec {
+            name: "file.pdf".into(),
+            path: "/home/you/Downloads/file.pdf".into(),
+            done,
+            failed,
+            got,
+            total,
+        }
+    }
+
+    #[test]
+    fn a_running_download_says_how_far_along_it_is() {
+        let sub = download_subtitle(&rec(13_000_000, 41_943_040, false, false));
+        assert!(sub.contains(" of "), "{sub}");
+        assert!(sub.contains("40.0 MB"), "{sub}");
+    }
+
+    /// A server that sends no Content-Length still gets a truthful line, not
+    /// "0%" of a total nobody knows.
+    #[test]
+    fn without_a_length_it_counts_instead_of_guessing() {
+        let sub = download_subtitle(&rec(2_097_152, 0, false, false));
+        assert_eq!(sub, "2.0 MB so far");
+    }
+
+    #[test]
+    fn a_failed_download_says_failed() {
+        assert!(download_subtitle(&rec(0, 100, false, true)).starts_with("Failed"));
+    }
+
+    #[test]
+    fn a_finished_download_shows_its_size_and_where_it_is() {
+        let sub = download_subtitle(&rec(41_943_040, 41_943_040, true, false));
+        assert!(sub.starts_with("40.0 MB · "), "{sub}");
+        assert!(sub.ends_with("file.pdf"));
+    }
+
+    #[test]
+    fn the_units_are_the_ones_people_read() {
+        assert_eq!(bytes(0), "");
+        assert_eq!(bytes(512), "512 B");
+        assert_eq!(bytes(2048), "2 KB");
+        assert_eq!(bytes(5 * 1024 * 1024), "5.0 MB");
     }
 }

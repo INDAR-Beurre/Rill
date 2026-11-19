@@ -64,7 +64,7 @@ def process_tree(root_pid):
 def memory(root_pid):
     """Resident and anonymous memory of the whole browser, in MB."""
     trees = process_tree(root_pid)
-    pss = anon = rss = 0
+    pss = anon = rss = shmem = dirty = 0
     processes = 0
     for pid in trees:
         try:
@@ -74,14 +74,25 @@ def memory(root_pid):
                         pss += int(line.split()[1])
                     elif line.startswith("Pss_Anon:"):
                         anon += int(line.split()[1])
+                    elif line.startswith("Pss_Shmem:"):
+                        shmem += int(line.split()[1])
+                    elif line.startswith("Private_Dirty:"):
+                        dirty += int(line.split()[1])
                     elif line.startswith("Rss:"):
                         rss += int(line.split()[1])
             processes += 1
         except OSError:
             continue
+    # Pss_Anon is "the browser's own memory" and it is the figure the promise is
+    # made about, but it is blind to shared-memory pages — which is exactly
+    # where a page's buffers can land once the DMA-BUF renderer is off. Naming
+    # shmem and private-dirty beside it means the report shows what anon leaves
+    # out instead of letting a reader assume it is the whole story.
     return {
         "pss_mb": round(pss / 1024, 1),
         "anon_mb": round(anon / 1024, 1),
+        "shmem_mb": round(shmem / 1024, 1),
+        "private_dirty_mb": round(dirty / 1024, 1),
         "rss_mb": round(rss / 1024, 1),
         "processes": processes,
     }
@@ -106,7 +117,11 @@ class Run:
         self.server = None
         self.port = 0
         self.tmp = Path(tempfile.mkdtemp(prefix="search-stress-"))
+        # One name for the folder the suite's downloads land in, so a check can
+        # say whether a file landed there or in the person's real Downloads.
+        self.downloads = self.tmp / "downloads"
         self.rounds = 6 if args.quick else 20
+        self.pressure = {}
 
     # -- lifecycle ------------------------------------------------------
     def start_server(self):
@@ -132,11 +147,14 @@ class Run:
     def start_browser(self, fresh=True):
         env = dict(os.environ)
         env["SEARCH_BENCH"] = "1"
-        env.setdefault("XDG_CONFIG_HOME", str(self.tmp / "config"))
-        env.setdefault("XDG_DATA_HOME", str(self.tmp / "data"))
+        # Assigned, not defaulted: an XDG_DATA_HOME inherited from the shell
+        # would hand this run the profile it is meant to be independent of, and
+        # its history would leak into checks that ask whether something was
+        # written down or offered.
+        env["XDG_CONFIG_HOME"] = str(self.tmp / "config")
+        env["XDG_DATA_HOME"] = str(self.tmp / "data")
         # A download that lands in the real ~/Downloads can pass on a file an
         # earlier run left there. Give the suite its own folder.
-        self.downloads = self.tmp / "downloads"
         self.downloads.mkdir(exist_ok=True)
         env["XDG_DOWNLOAD_DIR"] = str(self.downloads)
         env.pop("DISPLAY", None)
@@ -256,16 +274,159 @@ class Run:
             self.check("probe", probe.get("active", 0) > 0 and probe.get("width", 0) > 200,
                        f"{probe.get('width')}x{probe.get('height')}, {len(probe.get('tabs', []))} tabs")
 
+        @self.scenario("what the last critique found")
+        def _critique():
+            # This one runs before anything is loaded, because two of its
+            # checks need a browser that has been nowhere: a field with no
+            # offers under it and no bookmarks in the list. It says so if that
+            # is not the state it got, rather than quietly measuring something
+            # else.
+            bench.must("forget")
+            bench.must("closeall")
+            time.sleep(0.8)
+
+            def at(omni):
+                # "x,y" in window coordinates, or -1 for a window that has not
+                # been laid out, which is not a geometry to compare.
+                x, _, y = (omni.get("fieldAt") or "-1,-1").partition(",")
+                try:
+                    return int(x), int(y)
+                except ValueError:
+                    return -1, -1
+
+            def settled():
+                # GTK allocates an overlay child in the pass after the one that
+                # shows it, so a field raised by a keystroke has no position
+                # until the window has been round the loop again. Ask the
+                # browser to finish that pass rather than sleeping a guess.
+                omni = {}
+                for _ in range(30):
+                    bench.settle()
+                    omni = bench.must("debug")["omni"]
+                    if omni.get("mapped") and at(omni)[1] > 0:
+                        break
+                    time.sleep(0.1)
+                return omni
+
+            # The field is anchored from the window height alone, so an empty
+            # list and a full one leave it standing on the same line. A field
+            # that re-centres on what is under it moves under the caret while
+            # the list arrives.
+            bench.must("key omni")
+            empty = settled()
+            bench.must("escape")
+            time.sleep(0.3)
+
+            plain = bench.open(self.url("/plain?critique=1"))
+            bench.wait_loaded(plain, timeout=20)
+            time.sleep(0.4)
+            bench.must("key omni")
+            filled = settled()
+            probe = bench.probe()
+            empty_x, empty_y = at(empty)
+            filled_x, filled_y = at(filled)
+            self.check(
+                "the field stands still when the list fills",
+                empty_y > 0
+                and empty["offers"] == 0
+                and filled["offers"] > 0
+                and filled["listVis"] is True
+                and filled_y == empty_y
+                and filled_x == empty_x,
+                f"{empty['offers']} offers at ({empty_x},{empty_y}) mapped {empty['mapped']}, "
+                f"{filled['offers']} offers at ({filled_x},{filled_y}) mapped {filled['mapped']}",
+                {"empty_at": list(at(empty)), "filled_at": list(at(filled)),
+                 "empty_offers": empty["offers"], "filled_offers": filled["offers"]},
+            )
+
+            # The chip beside the field already names the site, so the field
+            # holds the part the chip cannot: the path. "127.0.0.1" twice on
+            # one line is the browser reading its own address back to you.
+            self.check(
+                "the field does not say the host twice",
+                "http://" not in probe["omniText"]
+                and probe["omniText"] != self.url("/plain?critique=1")
+                and probe["omniText"].endswith("/plain?critique=1"),
+                f"field holds {probe['omniText']!r}",
+            )
+            bench.must("escape")
+            time.sleep(0.3)
+
+            # A page that failed is the browser's own page, and the keyboard
+            # has to get out of it: Ctrl L is the way out of every page.
+            missing = bench.open(self.url("/missing"))
+            bench.wait_loaded(missing, timeout=15)
+            time.sleep(0.5)
+            failed = bench.probe()
+            bench.must("key omni")
+            time.sleep(0.4)
+            escaped = bench.probe()
+            self.check(
+                "a 404 can be left with the keyboard",
+                failed["visibleChild"] == "error" and escaped["omni"] is True,
+                f"showing {failed['visibleChild']}, then Ctrl L gave omni={escaped['omni']}",
+            )
+            bench.must("escape")
+            time.sleep(0.3)
+
+            # The failed tab remembers its error; it must not paint it over the
+            # neighbour you are looking at. Selecting the good tab has to be
+            # both the tab bar's answer and the page on screen.
+            bench.select(plain)
+            time.sleep(0.8)
+            probe = bench.probe()
+            text = bench.text()
+            body = text.get("text") or ""
+            self.check(
+                "a failed tab does not paint over another",
+                probe["active"] == plain
+                and probe["visibleChild"] == f"tab-{probe['active']}"
+                and "quietest page" in body,
+                f"active {probe['active']} showing {probe['visibleChild']}, "
+                f"page text {body[:40]!r}",
+            )
+
+            # The sheet the browser draws is keys::SHEET, and paneltext walks
+            # the labels it drew: a panel that opened empty would pass a check
+            # on `probe` alone, so the rows are read rather than assumed.
+            bench.must("key shortcuts")
+            time.sleep(0.5)
+            panel = bench.probe()
+            sheet = bench.must("paneltext")
+            rows = [line for line in (sheet.get("text") or "").split("\n") if line.strip()]
+            self.check(
+                "the Shortcuts panel lists keys that work",
+                panel["panel"] == "Shortcuts"
+                and sheet.get("panel") == "Shortcuts"
+                and "Ctrl L" in rows
+                and "The field" in rows
+                and len(rows) >= 40,
+                f"panel {panel['panel']}, {len(rows)} labels, "
+                f"Ctrl L listed: {'Ctrl L' in rows}",
+                {"panel_rows": len(rows)},
+            )
+            bench.must("key closepanel")
+            # Nothing this scenario opened is left for the next one to measure
+            # an idle browser against, and the engine needs a moment to retire
+            # the two processes those tabs owned before the memory check runs.
+            bench.must("closeall")
+            time.sleep(2)
+
         @self.scenario("a single idle tab")
         def _idle():
             bench.open(self.url("/plain"))
             bench.wait_loaded(timeout=20)
             time.sleep(3)
             usage = self.ram()
+            # 120MB of the browser's own memory is the promise, and a run of
+            # one idle tab measures 62-119MB, so the threshold sits at the top
+            # of the measured range rather than above it. Resident memory is
+            # the engine's shared pages as well, and 260MB is what an idle tab
+            # honestly costs with them included.
             self.check(
                 "idle one tab",
-                usage["pss_mb"] < 260 and usage["processes"] <= 5,
-                json.dumps(usage),
+                usage["anon_mb"] < 120 and usage["pss_mb"] < 260 and usage["processes"] <= 5,
+                f"{json.dumps(usage)} (one idle tab measures 62-119MB of its own memory)",
                 {"memory": usage},
             )
             self.one_tab = usage
@@ -283,9 +444,13 @@ class Run:
             after = self.ram()
             per_tab = (after["pss_mb"] - before["pss_mb"]) / max(1, len(ids))
             probe = bench.probe()
+            # A per-tab figure that is printed but never asserted is a figure
+            # with nothing behind it: a tab costing 200MB each would pass. The
+            # measured cost is about 21MB, so 40 is a bound that a real
+            # regression crosses and a noisy host does not.
             self.check(
                 f"{len(ids)} tabs open",
-                len(probe["tabs"]) >= len(ids),
+                len(probe["tabs"]) >= len(ids) and per_tab < 40,
                 f"{len(probe['tabs'])} tabs, +{per_tab:.1f}MB per tab, total {after['pss_mb']}MB",
                 {"per_tab_mb": round(per_tab, 1), "memory": after},
             )
@@ -295,10 +460,14 @@ class Run:
             after_close = self.ram()
             # Giving memory back means the number came down, not that it stayed
             # inside a tolerance of its own value.
+            # Back to where it started, not merely lower than its own peak:
+            # "came down by 100MB" lets a 300MB leak pass. The baseline is the
+            # reading taken before any of these tabs existed.
             self.check(
                 "tabs give their memory back",
-                after_close["pss_mb"] < after["pss_mb"] - 100,
-                f"{after_close['pss_mb']}MB after closing (was {after['pss_mb']}MB)",
+                after_close["pss_mb"] < before["pss_mb"] + 60,
+                f"{after_close['pss_mb']}MB after closing (was {after['pss_mb']}MB, "
+                f"started at {before['pss_mb']}MB)",
                 {"memory": after_close},
             )
 
@@ -314,11 +483,18 @@ class Run:
                 timings.append((time.time() - started) * 1000)
             average = statistics.mean(timings)
             worst = max(timings)
+            ordered = sorted(timings)
+            # p95 from the standard library, not a dependency: 300 switches
+            # hide three slow ones in the tail, and the mean alone would call
+            # that quick. 60ms is a switch you cannot feel, 500ms is one you
+            # can.
+            p95 = statistics.quantiles(ordered, n=20)[18]
             self.check(
                 "tab switches stay quick",
-                average < 120 and worst < 900,
-                f"mean {average:.0f}ms, worst {worst:.0f}ms over {len(timings)}",
-                {"mean_ms": round(average, 1), "worst_ms": round(worst, 1)},
+                average < 60 and worst < 500,
+                f"mean {average:.0f}ms, p95 {p95:.0f}ms, worst {worst:.0f}ms over {len(timings)}",
+                {"mean_ms": round(average, 1), "p95_ms": round(p95, 1),
+                 "worst_ms": round(worst, 1)},
             )
             for tab_id in ids:
                 bench.close(tab_id)
@@ -332,9 +508,10 @@ class Run:
                 ("/frames", 25),
                 ("/styles", 10),
             ]
+            opened = []
             for path, timeout in cases:
                 started = time.time()
-                bench.open(self.url(path))
+                opened.append(bench.open(self.url(path)))
                 bench.wait_loaded(timeout=timeout)
                 took = time.time() - started
                 # wait_loaded raises on timeout, so "took < timeout" is always
@@ -342,9 +519,11 @@ class Run:
                 # elements for a page of pictures or frames, which have neither.
                 # It is asked in JS rather than through `text`, because `text`
                 # waits on the page and a page of 40 images can outlast it.
+                # The fixture serves 40 tiles; assert what it serves, not a
+                # number that was written down before the page existed.
                 if path == "/images":
                     probe_js = "js document.images.length"
-                    wanted = 12
+                    wanted = 40
                 elif path == "/frames":
                     probe_js = "js document.querySelectorAll('iframe').length"
                     wanted = 12
@@ -374,6 +553,10 @@ class Run:
                        and all(tab["hasView"] for tab in probe["tabs"] if tab["url"]),
                        f"{len(probe['tabs'])} tabs, "
                        f"{sum(1 for tab in probe['tabs'] if tab['hasView'])} with a view")
+            # Five pages of a few megabytes each are not something to leave
+            # standing for the next scenario to measure the browser against.
+            for tab_id in opened:
+                bench.close(tab_id)
 
         @self.scenario("pages that misbehave")
         def _bad():
@@ -390,7 +573,7 @@ class Run:
                        f"{len(probe['tabs'])} tabs, "
                        f"{sum(1 for tab in probe['tabs'] if tab['hasView'])} with a view")
 
-            bench.open(self.url("/redirect?n=6"))
+            redirect = bench.open(self.url("/redirect?n=6"))
             landed = bench.wait_for(lambda probe: probe["url"].endswith("/plain"), timeout=25)
             self.check("a redirect chain lands", landed["url"].endswith("/plain"), landed["url"])
 
@@ -409,7 +592,7 @@ class Run:
                 f"{len(alive)} tab for the loop, answered in {answered:.1f}s",
             )
 
-            bench.open(self.url("/stall"))
+            stall = bench.open(self.url("/stall"))
             time.sleep(3)
             started = time.time()
             bench.probe()
@@ -436,10 +619,23 @@ class Run:
             bench.close(spray)
             time.sleep(4)
             after = self.ram()
+            # "Lower than the peak plus 50" lets a browser still sitting at the
+            # peak pass. The bound that means something is the idle reading: a
+            # browser that gave the sprayed tab back should be within a factor
+            # of two of one idle tab, not within a rounding error of its own
+            # worst moment.
+            idle = getattr(self, "one_tab", None) or {"pss_mb": 213.0}
             self.check("the engine survives a spray and keeps working",
-                       bench.probe().get("ok") and after["pss_mb"] < usage["pss_mb"] + 50,
-                       f"{usage['pss_mb']}MB -> {after['pss_mb']}MB, still answering",
+                       bench.probe().get("ok") and after["pss_mb"] < 2 * idle["pss_mb"],
+                       f"{usage['pss_mb']}MB -> {after['pss_mb']}MB, still answering "
+                       f"(one idle tab is {idle['pss_mb']}MB)",
                        {"memory": after})
+            # This scenario opens seven tabs, several of them pages that never
+            # finish. A later check about an idle browser must not measure
+            # those, so they go now.
+            for tab_id in (tab, redirect, loop_tab, stall, busy, other):
+                bench.close(tab_id)
+            time.sleep(1)
 
         @self.scenario("the field, panels and find")
         def _chrome():
@@ -452,8 +648,13 @@ class Run:
                     bench.must(f"key {key}")
                     timings.append((time.time() - started) * 1000)
                     bench.must("key closepanel")
-            self.check("panels open and close", statistics.mean(timings) < 200,
-                       f"mean {statistics.mean(timings):.0f}ms over {len(timings)}")
+            # The mean says the usual panel is quick. The worst is recorded
+            # beside it because a mean hides the one open that took a second and
+            # a half, and that is the one a person remembers.
+            panel_mean, panel_worst = statistics.mean(timings), max(timings)
+            self.check("panels open and close", panel_mean < 200,
+                       f"mean {panel_mean:.0f}ms, worst {panel_worst:.0f}ms over {len(timings)}",
+                       {"mean_ms": round(panel_mean, 1), "worst_ms": round(panel_worst, 1)})
 
             # `omni` is "go to this address"; the field is opened by `key omni`.
             bench.must("key omni")
@@ -616,10 +817,20 @@ class Run:
                 if path.exists() and path.stat().st_size > 0:
                     break
                 time.sleep(0.2)
+            # Landing somewhere is not landing in the right place: a run that
+            # writes into the person's own ~/Downloads leaves a file behind and
+            # can pass on a file an earlier run put there.
+            inside = self.args.attach
+            if not inside:
+                try:
+                    inside = self.downloads.resolve() in Path(path).resolve().parents
+                except OSError:
+                    inside = False
             self.check(
                 "the file landed",
-                path.exists() and path.stat().st_size > 0,
-                f"{path} {path.stat().st_size if path.exists() else 0} bytes",
+                path.exists() and path.stat().st_size > 0 and inside,
+                f"{path} {path.stat().st_size if path.exists() else 0} bytes, "
+                f"inside the suite's folder: {inside}",
             )
 
         @self.scenario("the blocker runs before the page")
@@ -715,6 +926,11 @@ class Run:
             fork = bench.must("js document.cookie.includes('flavour')")
             self.check("two private tabs share nothing with the ordinary one",
                        fork.get("value") == "false", str(fork)[:60])
+            # Five tabs, two of them private, none of them the next scenario's
+            # business: a private tab left open is also a promise this suite
+            # has no way to check.
+            bench.must("closeall")
+            time.sleep(0.6)
 
         @self.scenario("what a fresh start remembers")
         def _session():
@@ -788,7 +1004,10 @@ class Run:
             self.check("closing every tab leaves one", len(probe["tabs"]) == 1, f"{len(probe['tabs'])} tabs")
             time.sleep(2)
             usage = self.ram()
-            self.check("memory comes back down", usage["pss_mb"] < 420, json.dumps(usage), {"memory": usage})
+            # One tab left, so the bound is the idle promise, not a number
+            # chosen to be comfortably above whatever came out.
+            self.check("memory comes back down", usage["pss_mb"] < 260,
+                       json.dumps(usage), {"memory": usage})
 
         @self.scenario("an idle minute")
         def _drift():
@@ -799,9 +1018,76 @@ class Run:
             time.sleep(5 if self.args.quick else 60)
             after = self.ram()
             drift = after["pss_mb"] - before["pss_mb"]
-            self.check("nothing grows while nothing happens", drift < 35,
-                       f"{before['pss_mb']}MB -> {after['pss_mb']}MB ({drift:+.1f}MB)",
-                       {"drift_mb": round(drift, 1)})
+            own_drift = after["anon_mb"] - before["anon_mb"]
+            # 35MB a minute is not "nothing grows", it is a leak with a
+            # generous allowance. Ten is above the noise of a settled engine
+            # and far below anything a reader would call growth. The browser's
+            # own share is measured too, because that is the figure the promise
+            # is about.
+            self.check("nothing grows while nothing happens", drift < 10 and own_drift < 10,
+                       f"{before['pss_mb']}MB -> {after['pss_mb']}MB ({drift:+.1f}MB), "
+                       f"own {before['anon_mb']}MB -> {after['anon_mb']}MB ({own_drift:+.1f}MB)",
+                       {"drift_mb": round(drift, 1), "own_drift_mb": round(own_drift, 1)})
+
+        @self.scenario("extensions")
+        def _extensions():
+            # The loader is proved in tools/extensions.py; what matters here is
+            # that a page loaded in this browser carries no extension at all
+            # unless one was installed, so the browser without extensions is
+            # still the browser.
+            listed = bench.command("extensions").get("extensions", [])
+            self.check("a fresh browser has no extensions", listed == [], str(listed))
+            tab = bench.open(self.url("/plain?ext=0"))
+            bench.wait_loaded(tab_id=tab)
+            marked = bench.command(
+                "js (() => String(document.documentElement.getAttribute('data-search-ext')))()"
+            ).get("value")
+            self.check("and no extension touch in the page", marked == "null", str(marked))
+
+        @self.scenario("the shield really compiled")
+        def _shield():
+            state = {"lists": 0, "finished": 0, "rules": 0}
+            for _ in range(30):
+                state = bench.command("shield")
+                if state.get("finished") == state.get("lists") and state.get("lists"):
+                    break
+                time.sleep(1)
+            self.check(
+                "every filter list compiled",
+                state.get("lists", 0) > 0 and state.get("finished") == state.get("lists"),
+                str(state),
+            )
+            self.check(
+                "and carries the rules the list has",
+                state.get("rules", 0) > 2000,
+                str(state),
+            )
+
+        @self.scenario("the bookmarks bar")
+        def _bmarks():
+            bench.must("closeall")
+            # An earlier scenario kept a page and restarted, so the suite's own
+            # profile already holds bookmarks. Start this one from nothing.
+            bench.must("forget")
+            bench.must("closeall")
+            time.sleep(0.5)
+            start = bench.probe()
+            bar_before = start.get("bookmarkBar", None)
+            self.check("a browser with nothing kept hides the bar", bar_before is False, str(bar_before))
+            tab = bench.open(self.url("/titled?t=Kept"))
+            bench.wait_loaded(tab_id=tab)
+            time.sleep(1)
+            bench.must("key bookmark")
+            time.sleep(1)
+            probe = bench.probe()
+            self.check("keeping a page shows the bar", probe.get("bookmarkBar") is True, str(probe.get("bookmarkBar")))
+            self.check("with one chip in it", probe.get("bookmarkCount") == 1, str(probe.get("bookmarkCount")))
+
+        @self.scenario("stopped talking about the page that is gone")
+        def _no_stale():
+            probe = bench.probe()
+            self.check("the active tab is the one on screen", probe.get("visibleChild") == f"tab-{probe.get('active')}",
+                       f"{probe.get('active')} -> {probe.get('visibleChild')}")
 
         @self.scenario("no strays")
         def _strays():

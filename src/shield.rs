@@ -2,85 +2,556 @@
 // launch and enforced inside WebKit's own networking, before a request is
 // made. There is no script of ours in the page and nothing to pay per frame.
 //
-// The rules live in assets/shield-rules.json and are copied to the user's data
-// folder on first run, so anyone can read or edit what is blocked.
+// The rules live in assets/shield/ and are copied to the user's data folder on
+// first run, so anyone can read or edit what is blocked.
 use crate::files;
 use glib::translate::ToGlibPtr;
+use glib::{ffi as glib_ffi, gobject_ffi};
 use std::collections::BTreeMap;
 use std::ffi::{c_void, CString};
-use webkit2gtk::gio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use webkit2gtk::ffi;
+use webkit2gtk::{ffi, gio};
 
-const EMBEDDED: &str = include_str!("../assets/shield-rules.json");
-
-fn rules_path() -> std::path::PathBuf {
-    files::path_in(&files::data_dir(), "shield-rules-1.json")
+thread_local! {
+    /// What the last install really achieved: how many lists, and how many
+    /// rules inside them. A list that fails to parse contributes nothing and
+    /// uses to leave no trace anywhere but stderr.
+    static SHIELD_STATE: std::cell::RefCell<ShieldState> = const {
+        std::cell::RefCell::new(ShieldState { lists: 0, done: 0, compiled: 0 })
+    };
+    /// How many managers the shield has been installed into this session.
+    ///
+    /// A new extension generation builds a new manager, and its lists are the
+    /// same lists: the second install applies the filters again but does not
+    /// count them, or `state()` would report twice the rules the browser has.
+    static INSTALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The rules as JSON, written out once so they can be audited and edited.
-pub fn rules_json() -> String {
-    let path = rules_path();
-    if !path.exists() {
-        let _ = std::fs::write(&path, EMBEDDED);
-        EMBEDDED.to_string()
-    } else {
-        std::fs::read_to_string(&path).unwrap_or_else(|_| EMBEDDED.to_string())
+pub struct ShieldState {
+    pub lists: usize,
+    pub done: usize,
+    pub compiled: usize,
+}
+
+/// Lists attempted, lists finished, and rules inside the lists that compiled.
+///
+/// "Finished" is not "accepted": a list WebKit rejected still counts in `done`,
+/// because it has been dealt with, and contributes nothing to `compiled`. A
+/// finish with no rules behind it is the shape of a blocker that blocks
+/// nothing, and it is the only way to see one from outside.
+pub fn state() -> (usize, usize, usize) {
+    SHIELD_STATE.with(|state| {
+        let state = state.borrow();
+        (state.lists, state.done, state.compiled)
+    })
+}
+
+/// The readable copy of the rules, beside the compiled store.
+///
+/// The name carries the content hash, so a new EasyList pull lands in a new
+/// file instead of leaving last month's rules where anyone reading them would
+/// think they were current. The compiled store is named from the same bytes:
+/// one hash, one answer about which rules are in force.
+fn rules_path() -> std::path::PathBuf {
+    files::path_in(&files::data_dir(), &format!("shield-rules-{}.json", lists_key()))
+}
+
+/// Every rule list the browser installs, embedded at build time.
+///
+/// These are uBlock Origin's own lists, EasyList and EasyPrivacy, compiled into
+/// the one format this engine can enforce. `tools/build_shield.py` writes them.
+pub fn rules() -> &'static [&'static str] {
+    crate::shield_assets::FILTERS
+}
+
+/// The lists as one JSON array of arrays, for the readable copy on disk.
+///
+/// Concatenating them, which the first version did, produces `][`, and a file
+/// that does not parse is not a file anyone can check the blocker from.
+fn joined() -> String {
+    let mut all = String::with_capacity(rules().iter().map(|json| json.len() + 1).sum());
+    all.push('[');
+    for (index, json) in rules().iter().enumerate() {
+        if index > 0 {
+            all.push(',');
+        }
+        all.push_str(json.trim());
     }
+    all.push(']');
+    all
+}
+
+/// Make sure the readable copy exists, without reading it back at launch.
+/// A write that fails is not a launch failure: the embedded lists are what the
+/// store compiles, and this file is only a copy for a person to look at.
+fn ensure_rules_json() {
+    let path = rules_path();
+    if path.exists() {
+        return;
+    }
+    let _ = std::fs::write(&path, joined());
+}
+
+/// How many rules a list holds.
+///
+/// Every entry carries a `url-filter` trigger or a `selector` action, so
+/// counting both is the size of the list without parsing JSON in the launch
+/// path. The number is only ever reported, never used to decide anything.
+fn rule_count(json: &str) -> usize {
+    json.matches("\"url-filter\"").count() + json.matches("\"selector\"").count()
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn hash_from(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// FNV-1a, 64 bit, written out instead of taken from the standard library.
+///
+/// `DefaultHasher` promises nothing about its output staying the same between
+/// Rust releases. A hash that moves on upgrade either throws away every
+/// compiled store or, worse, keeps answering a changed list with a filter built
+/// from bytes that are gone. This one has published answers for known inputs,
+/// and the tests pin them.
+fn hash64(bytes: &[u8]) -> u64 {
+    hash_from(FNV_OFFSET, bytes)
+}
+
+/// The name one list's compiled filter is cached under.
+///
+/// A compiled filter is only correct for the exact bytes it was compiled from.
+/// Reuse the name across a new EasyList pull and the browser enforces last
+/// month's rules forever, with nothing anywhere saying so. So the name is the
+/// list's own content hash, plus the index so two identical lists cannot
+/// collide. Hex and dashes only, because the store keeps this as a file name.
+fn list_ident(index: usize, json: &str) -> String {
+    format!("search-shield-{index}-{:016x}", hash64(json.as_bytes()))
+}
+
+/// One key for the whole embedded set, for the readable disk copy.
+fn lists_key() -> String {
+    let mut hash = FNV_OFFSET;
+    for json in rules() {
+        hash = hash_from(hash, json.as_bytes());
+    }
+    format!("{hash:016x}")
 }
 
 struct Slot {
-    filter: Option<*mut ffi::WebKitUserContentFilter>,
-    done: bool,
+    /// Whether answers about this list belong in `state()`. Only the first
+    /// install of the session counts; later managers get the same filters.
+    tally: bool,
+    /// How many callbacks have landed on this list. A load and a compile can
+    /// each answer for the same list, and one arriving must not look like the
+    /// other's answer, so a wait counts answers rather than a flag.
+    answers: u64,
+    /// How many callbacks have been registered for this list. A wait is for
+    /// the answer to its own registration, not merely for any answer.
+    registered: u64,
+    /// A filter for it reached the manager.
+    accepted: bool,
+    /// Counted into `state()`, once, however many callbacks land on it.
+    counted: bool,
+    /// Rules already added to `compiled`, so a second answer for the same list
+    /// can only raise the count to what the list holds, never past it.
+    rules_counted: usize,
+    /// How many rules the list held, so the browser can report what it has
+    /// rather than assuming a compile that returned means rules that work.
+    rules: usize,
+    /// The name this list is cached under, so a refusal can say which list was
+    /// refused rather than which number it happened to be.
+    ident: String,
+}
+
+/// What a pending callback needs: the slot it fills in, and the manager that
+/// must still exist when it lands.
+type Handoff = (Arc<Mutex<Slot>>, *mut ffi::WebKitUserContentManager);
+
+fn slot_guard(slot: &Mutex<Slot>) -> std::sync::MutexGuard<'_, Slot> {
+    // A panic in a callback must not become a panic in the blocker: the data
+    // behind the lock is sound, only a count may be one short.
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Pin the manager and the slot where the async callback can find them.
+///
+/// The callback runs long after the install has moved on, and may arrive after
+/// the manager's owner has dropped it, so the manager is referenced here and
+/// given back by whoever frees the hand-off.
+fn hand_off(slot: &Arc<Mutex<Slot>>, manager: &webkit2gtk::UserContentManager) -> Option<*mut c_void> {
+    let raw: *mut ffi::WebKitUserContentManager = manager.to_glib_none().0;
+    if raw.is_null() {
+        return None;
+    }
+    unsafe {
+        gobject_ffi::g_object_ref(raw as *mut gobject_ffi::GObject);
+    }
+    Some(Box::into_raw(Box::new((slot.clone(), raw))) as *mut c_void)
+}
+
+/// Give back what `hand_off` pinned. Only for a callback, or for a path that
+/// knows no callback will ever run.
+unsafe fn release(data: *mut c_void) {
+    let manager = (*data.cast::<Handoff>()).1;
+    if !manager.is_null() {
+        gobject_ffi::g_object_unref(manager as *mut gobject_ffi::GObject);
+    }
+    drop(Box::from_raw(data.cast::<Handoff>()));
+}
+
+/// Count one list into `state()`, once, even when it is finished twice.
+///
+/// A list can be touched twice at launch (a load that missed, then a compile)
+/// and either can finish after the launch stopped waiting, so the tally cannot
+/// be a plain increment at the end of a function. A filter that arrives for a
+/// list already counted as finished without rules upgrades the rule count
+/// without counting the list again: that is the load-after-timeout case, and
+/// reporting zero rules there would be a lie about what the browser blocks.
+fn count(slot: &Mutex<Slot>, accepted: bool) {
+    let (tally, first, added) = {
+        let mut s = slot_guard(slot);
+        let tally = s.tally;
+        let first = !s.counted;
+        s.counted = true;
+        // Only ever upwards: a miss answering after a hit must not take the
+        // rules back off a list the manager already has.
+        let rules = if accepted { s.rules } else { 0 };
+        let added = rules.saturating_sub(s.rules_counted);
+        s.rules_counted += added;
+        (tally, first, added)
+    };
+    if !tally {
+        return;
+    }
+    SHIELD_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if first {
+            state.done += 1;
+        }
+        state.compiled += added;
+    });
+}
+
+/// Report a finished list, hand its filter to the manager, and free the
+/// hand-off.
+///
+/// This is the only place a filter is applied, so a list that is still
+/// compiling when the launch budget runs out is applied when it lands rather
+/// than dropped: the window appearing and the shield working are separate
+/// promises, and this is the second one being kept.
+unsafe fn delivered(data: *mut c_void, filter: *mut ffi::WebKitUserContentFilter) {
+    let slot = (*data.cast::<Handoff>()).0.clone();
+    let manager = (*data.cast::<Handoff>()).1;
+    let fresh = {
+        let mut s = slot_guard(&slot);
+        s.answers += 1;
+        let fresh = !filter.is_null() && !s.accepted;
+        if !filter.is_null() {
+            s.accepted = true;
+        }
+        fresh
+    };
+    if filter.is_null() {
+        // A miss, or a list WebKit refused. Counted, and counted once: a hit
+        // arriving later replaces the zero with the list's real rule count.
+        count(&slot, false);
+    } else {
+        // A load and a compile can both answer for one list. The manager takes
+        // its own reference, so this one is given back either way; adding the
+        // same filter twice would be the same rules paid for twice in memory.
+        if fresh {
+            ffi::webkit_user_content_manager_add_filter(manager, filter);
+        }
+        // WebKitUserContentFilter is a GBoxed type, not a GObject. Freeing it
+        // with g_object_unref reads its first word as a class pointer and
+        // logs "g_object_unref: assertion 'G_IS_OBJECT (object)' failed" on
+        // every compile. Found with G_DEBUG=fatal-criticals and a backtrace
+        // that named this line; the boxed free is the one the type asks for.
+        ffi::webkit_user_content_filter_unref(filter);
+        count(&slot, true);
+    }
+    release(data);
 }
 
 unsafe extern "C" fn saved(
-    source: *mut glib::gobject_ffi::GObject,
+    source: *mut gobject_ffi::GObject,
     res: *mut gio::ffi::GAsyncResult,
     data: *mut c_void,
 ) {
-    let slot = &*(data as *const Mutex<Slot>);
-    let mut err: *mut glib::ffi::GError = std::ptr::null_mut();
+    let mut err: *mut glib_ffi::GError = std::ptr::null_mut();
     let filter = ffi::webkit_user_content_filter_store_save_finish(
         source as *mut ffi::WebKitUserContentFilterStore,
         res,
         &mut err,
     );
-    let mut s = slot.lock().unwrap();
-    if !filter.is_null() {
-        s.filter = Some(filter);
-    } else if !err.is_null() {
-        unsafe {
-            let msg = std::ffi::CStr::from_ptr((*err).message).to_string_lossy().to_string();
-            eprintln!("search: shield rules did not compile: {msg}");
-        }
+    if filter.is_null() && !err.is_null() {
+        let (ident, rules) = {
+            let s = slot_guard(&(*data.cast::<Handoff>()).0);
+            (s.ident.clone(), s.rules)
+        };
+        let msg = if (*err).message.is_null() {
+            "no message".to_string()
+        } else {
+            std::ffi::CStr::from_ptr((*err).message).to_string_lossy().to_string()
+        };
+        // A list WebKit cannot parse fails whole, which is a silent loss of
+        // every rule in it. Loud, once, at launch, with the name and size of
+        // what was lost so the number is not a mystery later.
+        eprintln!(
+            "search: shield list {ident} did not compile ({msg}); its {rules} rules block nothing"
+        );
+        glib_ffi::g_error_free(err);
     }
-    s.done = true;
+    delivered(data, filter);
 }
 
-/// Compile the rule list and hand it to a content manager. Blocks for a few
-/// milliseconds at launch, then costs nothing.
+unsafe extern "C" fn loaded(
+    source: *mut gobject_ffi::GObject,
+    res: *mut gio::ffi::GAsyncResult,
+    data: *mut c_void,
+) {
+    let mut err: *mut glib_ffi::GError = std::ptr::null_mut();
+    let filter = ffi::webkit_user_content_filter_store_load_finish(
+        source as *mut ffi::WebKitUserContentFilterStore,
+        res,
+        &mut err,
+    );
+    if !err.is_null() {
+        // A miss is not an error: this list has simply never been compiled
+        // here, and the caller compiles it now.
+        glib_ffi::g_error_free(err);
+    }
+    delivered(data, filter);
+}
+
+/// The whole launch's budget for waiting on the store, in milliseconds.
+///
+/// This is the only number that decides how long the window waits for the
+/// blocker. Everything past it still happens: each list has a callback that
+/// applies its filter the moment it lands, so a slow compile costs the first
+/// page it opens, never the launch or the session.
+const TOTAL_BUDGET_MS: u64 = 400;
+
+/// How much of that one load may take.
+///
+/// A store on a local disk either answers quickly or is worth moving on from;
+/// every millisecond spent here is a millisecond the window is not on screen.
+const LOAD_LIMIT_MS: u64 = 250;
+
+/// How long a launch waits for a first compile.
+const SAVE_LIMIT_MS: u64 = 400;
+
+/// The answer number a callback registered now will produce.
+fn register(slot: &Mutex<Slot>) -> u64 {
+    let mut s = slot_guard(slot);
+    s.registered += 1;
+    s.registered
+}
+
+/// Wait for the next answer about this list, but never hold the loop for
+/// longer than the caller allows. The list is never dropped by a timeout: the
+/// callback is registered, it still adds its filter, and the state it carries
+/// is counted by it.
+///
+/// `target` is the answer number this attempt is waiting for, so a store that
+/// missed and a compile started after it cannot read the miss as the compile's
+/// own answer.
+fn wait_for(slot: &Arc<Mutex<Slot>>, target: u64, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        {
+            let s = slot_guard(slot);
+            // A filter is a final answer for the list, whichever attempt
+            // brought it: no reason to sit out the rest of the budget.
+            if s.answers >= target || s.accepted || Instant::now() >= deadline {
+                return;
+            }
+        }
+        glib::MainContext::default().iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// What is left of the launch budget, never more than this step's own share.
+fn budget(stop: Instant, cap: u64) -> Duration {
+    stop.saturating_duration_since(Instant::now())
+        .min(Duration::from_millis(cap))
+}
+
+/// Compile every rule list and hand them to a content manager.
+///
+/// Each list is a separate filter: WebKit caps a filter, and uBlock Origin's
+/// lists together are far past that cap, so they go in as several. A list
+/// already compiled from these exact bytes is loaded instead of compiled, so
+/// only the first launch on a profile pays for compiling, and a launch never
+/// waits longer than one budget in total for the whole set.
+///
+/// Returns whether any list is installed or on its way in. A list still
+/// compiling when the budget runs out is applied by its own callback, so the
+/// shield is never left permanently off by a slow machine.
 pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
-    let json = rules_json();
-    if json.trim().is_empty() || !json.trim_start().starts_with('[') {
-        eprintln!("search: shield rules are not a JSON array; leaving it off");
+    let lists = rules();
+    if lists.is_empty() {
         return false;
     }
+    // Write the rules out once, so what is blocked can be read and edited
+    // without the binary's source. `ensure_rules_json` does that on first
+    // launch, and never reads the copy back into a launch.
+    ensure_rules_json();
     let store_dir = files::data_dir().join("shield-store");
     let _ = std::fs::create_dir_all(&store_dir);
-    let Ok(store_path) = CString::new(store_dir.to_string_lossy().to_string()) else { return false };
-    let Ok(ident) = CString::new("search-shield") else { return false };
+    let Ok(store_path) = CString::new(store_dir.to_string_lossy().to_string()) else {
+        return false;
+    };
 
-    let bytes = glib::Bytes::from(json.as_bytes());
-    let slot = Arc::new(Mutex::new(Slot { filter: None, done: false }));
-    let raw = Arc::into_raw(slot.clone()) as *mut c_void;
+    SHIELD_STATE.with(|state| state.borrow_mut().lists = lists.len());
+    // The first manager of the session is the one whose lists are reported. A
+    // manager built after an extension change holds the same rules, and saying
+    // so twice would read as twice the shield.
+    let tally = INSTALLS.with(|installs| {
+        let seen = installs.get() + 1;
+        installs.set(seen);
+        seen == 1
+    });
+    let stop = Instant::now() + Duration::from_millis(TOTAL_BUDGET_MS);
+    let mut installed = 0;
+    for (index, json) in lists.iter().enumerate() {
+        if json.trim().is_empty() || !json.trim_start().starts_with('[') {
+            eprintln!("search: shield list {index} is not a JSON array; skipping it");
+            // Attempted and dealt with: a list the build broke must not leave
+            // `finished` short of `lists` forever, or the only signal there is
+            // would read as a compile that never ended.
+            SHIELD_STATE.with(|state| {
+                if tally {
+                    state.borrow_mut().done += 1;
+                }
+            });
+            continue;
+        }
+        // One slot for both attempts: a load and a compile can both finish for
+        // the same list, and two filters or two rule counts for one list would
+        // report the shield as bigger than it is.
+        //
+        // The store key is this list's own bytes, so a hit can only ever be a
+        // filter compiled from exactly these rules.
+        let ident = list_ident(index, json);
+        let slot = Arc::new(Mutex::new(Slot {
+            tally,
+            answers: 0,
+            registered: 0,
+            accepted: false,
+            counted: false,
+            rules_counted: 0,
+            rules: rule_count(json),
+            ident: ident.clone(),
+        }));
+        let ready = match load_one(&store_path, &ident, &slot, manager, budget(stop, LOAD_LIMIT_MS)) {
+            Some(true) => true,
+            Some(false) => save_one(&store_path, &ident, json, &slot, manager, budget(stop, SAVE_LIMIT_MS))
+                .unwrap_or(true),
+            None => {
+                // The load is still in flight and the budget is spent. Compile
+                // too, and let whichever answers first win: a hit that arrives
+                // late is the same bytes, so the store is not lied to.
+                let _ = save_one(&store_path, &ident, json, &slot, manager, budget(stop, SAVE_LIMIT_MS));
+                true
+            }
+        };
+        if ready {
+            installed += 1;
+        }
+    }
+    if installed == 0 {
+        // One line, once: a session with no rules anywhere is the state the
+        // whole module exists to avoid, and silence is how it went unnoticed
+        // the first time. The path names where to look; the list itself has
+        // already said why it was refused.
+        eprintln!(
+            "search: the shield installed no list from {}; nothing is blocked this session",
+            store_path.to_string_lossy()
+        );
+    }
+    installed > 0
+}
 
+/// Ask a store that may already hold this list.
+///
+/// `Some(true)` is a hit, `Some(false)` is no filter stored for these bytes
+/// (the one case that must compile), `None` means the answer did not arrive
+/// inside the budget and the callback still holds it.
+fn load_one(
+    store_path: &CString,
+    ident: &str,
+    slot: &Arc<Mutex<Slot>>,
+    manager: &webkit2gtk::UserContentManager,
+    wait: Duration,
+) -> Option<bool> {
+    let Ok(ident) = CString::new(ident) else {
+        return Some(false);
+    };
+    let data = hand_off(slot, manager)?;
+    let target = register(slot);
     unsafe {
         let store = ffi::webkit_user_content_filter_store_new(store_path.as_ptr());
         if store.is_null() {
-            // The slot is leaked on purpose: a callback may still hold it.
-            return false;
+            // Nothing was registered: the pins go back, and the caller falls
+            // through to a compile that will report its own failure.
+            release(data);
+            return Some(false);
+        }
+        ffi::webkit_user_content_filter_store_load(
+            store,
+            ident.as_ptr(),
+            std::ptr::null_mut(),
+            Some(loaded),
+            data,
+        );
+        gobject_ffi::g_object_unref(store as *mut gobject_ffi::GObject);
+    }
+    wait_for(slot, target, wait);
+    let s = slot_guard(slot);
+    if s.accepted {
+        Some(true)
+    } else if s.answers >= target {
+        // A load that answered with no filter: never compiled here.
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Compile one list, waiting no longer than the budget allows.
+///
+/// `Some(true)` compiled and applied, `Some(false)` refused by WebKit, `None`
+/// still compiling, in which case the callback applies it.
+fn save_one(
+    store_path: &CString,
+    ident: &str,
+    json: &str,
+    slot: &Arc<Mutex<Slot>>,
+    manager: &webkit2gtk::UserContentManager,
+    wait: Duration,
+) -> Option<bool> {
+    let Ok(ident) = CString::new(ident) else {
+        return Some(false);
+    };
+    let data = hand_off(slot, manager)?;
+    let target = register(slot);
+    let bytes = glib::Bytes::from(json.as_bytes());
+    unsafe {
+        let store = ffi::webkit_user_content_filter_store_new(store_path.as_ptr());
+        if store.is_null() {
+            // Nothing will call back: give the pins back and say so once, from
+            // the caller, rather than twice from here.
+            release(data);
+            return Some(false);
         }
         ffi::webkit_user_content_filter_store_save(
             store,
@@ -88,30 +559,23 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
             bytes.to_glib_none().0,
             std::ptr::null_mut(),
             Some(saved),
-            raw,
+            data,
         );
-        glib::gobject_ffi::g_object_unref(store as *mut glib::gobject_ffi::GObject);
+        gobject_ffi::g_object_unref(store as *mut gobject_ffi::GObject);
     }
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !slot.lock().unwrap().done && Instant::now() < deadline {
-        glib::MainContext::default().iteration(false);
-        std::thread::sleep(Duration::from_millis(1));
+    // A list of tens of thousands of rules takes longer than a hand-written
+    // one to compile. This happens once per profile, and even then the loop is
+    // only held for as long as a launch can afford.
+    wait_for(slot, target, wait);
+    let s = slot_guard(slot);
+    if s.accepted {
+        Some(true)
+    } else if s.answers >= target {
+        Some(false)
+    } else {
+        None
     }
-
-    let filter = slot.lock().unwrap().filter;
-    let mut ok = false;
-    unsafe {
-        if let Some(filter) = filter {
-            ffi::webkit_user_content_manager_add_filter(manager.to_glib_none().0, filter);
-            glib::gobject_ffi::g_object_unref(filter as *mut glib::gobject_ffi::GObject);
-            ok = true;
-        }
-        // The slot is not freed: the async compile may still be holding the
-        // pointer on a slow machine, and a use-after-free in an ad blocker is
-        // not a trade worth making for a few bytes at launch.
-    }
-    ok
 }
 
 /// Sites where the shield is off, kept beside the hidden elements.
@@ -157,10 +621,95 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_rule_list_is_a_json_array() {
-        let json = rules_json();
-        let rules: serde_json::Value = serde_json::from_str(&json).expect("rules must parse");
-        assert!(rules.as_array().expect("rules are an array").len() > 40);
+    fn every_rule_list_is_a_json_array() {
+        assert!(!rules().is_empty(), "the build produces at least one list");
+        for (index, json) in rules().iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_str(json)
+                .unwrap_or_else(|error| panic!("list {index} does not parse: {error}"));
+            assert!(
+                parsed.as_array().map(|rules| !rules.is_empty()).unwrap_or(false),
+                "list {index} is an empty array"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lists_block_the_ad_networks_ublock_blocks() {
+        // A generated list can compile and still be full of nothing useful.
+        // These two are the ones any list has to have.
+        let all = rules().join("");
+        for host in ["doubleclick", "google-analytics", "googlesyndication"] {
+            assert!(all.contains(host), "no rule mentions {host}");
+        }
+    }
+
+    #[test]
+    fn the_cache_key_follows_the_bytes() {
+        // Same rules, same key, launch after launch and machine after machine.
+        assert_eq!(list_ident(0, "[]"), list_ident(0, "[]"));
+        // A new EasyList pull changes the bytes. If the key did not follow, the
+        // old compiled filter would answer for the new rules forever.
+        assert_ne!(list_ident(0, "[]"), list_ident(0, "[ ]"));
+        assert_ne!(list_ident(0, "[]"), list_ident(1, "[]"));
+        // Pinned algorithm: changing the hash throws away every compiled store
+        // on the machine, so it has to be a deliberate act.
+        assert_eq!(hash64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(hash64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(hash64(b"rules"), hash64(b"rules"));
+        assert_ne!(hash64(b"rules A"), hash64(b"rules B"));
+    }
+
+    #[test]
+    fn the_cache_key_is_a_file_name() {
+        // The store keeps the identifier as a name on disk, so a key with a
+        // slash or a space in it is a key that cannot be written.
+        for (index, json) in rules().iter().enumerate() {
+            let ident = list_ident(index, json);
+            assert!(
+                ident
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "{ident} is not a name every file system can hold"
+            );
+            assert!(ident.len() <= 64, "{ident} is longer than a store key needs to be");
+        }
+        assert!(lists_key().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_rule_is_counted_by_the_key_it_is_written_with() {
+        assert_eq!(rule_count(""), 0);
+        assert_eq!(
+            rule_count(r#"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}}]"#),
+            1
+        );
+        // One entry with both a trigger and a selector is one rule, but the
+        // count reports what the list holds, so both mentions count. The
+        // numbers are large; the point is that they are not zero.
+        assert_eq!(
+            rule_count(
+                r#"[{"trigger":{"url-filter":".*"},"action":{"type":"css-display-none","selector":"a"}}]"#
+            ),
+            2
+        );
+        assert_eq!(rule_count(r#"["url-filter","url-filter","selector"]"#), 3);
+    }
+
+    #[test]
+    fn the_shield_reports_the_rules_its_lists_hold() {
+        let total: usize = rules().iter().map(|json| rule_count(json)).sum();
+        assert!(total > 2000, "the shield would report only {total} rules");
+    }
+
+    #[test]
+    fn the_readable_copy_is_json() {
+        // Built the same way `rules_json` writes it, without touching anyone's
+        // data folder: a test that writes to $HOME is a test that fails on a
+        // machine where someone has edited their copy by hand.
+        let text = joined();
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("the readable rules do not parse: {error}"));
+        assert_eq!(parsed.as_array().map(|lists| lists.len()), Some(rules().len()));
     }
 
     #[test]

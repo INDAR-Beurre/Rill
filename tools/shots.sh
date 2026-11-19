@@ -14,11 +14,106 @@ OUT="${1:-$ROOT/council/latest}"
 SIZE="${SHOT_SIZE:-1500x917}"
 PORT="${FIXTURE_PORT:-8099}"
 BIN="$ROOT/target/release/search"
+BENCH="$ROOT/tools/bench.py"
 
 mkdir -p "$OUT"
 # A round's evidence is one run, not an accumulation of three: start clean.
 rm -f "$OUT"/*.png "$OUT"/manifest.json
 [[ -x "$BIN" ]] || { echo "build first: cargo build --release" >&2; exit 2; }
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+SOCKET="$XDG_RUNTIME_DIR/search-bench.sock"
+# The bench client reads this, so the cleanup below asks the same browser the
+# round drove, not whatever else is listening on the default path.
+export SEARCH_BENCH_SOCKET="$SOCKET"
+
+# -- the browser this script started, and nothing else ---------------------
+#
+# A browser left running keeps its three WebKit processes and the page's whole
+# engine alive. Seven critic children were OOM-killed in one round because a
+# shot run ended early and nobody reaped the browsers behind it, so the end of
+# this script is not the normal path: it is the only path. Everything below
+# names the pid it started and kills that pid, its children and its group.
+APP=""
+FIXTURES=""
+SHOTS=""
+# Setsid forks to make the new session leader, so `$!` is a wrapper that exits at
+# once and the browser is not its child any more. The launched shell writes the
+# pid it is about to exec over, and that one is both the process to signal and
+# the leader of its own group.
+PIDFILE="$(mktemp)"
+rm -f "$PIDFILE"
+
+# Deepest first: a WebKit child whose parent was killed first is reparented and
+# then has to be found by its group, which is why the group is signalled too.
+tree_kill() {
+  local pid="$1" signal="$2" child
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+      tree_kill "$child" "$signal"
+    done
+  fi
+  kill -s "$signal" "$pid" 2>/dev/null || true
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  # The driver first: a python still holding the bench socket would keep
+  # answering the `quit` below and hold the browser open.
+  if [[ -n "$SHOTS" ]] && kill -0 "$SHOTS" 2>/dev/null; then
+    tree_kill "$SHOTS" TERM
+    for _ in $(seq 1 10); do
+      kill -0 "$SHOTS" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$SHOTS" 2>/dev/null && tree_kill "$SHOTS" KILL
+  fi
+  if [[ -n "$APP" ]] && kill -0 "$APP" 2>/dev/null; then
+    # Graceful first: `quit` closes every view and lets the engine's own
+    # processes go, which a signal does not. It is also the only shutdown that
+    # does not look like a crash to the next `--fresh` run.
+    if [[ -x "$BIN" && -S "$SOCKET" ]]; then
+      # Bounded: a browser that has stopped answering is killed below, not
+      # waited on for the client's own thirty seconds.
+      timeout 5 python3 "$BENCH" quit >/dev/null 2>&1 || true
+    fi
+    for _ in $(seq 1 15); do
+      kill -0 "$APP" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$APP" 2>/dev/null; then
+      # Its own process group, when the launch gave it one, so the engine's
+      # helper processes go with it.
+      kill -TERM -- "-$APP" 2>/dev/null || kill -TERM "$APP" 2>/dev/null || true
+      for _ in $(seq 1 10); do
+        kill -0 "$APP" 2>/dev/null || break
+        sleep 0.2
+      done
+    fi
+    if kill -0 "$APP" 2>/dev/null; then
+      tree_kill "$APP" KILL
+      sleep 0.2
+    fi
+  fi
+  if [[ -n "$FIXTURES" ]] && kill -0 "$FIXTURES" 2>/dev/null; then
+    tree_kill "$FIXTURES" TERM
+    for _ in $(seq 1 10); do
+      kill -0 "$FIXTURES" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$FIXTURES" 2>/dev/null && tree_kill "$FIXTURES" KILL
+  fi
+  rm -f "$PIDFILE"
+  exit "$status"
+}
+
+# A run that is interrupted still ends here: `exit` turns INT/TERM/HUP into the
+# EXIT trap instead of leaving the browser behind. The trap can only run between
+# commands, so the driver below is a job this shell can interrupt: a heredoc in
+# the foreground would swallow the signal until it finished on its own.
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 
 # Fixtures, unless one is already answering.
 if ! python3 - "$PORT" <<'PY'
@@ -30,34 +125,46 @@ except OSError:
 PY
 then
   python3 "$ROOT/tools/fixtures.py" "$PORT" >/tmp/search-fixtures.log 2>&1 &
+  # Only a server this script started is ever killed; one that was already
+  # answering is someone else's and stays up.
   FIXTURES=$!
-  trap 'kill $FIXTURES 2>/dev/null || true' EXIT
   sleep 1
 fi
 
 # A browser of our own, with a fresh profile so states are reproducible.
 export XDG_CONFIG_HOME="$(mktemp -d)"
 export XDG_DATA_HOME="$(mktemp -d)"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 unset DISPLAY
 export GDK_BACKEND=wayland
 export SEARCH_BENCH=1
 
-APPEARANCE="${1:-}"
-if [[ "${SHOT_DARK:-0}" == "1" ]]; then
-  APPEARANCE=dark
-else
-  APPEARANCE=light
-fi
+APPEARANCE=light
+[[ "${SHOT_DARK:-0}" == "1" ]] && APPEARANCE=dark
 
 # A socket left by a killed browser still answers connect() and then never
 # replies, which reads as a browser that loaded nothing. Start from none.
-rm -f "${XDG_RUNTIME_DIR:-/tmp}/search-bench.sock"
-"$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >/tmp/search-shots.log 2>&1 &
+rm -f "$SOCKET"
+# In its own session, so the whole tree can be signalled as one group even if
+# the browser's own shutdown is the thing that has stopped working.
+LAUNCH='echo $$ > "$1"; shift; exec "$@"'
+if command -v setsid >/dev/null 2>&1; then
+  setsid sh -c "$LAUNCH" sh "$PIDFILE" \
+    "$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >/tmp/search-shots.log 2>&1 &
+else
+  sh -c "$LAUNCH" sh "$PIDFILE" \
+    "$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >/tmp/search-shots.log 2>&1 &
+fi
 APP=$!
-trap 'kill $APP 2>/dev/null || true; [[ -n "${FIXTURES:-}" ]] && kill $FIXTURES 2>/dev/null || true' EXIT
+# The recorded pid, when the launch got far enough to record one. Until then the
+# wrapper is all there is to signal, and killing it is still better than
+# leaving the browser behind.
+for _ in $(seq 1 25); do
+  [[ -s "$PIDFILE" ]] && break
+  sleep 0.1
+done
+if [[ -s "$PIDFILE" ]]; then APP="$(cat "$PIDFILE")"; fi
 
-python3 - "$ROOT" "$OUT" "$PORT" <<'PY'
+python3 - "$ROOT" "$OUT" "$PORT" <<'PY' &
 import json, os, subprocess, sys, time, pathlib
 
 root, out, port = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
@@ -71,12 +178,15 @@ def wait_bench(timeout=25):
             return Bench(timeout=15)
         except Exception:
             time.sleep(0.2)
-    raise SystemExit("the browser never opened its bench socket")
-
-bench = wait_bench()
-wait_bench.ping = bench.must("ping")
+    raise BenchError("the browser never opened its bench socket")
 
 manifest = []
+# Set when the round stopped before the states were walked, so a run that
+# captured nothing cannot report success.
+stopped = False
+# States the browser has but no verb can open: named in the summary so a hole
+# in the evidence is visible without reading the manifest.
+unavailable = []
 
 def real_shot(path):
     """A picture of the window as the desktop draws it, when there is a desktop."""
@@ -115,9 +225,13 @@ def real_shot(path):
 
 
 def shot(name, note=""):
-    # States that are *about* something being open must not be settled first:
-    # settling puts away the very panel or field the shot is evidence for.
-    if not name.startswith(("04", "05", "06", "07")):
+    # States that are *about* something being open must not be put away first:
+    # settle() closes the very panel or field the shot is evidence for. They
+    # still need GTK's queued allocation pass to run, or the layer is drawn at
+    # the size it had before it was raised.
+    if name.startswith(("04", "05", "06", "07")):
+        bench.must("settle")
+    else:
         settle()
     path = out / f"{name}.png"
     if os.environ.get("SEARCH_SHOTS", "real") == "real":
@@ -143,6 +257,31 @@ def settle():
     raise SystemExit("the field would not close: " + json.dumps(bench.probe())[:300])
 
 
+def show_panel(kind):
+    """Open one panel and prove it is the one that opened.
+
+    A panel is opened the way a person opens it: through the shortcut table for
+    the ones that have a key, and through a panel verb for the ones that do
+    not. Whichever answers, the probe has to say that panel is up, or the
+    picture would be captioned with a state it does not show.
+
+    `key <name>` is the only way in today: bench.rs has no verb that calls
+    toggle_panel. `openpanel` is tried second so that the day someone adds it,
+    the states without a key start working without touching this script.
+    """
+    title = kind.capitalize()
+    for verb in (f"key {kind}", f"openpanel {kind}"):
+        try:
+            bench.must(verb)
+        except BenchError:
+            continue
+        time.sleep(0.4)
+        if bench.probe().get("panel") == title:
+            return True
+        bench.must("key closepanel")
+    return False
+
+
 def open_page(path, wait=True, tries=2):
     last = None
     for _ in range(tries):
@@ -157,93 +296,126 @@ def open_page(path, wait=True, tries=2):
             time.sleep(0.5)
     raise SystemExit(f"could not load {path}: {last}")
 
-# 1. the quiet default: one page, tabs down the side
-open_page("/office")
-time.sleep(0.6)
-shot("01-default", "one tab, the studio page")
+try:
+    # Waiting for the socket is inside the try so a browser that never came up
+    # still leaves a manifest and still goes through the cleanup trap.
+    bench = wait_bench()
+    bench.must("ping")
 
-# 2. five tabs, four of them pinned
-tabs = []
-for title, body in [("X", ""), ("Notion", ""), ("Figma", ""), ("Search", "")]:
-    tabs.append(open_page(f"/titled?t={title.replace(' ', '+')}"))
-for tab in tabs:
-    bench.select(tab)
-    bench.must("key pin")
-open_page("/office")
-time.sleep(0.6)
-shot("02-pins", "four pins and a live row")
+    # 1. the quiet default: one page, tabs down the side
+    open_page("/office")
+    time.sleep(0.6)
+    shot("01-default", "one tab, the studio page")
 
-# 3. a column of tabs, nothing pinned
-bench.must("closeall")
-time.sleep(0.5)
-for title in ("X", "Notion", "Figma", "Reading", "Are.na"):
-    open_page(f"/titled?t={title.replace(' ', '+')}")
-time.sleep(0.4)
-time.sleep(0.5)
-shot("03-tabs", "a row of open tabs")
+    # 2. five tabs, four of them pinned
+    tabs = []
+    for title, body in [("X", ""), ("Notion", ""), ("Figma", ""), ("Search", "")]:
+        tabs.append(open_page(f"/titled?t={title.replace(' ', '+')}"))
+    for tab in tabs:
+        bench.select(tab)
+        bench.must("key pin")
+    open_page("/office")
+    time.sleep(0.6)
+    shot("02-pins", "four pins and a live row")
 
-# 4. the field, over the page
-bench.go(f"http://127.0.0.1:{port}/office")
-bench.wait_loaded(timeout=25)
-bench.must("key omni")
-time.sleep(0.4)
-shot("04-omni", "the field with suggestions")
-bench.must("escape")
-
-# 4b. the field with a row picked, the way Up and Down leave it
-bench.must("key omni")
-time.sleep(0.3)
-bench.must("key down")
-bench.must("key down")
-time.sleep(0.3)
-shot("04b-omni-picked", "a suggestion picked by keyboard")
-bench.must("escape")
-
-# 5. the panels
-for kind in ("settings", "history", "bookmarks", "downloads"):
-    bench.must(f"key {kind}")
+    # 3. a column of tabs, nothing pinned
+    bench.must("closeall")
+    time.sleep(0.5)
+    for title in ("X", "Notion", "Figma", "Reading", "Are.na"):
+        open_page(f"/titled?t={title.replace(' ', '+')}")
     time.sleep(0.4)
-    shot(f"05-panel-{kind}", kind)
-    bench.must("key closepanel")
+    time.sleep(0.5)
+    shot("03-tabs", "a row of open tabs")
 
-# 6. find
-bench.must("closeall")
-time.sleep(0.4)
-open_page("/long")
-# A new tab comes up with the field open, so settle before evidence of anything
-# else: a picture of find with the address field over it shows neither.
-settle()
-bench.must("find Paragraph")
-time.sleep(0.6)
-shot("06-find", "find over a page")
-bench.must("escape")
+    # 4. the field, over the page
+    bench.go(f"http://127.0.0.1:{port}/office")
+    bench.wait_loaded(timeout=25)
+    bench.must("key omni")
+    time.sleep(0.4)
+    shot("04-omni", "the field with suggestions")
+    bench.must("escape")
 
-# 7. reading mode on a long page
-open_page("/long")
-settle()
-time.sleep(0.8)
-bench.must("key reader")
-time.sleep(1.2)
-shot("07-reading", "reading mode")
-bench.must("key reload")
+    # 4b. the field with a row picked, the way Up and Down leave it
+    bench.must("key omni")
+    time.sleep(0.3)
+    bench.must("key down")
+    bench.must("key down")
+    time.sleep(0.3)
+    shot("04b-omni-picked", "a suggestion picked by keyboard")
+    bench.must("escape")
 
-# 8. empty tab. closeall leaves exactly one fresh tab behind (closing the last
-# tab makes a new one), so asking for another here would put two "New tab"
-# rows in a picture that is meant to show one.
-bench.must("closeall")
-time.sleep(0.6)
-shot("08-empty", "an empty tab")
-bench.must("escape")
+    # 5. the panels, every one of them: the sheet of keys and the truth about
+    # extensions are facets the critics score, so they need a picture too, not
+    # only a stress check.
+    for kind in ("settings", "history", "bookmarks", "downloads",
+                 "shortcuts", "extensions"):
+        name = f"05-panel-{kind}"
+        if not show_panel(kind):
+            path = out / f"{name}.png"
+            manifest.append({"name": name, "path": str(path), "ok": False,
+                             "skipped": True,
+                             "note": f"nothing in src/bench.rs opens {kind.capitalize()}"})
+            unavailable.append(name)
+            print(f"  SKIP  {name} — nothing in src/bench.rs opens "
+                  f"{kind.capitalize()}: no key in src/keys.rs SHEET reaches it"
+                  f" and no verb calls toggle_panel")
+            continue
+        shot(name, kind)
+        bench.must("key closepanel")
 
-# 9. a page that fails
-bench.must("closeall")
-time.sleep(0.4)
-open_page("/missing")
-time.sleep(0.6)
-shot("09-missing", "a 404")
+    # 6. find
+    bench.must("closeall")
+    time.sleep(0.4)
+    open_page("/long")
+    # A new tab comes up with the field open, so settle before evidence of anything
+    # else: a picture of find with the address field over it shows neither.
+    settle()
+    bench.must("find Paragraph")
+    time.sleep(0.6)
+    shot("06-find", "find over a page")
+    bench.must("escape")
 
-(out / "manifest.json").write_text(json.dumps(manifest, indent=2))
-bad = [item for item in manifest if not item["ok"]]
-print(f"\n{len(manifest) - len(bad)}/{len(manifest)} states captured in {out}")
-sys.exit(1 if bad else 0)
+    # 7. reading mode on a long page
+    open_page("/long")
+    settle()
+    time.sleep(0.8)
+    bench.must("key reader")
+    time.sleep(1.2)
+    shot("07-reading", "reading mode")
+    bench.must("key reload")
+
+    # 8. empty tab. closeall leaves exactly one fresh tab behind (closing the last
+    # tab makes a new one), so asking for another here would put two "New tab"
+    # rows in a picture that is meant to show one.
+    bench.must("closeall")
+    time.sleep(0.6)
+    shot("08-empty", "an empty tab")
+    bench.must("escape")
+
+    # 9. a page that fails
+    bench.must("closeall")
+    time.sleep(0.4)
+    open_page("/missing")
+    time.sleep(0.6)
+    shot("09-missing", "a 404")
+except (BenchError, SystemExit, OSError) as error:
+    # A shot that fails still leaves a manifest: a round with no index at all
+    # reads as a round nobody ran.
+    stopped = True
+    print(f"\nthe round stopped early: {error}", file=sys.stderr)
+finally:
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+bad = [item for item in manifest if not item["ok"] and not item.get("skipped")]
+tried = [item for item in manifest if not item.get("skipped")]
+skipped = f", {len(unavailable)} state(s) with no way to open" if unavailable else ""
+print(f"\n{len(tried) - len(bad)}/{len(tried)} states captured in {out}{skipped}")
+# A missing way to open a state is a failure of this round's evidence even
+# though it is not a failed picture, so the run does not report success. A
+# round that stopped early is a failure too, whatever it managed to capture.
+sys.exit(1 if bad or unavailable or stopped else 0)
 PY
+SHOTS=$!
+# The driver's own exit status is the round's: a failed shot or a state with no
+# way to open it ends non-zero, and the trap above still reaps the browser.
+wait "$SHOTS"

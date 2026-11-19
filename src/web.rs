@@ -7,7 +7,7 @@ use gtk::prelude::*;
 use webkit2gtk::{
     DownloadExt, HardwareAccelerationPolicy, NavigationPolicyDecisionExt, PolicyDecisionExt,
     ResponsePolicyDecisionExt, Settings, SettingsExt, URIRequestExt, URIResponseExt,
-    UserContentManager, WebContext, WebContextExt, WebView, WebViewExt,
+    UserContentManager, UserContentManagerExt, WebContext, WebContextExt, WebView, WebViewExt,
 };
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,9 @@ thread_local! {
     // Two of these, not one: the shield is per host, and the rules are baked
     // into the content manager a view is made with. A host where you turned
     // the blocker off needs a manager that never had the rules in it.
-    static MANAGERS: RefCell<[Option<UserContentManager>; 2]> = const { RefCell::new([None, None]) };
+    // Keyed by whether the blocker is on and by which extensions are installed:
+    // a new extension means a new generation, and a new manager to build.
+    static MANAGERS: RefCell<Vec<(bool, usize, UserContentManager)>> = const { RefCell::new(Vec::new()) };
     static CONTEXT_READY: RefCell<bool> = const { RefCell::new(false) };
 }
 
@@ -27,16 +29,46 @@ fn shielded_for(app: &AppRef, url: &str) -> bool {
 /// The content manager a view should be made with, keyed on whether the
 /// blocker applies to that page's host.
 pub fn shared_manager(app: &AppRef, shielded: bool) -> UserContentManager {
-    let slot = usize::from(shielded);
-    if let Some(manager) = MANAGERS.with(|m| m.borrow()[slot].clone()) {
+    let generation = crate::extensions::generation();
+    if let Some((_, _, manager)) = MANAGERS.with(|m| {
+        m.borrow().iter().find(|(on, gen, _)| *on == shielded && *gen == generation).cloned()
+    }) {
         return manager;
     }
+    let manager = build_manager(app, shielded);
+    MANAGERS.with(|m| {
+        // Only the current generation is kept: a manager from before the last
+        // extension change holds its own copy of every rule list, and one left
+        // behind is a dozen megabytes that will never be used again.
+        m.borrow_mut().retain(|(_, gen, _)| *gen == generation);
+        m.borrow_mut().push((shielded, generation, manager.clone()));
+    });
+    manager
+}
+
+/// One content manager, with everything that should be in every page of this
+/// kind: the blocker, the curtain, and the extensions' own scripts and sheets.
+fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
     let manager = UserContentManager::new();
     if shielded {
         crate::shield::install(&manager);
     }
     curtain::install(app, &manager);
-    MANAGERS.with(|m| m.borrow_mut()[slot] = Some(manager.clone()));
+    for (source, allow, at_start, every_frame) in crate::extensions::installable().scripts {
+        let when = if at_start {
+            webkit2gtk::UserScriptInjectionTime::Start
+        } else {
+            webkit2gtk::UserScriptInjectionTime::End
+        };
+        let allowed: Vec<&str> = allow.iter().map(|s| s.as_str()).collect();
+        let frames = if every_frame {
+            webkit2gtk::UserContentInjectedFrames::AllFrames
+        } else {
+            webkit2gtk::UserContentInjectedFrames::TopFrame
+        };
+        let script = webkit2gtk::UserScript::new(&source, frames, when, &allowed, &[]);
+        manager.add_script(&script);
+    }
     manager
 }
 
@@ -50,6 +82,13 @@ fn settings() -> Settings {
     settings.set_enable_webaudio(true);
     settings.set_enable_page_cache(true);
     settings.set_javascript_can_open_windows_automatically(false);
+    // Compositing is left on. Two things were tried against it and both lost.
+    // OnDemand is deprecated in this WebKit and prints a warning saying it is
+    // now the same as Always, so it buys nothing. Turning the compositing path
+    // off outright (WEBKIT_DISABLE_COMPOSITING_MODE, which is what the low
+    // memory switch also sets) was measured over four runs of one idle tab:
+    // 77.6-88.1 MB of the browser's own memory against 66.5-73.9 MB with it on.
+    // It costs memory rather than saving it, so nothing turns it off for RAM.
     settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
     settings.set_enable_back_forward_navigation_gestures(true);
     settings
@@ -68,12 +107,18 @@ pub fn view_for(app: &AppRef, tab: TabId) -> Option<WebView> {
         app.private_context()
     } else {
         let context = WebContext::default()?;
+        // Nothing sets the process model: both of its values are deprecated
+        // since WebKitGTK 2.40 because several web processes is already what a
+        // default context does. Asking for it changes nothing, which was
+        // measured (the freezes after twenty tabs were unchanged).
         install_context(app, &context);
         context
     };
     let url = app.state.borrow().tab(tab).map(|t| t.url.clone()).unwrap_or_default();
+    // A private tab gets its own manager, never the shared one, so nothing it
+    // carries can be read back from another tab's memory of the same pages.
     let manager = if private {
-        UserContentManager::new()
+        build_manager(app, shielded_for(app, &url))
     } else {
         shared_manager(app, shielded_for(app, &url))
     };
@@ -134,7 +179,10 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                         curtain::sync_for_url(&app, &uri);
                     }
                 }
-                webkit2gtk::LoadEvent::Committed => app.set_loading(tab, false),
+                // The page can keep arriving long after it is committed: a
+                // stalled or streaming load must still read as running, so the
+                // browser can stop it and the tab does not look idle.
+                webkit2gtk::LoadEvent::Committed => {}
                 webkit2gtk::LoadEvent::Finished => {
                     app.set_loading(tab, false);
                     app.sync_nav(tab, view);
@@ -159,16 +207,21 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             if let Some(app) = weak.upgrade() {
                 // The engine's own error page is not the browser's voice: the
                 // browser explains it itself.
+                // Every event is a failure worth explaining, not only the
+                // one that starts a load: a connection dropped after the page
+                // began arriving would otherwise fall through to the engine's
+                // own grey page, which is not this browser's voice.
+                let cancelled = error.matches(gtk::gio::IOErrorEnum::Cancelled)
+                    || error.matches(webkit2gtk::NetworkError::Cancelled);
+                if cancelled {
+                    return false;
+                }
                 let reason = match event {
-                    webkit2gtk::LoadEvent::Started => {
-                        let cancelled = error.matches(gtk::gio::IOErrorEnum::Cancelled)
-                            || error.matches(webkit2gtk::NetworkError::Cancelled);
-                        if cancelled {
-                            return false;
-                        }
-                        message_for(error)
+                    webkit2gtk::LoadEvent::Started => message_for(error),
+                    webkit2gtk::LoadEvent::Committed | webkit2gtk::LoadEvent::Finished => {
+                        format!("The page stopped arriving. ({})", message_for(error))
                     }
-                    _ => return false,
+                    _ => message_for(error),
                 };
                 app.mark_failed(tab);
                 app.show_error(tab, &reason, uri);
@@ -190,15 +243,12 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             if status < 400 {
                 return false;
             }
-            let reason = match status {
-                400 => "The site did not understand the request (400).".to_string(),
-                401 | 403 => format!("The site would not let this page be read ({status})."),
-                404 => "There is nothing at this address (404).".to_string(),
-                408 => "The site took too long to answer (408).".to_string(),
-                429 => "The site is asking for fewer requests (429).".to_string(),
-                500..=599 => format!("The site broke while answering ({status})."),
-                _ => format!("The site answered with {status}."),
-            };
+            // A frame or an image that answers 404 is that frame's business.
+            // Only the page the address bar is showing may be replaced.
+            if !policy.is_main_frame_main_resource() {
+                return false;
+            }
+            let reason = reason_for_status(status);
             if let Some(app) = weak.upgrade() {
                 // The response's own uri is empty for a document the engine
                 // refused to commit; the request is what was asked for, and it
@@ -219,6 +269,23 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             }
             decision.ignore();
             true
+        });
+    }
+    {
+        let weak = app.weak();
+        view.connect_web_process_terminated(move |_, reason| {
+            if let Some(app) = weak.upgrade() {
+                use webkit2gtk::WebProcessTerminationReason;
+                // A crash the user did not ask for is the engine's, and the
+                // browser explains it in its own voice instead of leaving a
+                // grey frame.
+                if !matches!(reason, WebProcessTerminationReason::Crashed) {
+                    return;
+                }
+                let uri = app.state.borrow().tab(tab).map(|t| t.url.clone()).unwrap_or_default();
+                app.mark_failed(tab);
+                app.show_error(tab, "The page stopped responding.", &uri);
+            }
         });
     }
     // The page asks, the browser answers: a fresh address syncs what is hidden
@@ -306,32 +373,96 @@ fn install_context(app: &AppRef, context: &WebContext) {
             })
             .unwrap_or_else(|| "download".to_string());
         let dir = downloads_dir();
-        let path = unique_path(&dir, &suggested);
+        // The name the server suggested is not the name that gets written: a
+        // suggestion of "../../.bashrc" has to land inside Downloads like any
+        // other file. The row shows the name that was actually used, so what
+        // the panel says and what is on disk cannot disagree.
+        let name = safe_filename(&suggested);
+        let path = unique_path(&dir, &name);
         download.set_destination(&path.to_string_lossy());
         let record = crate::app::DownloadRec {
-            name: suggested.clone(),
+            name: name.clone(),
             path: path.to_string_lossy().to_string(),
             done: false,
+            failed: false,
+            got: 0,
+            total: download
+                .response()
+                .map(|r| r.content_length())
+                .unwrap_or(0),
         };
         app.state.borrow_mut().downloads.insert(0, record);
         let weak = weak.clone();
         let weak2 = weak.clone();
+        let weak3 = weak.clone();
         let path_text = path.to_string_lossy().to_string();
-        download.connect_finished(move |_| {
-            if let Some(app) = weak.upgrade() {
+        // Progress, so the row can say "12.4 of 40 MB" instead of only
+        // "Downloading". WebKit reports the fraction, not the byte count, so
+        // the bytes are the fraction of the length the response declared; a
+        // response with no length leaves the row without a total, which the
+        // panel renders as a plain byte count.
+        {
+            let path_text = path_text.clone();
+            download.connect_estimated_progress_notify(move |download| {
+                let Some(app) = weak3.upgrade() else { return };
+                let fraction = download.estimated_progress();
+                let total = download
+                    .response()
+                    .map(|r| r.content_length())
+                    .unwrap_or(0);
                 let mut state = app.state.borrow_mut();
                 for entry in state.downloads.iter_mut() {
                     if entry.path == path_text {
-                        entry.done = true;
+                        entry.total = total;
+                        entry.got = (total as f64 * fraction).round() as u64;
                     }
+                }
+                drop(state);
+                if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
+                    app.open_panel(crate::panels::PanelKind::Downloads);
+                }
+            });
+        }
+        let finished_path = path_text.clone();
+        download.connect_finished(move |_| {
+            if let Some(app) = weak.upgrade() {
+                {
+                    let mut state = app.state.borrow_mut();
+                    for entry in state.downloads.iter_mut() {
+                        if entry.path == finished_path {
+                            entry.done = true;
+                            if entry.total > 0 {
+                                entry.got = entry.total;
+                            }
+                        }
+                    }
+                    crate::store::Records::save_downloads(&state.downloads);
+                }
+                if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
+                    app.open_panel(crate::panels::PanelKind::Downloads);
                 }
             }
         });
-        download.connect_failed(move |_, _| {
-            if let Some(app) = weak2.upgrade() {
-                app.flash_error("That download failed");
-            }
-        });
+        {
+            let path_text = path_text.clone();
+            download.connect_failed(move |_, _| {
+                if let Some(app) = weak2.upgrade() {
+                    {
+                        let mut state = app.state.borrow_mut();
+                        for entry in state.downloads.iter_mut() {
+                            if entry.path == path_text {
+                                entry.failed = true;
+                            }
+                        }
+                        crate::store::Records::save_downloads(&state.downloads);
+                    }
+                    app.flash_error("That download failed");
+                    if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
+                        app.open_panel(crate::panels::PanelKind::Downloads);
+                    }
+                }
+            });
+        }
         if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
             app.open_panel(crate::panels::PanelKind::Downloads);
         }
@@ -339,14 +470,50 @@ fn install_context(app: &AppRef, context: &WebContext) {
 }
 
 pub fn downloads_dir() -> PathBuf {
+    // The variable is a directory, not a path to a file; the test harness sets
+    // it so a run cannot write into the person's real Downloads folder.
     std::env::var_os("XDG_DOWNLOAD_DIR")
         .map(PathBuf::from)
+        .filter(|dir| !dir.as_os_str().is_empty())
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join("Downloads")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// A filename a server suggested, reduced to something that can only name a
+/// file inside the directory it is going into.
+///
+/// `Content-Disposition` is the server's text, and `Path::join` does not
+/// sandbox: `dir.join("../../.bashrc")` leaves the directory, an absolute
+/// `/home/you/.profile` replaces it outright, and a name of `..` or a leading
+/// dot writes something the person will not see in their file manager. None of
+/// those are exotic — a hostile or merely buggy server can send any of them,
+/// and the download starts without a prompt.
+///
+/// So: take the last component only, drop separators and NULs, refuse the two
+/// directory names, strip leading dots, and fall back to a plain word when
+/// nothing readable is left. The extension is kept because it is what the
+/// desktop uses to decide what opens the file.
+fn safe_filename(suggested: &str) -> String {
+    let last = suggested
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .replace('\0', "");
+    let trimmed = last.trim();
+    if trimmed == "." || trimmed == ".." {
+        return "download".to_string();
+    }
+    let clean: String = trimmed.trim_start_matches('.').chars().take(200).collect();
+    if clean.is_empty() {
+        "download".to_string()
+    } else {
+        clean
+    }
+}
+
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let _ = std::fs::create_dir_all(dir);
+    let name = &safe_filename(name);
     let candidate = dir.join(name);
     if !candidate.exists() {
         return candidate;
@@ -365,6 +532,23 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
         }
     }
     dir.join(name)
+}
+
+/// The sentence a status code is answered with, in the words a person would
+/// use. Kept pure and separate from the view so the words can be tested: the
+/// error pane and the stress suite both match on this text exactly.
+fn reason_for_status(status: u32) -> String {
+    match status {
+        400 => "The site did not understand the request (400).".to_string(),
+        401 | 403 => format!("The site would not let this page be read ({status})."),
+        404 => "There is nothing at this address (404).".to_string(),
+        408 => "The site took too long to answer (408).".to_string(),
+        429 => "The site is asking for fewer requests (429).".to_string(),
+        500..=599 => format!("The site broke while answering ({status})."),
+        // Anything else still has to say something: an empty sentence would
+        // be a blank pane, which reads as a bug rather than an answer.
+        _ => format!("The site answered with {status}."),
+    }
 }
 
 /// A failure's reason, in the words a person would use.
@@ -402,3 +586,110 @@ pub fn load(view: &WebView, url: &str) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::reason_for_status;
+
+    // These are the words another module and the stress suite match on. A test
+    // here needs no display and no network: the mapping is a plain function.
+    fn sentence(status: u32) -> String {
+        let text = reason_for_status(status);
+        assert!(!text.trim().is_empty(), "status {status} answered with nothing");
+        assert!(text.ends_with('.'), "status {status} is not a sentence: {text:?}");
+        text
+    }
+
+    #[test]
+    fn each_client_error_has_its_own_sentence() {
+        let four_oh_four = sentence(404);
+        let forbidden = sentence(403);
+        let unauthorized = sentence(401);
+        let too_many = sentence(429);
+        assert_eq!(four_oh_four, "There is nothing at this address (404).");
+        assert_ne!(four_oh_four, forbidden);
+        assert_ne!(four_oh_four, unauthorized);
+        assert_ne!(forbidden, unauthorized);
+        assert_ne!(too_many, four_oh_four);
+        assert_ne!(too_many, forbidden);
+        // The number is in the sentence, so two refusals are still told apart.
+        assert!(forbidden.contains("403") && unauthorized.contains("401"));
+    }
+
+    #[test]
+    fn a_server_error_names_the_status() {
+        let broke = sentence(500);
+        let unavailable = sentence(503);
+        assert_ne!(broke, unavailable);
+        assert!(broke.contains("500") && unavailable.contains("503"));
+    }
+
+    #[test]
+    fn the_other_ones_are_sentences_too() {
+        for status in [400, 408, 500, 501, 599] {
+            sentence(status);
+        }
+    }
+
+    #[test]
+    fn an_unknown_status_still_answers() {
+        // A teapot has no sentence of its own, but a blank pane is worse than
+        // an honest one, so the fallback has to say the number.
+        let teapot = sentence(418);
+        assert!(teapot.contains("418"), "{teapot:?} does not name the status");
+        assert!(!teapot.trim().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::safe_filename;
+
+    /// A download starts without a prompt, so the server's suggested name is
+    /// the only thing standing between a page and the person's home directory.
+    /// `Path::join` is not a sandbox: an absolute path replaces the directory
+    /// and `..` climbs out of it. These are the shapes that must not survive.
+    #[test]
+    fn a_server_cannot_name_a_file_outside_downloads() {
+        for hostile in [
+            "../../.bashrc",
+            "..\\..\\windows\\system32\\config",
+            "/home/someone/.profile",
+            "..",
+            ".",
+            "a/../../b",
+            "\0evil",
+            "....hidden",
+            "   ",
+            "",
+        ] {
+            let got = safe_filename(hostile);
+            assert!(!got.is_empty(), "{hostile:?} became nothing");
+            assert!(!got.contains('/'), "{hostile:?} kept a separator: {got}");
+            assert!(!got.contains('\\'), "{hostile:?} kept a separator: {got}");
+            assert!(!got.contains('\0'), "{hostile:?} kept a NUL");
+            assert!(!got.starts_with('.'), "{hostile:?} is still hidden: {got}");
+            assert_ne!(got, "..");
+            assert_ne!(got, ".");
+            // The real test: joining it to a directory stays in that directory.
+            let joined = std::path::Path::new("/tmp/downloads").join(&got);
+            assert_eq!(joined.parent(), Some(std::path::Path::new("/tmp/downloads")));
+        }
+    }
+
+    /// An ordinary name must come through untouched, extension and all, or the
+    /// desktop will not know what opens it.
+    #[test]
+    fn an_ordinary_name_is_left_alone() {
+        assert_eq!(safe_filename("report.pdf"), "report.pdf");
+        assert_eq!(safe_filename("My Report (final).pdf"), "My Report (final).pdf");
+        assert_eq!(safe_filename("archive.tar.gz"), "archive.tar.gz");
+        assert_eq!(safe_filename("  spaced.txt  "), "spaced.txt");
+    }
+
+    /// A name long enough to be a filesystem problem is cut, not refused.
+    #[test]
+    fn a_silly_length_is_cut() {
+        let long = format!("{}.txt", "x".repeat(500));
+        assert!(safe_filename(&long).chars().count() <= 200);
+    }
+}

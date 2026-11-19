@@ -8,6 +8,7 @@ mod bench;
 mod css;
 mod curtain;
 mod files;
+mod extensions;
 mod find;
 mod gtkx;
 mod icons;
@@ -19,6 +20,7 @@ mod palette;
 mod panels;
 mod reader;
 mod shield;
+mod shield_assets;
 mod store;
 mod ui;
 mod web;
@@ -45,15 +47,28 @@ fn flag(args: &[String], name: &str) -> bool {
 fn main() {
     // WebKit's own knobs, set before the engine starts.
     //
-    // Low-memory mode trades the DMA-BUF renderer and compositing for a
-    // smaller footprint; off by default because the path it skips is the one
-    // that draws pages best on machines that have it.
-    if std::env::var_os("SEARCH_LOW_MEMORY").is_some() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    // Two of these are always on, because both were measured and both save
+    // memory on a machine that is doing nothing else. Four runs of one idle
+    // tab, plain page, whole process tree, Pss_Anon:
+    //   nothing set                     87.0 / 96.9 / 102.7 / 104.0 MB
+    //   DMABUF off, arenas capped       60.4 / 75.1 /  75.2 /  87.8 MB
+    //   the above and compositing off   61.8 / 62.2 /  64.5 /  66.4 MB
+    // The DMA-BUF renderer hands page buffers to the compositor through the
+    // GPU; without it the same buffers are ordinary memory, and ordinary
+    // memory is what this browser is trying to spend less of. Capping the
+    // allocator's arenas keeps it from holding per-thread pools it never
+    // returns.
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    std::env::set_var("MALLOC_ARENA_MAX", "2");
+    // The low-memory switch adds the last one: no compositing path at all.
+    // It is the smallest of the three and the most steady, and it is off by
+    // default because it is also the one that changes how a page animates.
+    // WebKit reads these variables once, when its process is forked, so the
+    // setting in the browser has to be read here, before the first window.
+    let low_memory = std::env::var_os("SEARCH_LOW_MEMORY").is_some()
+        || store::Prefs::load().low_memory;
+    if low_memory {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-        // Fewer malloc arenas means less memory the allocator never gives back.
-        // It also means more contention between the threads that use them.
-        std::env::set_var("MALLOC_ARENA_MAX", "2");
     }
 
     // A page's light or dark comes from the toolkit's own preference, so the
@@ -105,6 +120,7 @@ fn main() {
     app::install_self(&app);
 
     if bench::enabled() {
+        bench::watch_loop();
         match bench::serve(&app) {
             Ok(path) => eprintln!("search: bench socket at {}", path.display()),
             Err(error) => eprintln!("search: bench socket did not open: {error}"),
@@ -112,6 +128,10 @@ fn main() {
     }
 
     app.ui.window.show_all();
+    // show_all shows every child, including the bookmarks bar that was built
+    // hidden, so the answer to "is there anything kept" has to be applied after
+    // the window is shown rather than before it.
+    app.render_bmarks();
     app.ui.window.present();
 
     {

@@ -11,7 +11,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("SEARCH_BENCH_SOCKET") {
@@ -21,6 +22,42 @@ pub fn socket_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     dir.join("search-bench.sock")
+}
+
+// A main loop that stops answering for ten seconds is indistinguishable from a
+// hung browser from outside, and measuring it from outside cannot say which
+// side stopped. This tick runs on the loop itself: the longest gap between two
+// ticks is the longest time the loop was unavailable.
+static LAST_TICK: Mutex<Option<Instant>> = Mutex::new(None);
+static WORST_GAP_MS: Mutex<u64> = Mutex::new(0);
+static GAPS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn watch_loop() {
+    if let Ok(mut last) = LAST_TICK.lock() {
+        *last = Some(Instant::now());
+    }
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = Instant::now();
+        if let Ok(mut last) = LAST_TICK.lock() {
+            if let Some(previous) = *last {
+                let gap = now.duration_since(previous).as_millis() as u64;
+                if gap > 120 {
+                    if let Ok(mut worst) = WORST_GAP_MS.lock() {
+                        *worst = (*worst).max(gap);
+                    }
+                    if let Ok(mut gaps) = GAPS.lock() {
+                        if gaps.len() < 40 {
+                            gaps.push(gap);
+                        }
+                    }
+                }
+            }
+            *last = Some(now);
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 pub fn enabled() -> bool {
@@ -67,6 +104,10 @@ fn run(line: &str) -> String {
     };
     let (sender, receiver) = mpsc::channel::<String>();
     let immediate = sender.clone();
+    // Measured: raising this to HIGH priority deadlocks the suite at the first
+    // `open`, because the command then runs inside the engine's own update
+    // rather than between updates. Default (idle) priority is correct; the
+    // 30-second wait below is the guard for a busy main loop.
     glib::MainContext::default().invoke(move || {
         let Some(app) = crate::app::current() else {
             let _ = immediate.send("{\"ok\":false,\"error\":\"no browser\"}".to_string());
@@ -83,7 +124,7 @@ fn run(line: &str) -> String {
             }
         }
     });
-    match receiver.recv_timeout(Duration::from_secs(20)) {
+    match receiver.recv_timeout(Duration::from_secs(30)) {
         Ok(answer) => answer,
         Err(_) => "{\"ok\":false,\"error\":\"no answer in time\"}".to_string(),
     }
@@ -117,11 +158,48 @@ fn tab_id(argument: &str) -> Option<u64> {
     argument.trim().parse().ok()
 }
 
+// One line of JSON is what every verb answers with, so the panel's text cannot
+// be allowed to run to the length a full Shortcuts sheet has. This cap is well
+// past the longest panel this browser builds; the walk stops collecting at it
+// rather than answering with a megabyte of text.
+const PANEL_TEXT_CAP: usize = 4000;
+
+// What the open panel says, in the order it is drawn: every label under the
+// body container, which is where a panel puts its rows. A button's caption is
+// a label child, so the action a panel offers reads here too, and a test can
+// check that the sheet lists the keys that work or that Settings says
+// something true without knowing any widget name.
+fn collect_labels(widget: &gtk::Widget, lines: &mut Vec<String>, budget: &mut usize) {
+    if *budget == 0 {
+        return;
+    }
+    if !widget.get_visible() {
+        return;
+    }
+    if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+        let text = label.text().to_string();
+        if !text.trim().is_empty() {
+            *budget = budget.saturating_sub(text.chars().count() + 1);
+            lines.push(text);
+        }
+    }
+    if let Some(container) = widget.downcast_ref::<gtk::Container>() {
+        for child in container.children() {
+            collect_labels(&child, lines, budget);
+            if *budget == 0 {
+                return;
+            }
+        }
+    }
+}
+
 fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
     match command {
         "ping" => ok(&format!(",\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))),
         "probe" => probe(app),
+        "paneltext" => paneltext(app),
         "debug" => debug(app),
+        "settle" => settle(app),
         "tabs" => tabs(app),
         "pins" => ok(&format!(
             ",\"holderMapped\":{},\"holder\":\"{}x{}\",\"grid\":\"{}x{}\",\"children\":{},\"pinned\":{}",
@@ -238,6 +316,60 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             }
             ok(&format!(",\"hidden\":[{}]", items.join(",")))
         }
+        "shield" => {
+            let (lists, done, rules) = crate::shield::state();
+            ok(&format!(
+                ",\"lists\":{lists},\"finished\":{done},\"rules\":{rules}"
+            ))
+        }
+        "forget" => {
+            // A scenario that is about what the browser looks like with
+            // nothing kept needs a way to keep nothing.
+            let books = {
+                let mut state = app.state.borrow_mut();
+                let books = state.bookmarks.clone();
+                state.bookmarks.clear();
+                books
+            };
+            let _ = books;
+            crate::store::Records::save_bookmarks(&[]);
+            app.render_bmarks();
+            ok("")
+        }
+        "extensions" => {
+            let entries: Vec<String> = crate::extensions::registry()
+                .extensions
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{{\"id\":\"{}\",\"name\":\"{}\",\"runs\":{},\"enabled\":{},\"why_not\":\"{}\"}}",
+                        json_escape(&entry.id),
+                        json_escape(&entry.name),
+                        entry.runs,
+                        entry.enabled,
+                        json_escape(&entry.why_not.replace('\n', " "))
+                    )
+                })
+                .collect();
+            ok(&format!(",\"extensions\":[{}]", entries.join(",")))
+        }
+        "installext" => {
+            if argument.is_empty() {
+                return fail("installext needs a path");
+            }
+            match crate::extensions::install(std::path::Path::new(argument)) {
+                Ok(entry) => {
+                    app.rebuild_every_view();
+                    ok(&format!(
+                        ",\"name\":\"{}\",\"runs\":{},\"why_not\":\"{}\"",
+                        json_escape(&entry.name),
+                        entry.runs,
+                        json_escape(&entry.why_not.replace('\n', " "))
+                    ))
+                }
+                Err(why) => fail(&why),
+            }
+        }
         "downloads" => {
             let state = app.state.borrow();
             let items: Vec<String> = state
@@ -270,6 +402,23 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 Ok(()) => ok(&format!(",\"path\":\"{}\"", json_escape(argument))),
                 Err(error) => fail(&error),
             }
+        }
+        "orphans" => ok(&format!(",\"count\":{}", app.orphan_views())),
+        "drift" => {
+            let worst = WORST_GAP_MS.lock().map(|value| *value).unwrap_or(0);
+            let gaps = GAPS.lock().map(|gaps| gaps.clone()).unwrap_or_default();
+            let list: Vec<String> = gaps.iter().map(|gap| gap.to_string()).collect();
+            let ticks = TICKS.load(std::sync::atomic::Ordering::Relaxed);
+            ok(&format!(",\"worst\":{worst},\"ticks\":{ticks},\"gaps\":[{}]", list.join(",")))
+        }
+        "reset" => {
+            if let Ok(mut worst) = WORST_GAP_MS.lock() {
+                *worst = 0;
+            }
+            if let Ok(mut gaps) = GAPS.lock() {
+                gaps.clear();
+            }
+            ok("")
         }
         "quit" => {
             app.ui.window.close();
@@ -309,8 +458,24 @@ fn probe(app: &AppRef) -> String {
     let find = app.find.borrow();
     let panels = app.panels.borrow();
     let hide_mode = app.state.borrow().hide_mode;
+    // The error page is only the browser's story while it is the child being
+    // drawn: a failed tab that is not the active one remembers its error but
+    // shows a page. The button's caption is read rather than assumed, because
+    // a failed load that can only be retried would reload a dead address.
+    let error = app
+        .ui
+        .stack
+        .visible_child_name()
+        .map(|name| name.as_str() == "error")
+        .unwrap_or(false);
+    let error_action = app
+        .ui
+        .error_retry
+        .label()
+        .map(|label| label.to_string())
+        .unwrap_or_default();
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{}}}",
+        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{},\"error\":{},\"errorAction\":\"{}\"}}",
         active,
         json_escape(&url),
         json_escape(&title),
@@ -326,17 +491,56 @@ fn probe(app: &AppRef) -> String {
         json_escape(&find.count.text()),
         hide_mode,
         app.ui.window.is_maximized(),
+        app.ui.bmarkbar.is_visible(),
+        app.state.borrow().bookmarks.len(),
         app.ui.stack.visible_child_name().map(|name| name.to_string()).unwrap_or_default(),
         app.ui.stack.children().len(),
         app.ui.window.allocated_width(),
-        app.ui.window.allocated_height()
+        app.ui.window.allocated_height(),
+        error,
+        json_escape(&error_action)
     )
+}
+
+// The open panel's visible text. A closed panel is not an error: the caller
+// asked what is on screen and nothing is.
+fn paneltext(app: &AppRef) -> String {
+    let panels = app.panels.borrow();
+    let Some(kind) = panels.open.clone() else {
+        return ok(",\"panel\":null,\"text\":\"\"");
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut budget = PANEL_TEXT_CAP;
+    collect_labels(panels.body.upcast_ref::<gtk::Widget>(), &mut lines, &mut budget);
+    let text = lines.join("\n");
+    let text: String = if text.chars().count() > PANEL_TEXT_CAP {
+        text.chars().take(PANEL_TEXT_CAP).collect()
+    } else {
+        text
+    };
+    ok(&format!(
+        ",\"panel\":\"{kind:?}\",\"text\":\"{}\"",
+        json_escape(&text)
+    ))
 }
 
 fn debug(app: &AppRef) -> String {
     let omni = &app.omni;
+    // The field's allocation is relative to the box that holds it, so a field
+    // that stays put while its parent moves would still read as still. Window
+    // coordinates are what a test compares across two probes with the offers
+    // list open and shut, and -1 says the window has not been laid out rather
+    // than pretending the field sits in the corner.
+    let (field_x, field_y) = omni
+        .field
+        .translate_coordinates(&app.ui.window, 0, 0)
+        .unwrap_or((-1, -1));
+    let (entry_x, entry_y) = omni
+        .entry
+        .translate_coordinates(&app.ui.window, 0, 0)
+        .unwrap_or((-1, -1));
     ok(&format!(
-        ",\"omni\":{{\"visible\":{},\"mapped\":{},\"holder\":\"{}x{}\",\"block\":\"{}x{}\",\"field\":\"{}x{}\",\"entry\":\"{}x{}\",\"list\":\"{}x{}\"}}",
+        ",\"omni\":{{\"visible\":{},\"mapped\":{},\"holder\":\"{}x{}\",\"block\":\"{}x{}\",\"field\":\"{}x{}\",\"entry\":\"{}x{}\",\"list\":\"{}x{}\",\"listVis\":{},\"scrollVis\":{},\"rows\":{},\"rowsVis\":{},\"fieldAt\":\"{},{}\",\"entryAt\":\"{},{}\",\"offers\":{}}}",
         omni.visible.get(),
         omni.holder.is_mapped(),
         omni.holder.allocated_width(),
@@ -348,7 +552,53 @@ fn debug(app: &AppRef) -> String {
         omni.entry.allocated_width(),
         omni.entry.allocated_height(),
         omni.list.allocated_width(),
-        omni.list.allocated_height()
+        omni.list.allocated_height(),
+        omni.list.get_visible(),
+        omni.list_scroll.get_visible(),
+        omni.list.children().len(),
+        omni.list.children().iter().filter(|c| c.get_visible()).count(),
+        field_x,
+        field_y,
+        entry_x,
+        entry_y,
+        // Offers the model holds, which can exceed `rowsVis` when the list is
+        // capped and scrolls: geometry paired with a count says whether a
+        // field moved or the list under it grew.
+        omni.offers.borrow().len()
+    ))
+}
+
+/// Let the window finish laying itself out, and say so when it has.
+///
+/// GTK allocates an overlay child only in a pass that follows the change that
+/// made it visible. A command that raises the address field and returns
+/// immediately therefore leaves the field's holder at 1x1, and a test that
+/// reads its position reads the corner. A screenshot already runs this pass;
+/// this is the same pass without the picture, so a check can wait for the
+/// geometry it is about to assert instead of sleeping a guessed amount.
+fn settle(app: &AppRef) -> String {
+    let mut rounds = 0;
+    for _ in 0..60 {
+        rounds += 1;
+        app.ui.window.check_resize();
+        app.ui.overlay.check_resize();
+        let context = glib::MainContext::default();
+        while context.iteration(false) {}
+        let width = app.ui.overlay.allocated_width();
+        let height = app.ui.overlay.allocated_height();
+        let layers_ready = [&app.omni.holder, &app.find.borrow().holder]
+            .iter()
+            .all(|holder| !holder.get_visible() || holder.allocated_width() == width);
+        if width > 1 && height > 1 && layers_ready {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    ok(&format!(
+        ",\"rounds\":{},\"width\":{},\"height\":{}",
+        rounds,
+        app.ui.overlay.allocated_width(),
+        app.ui.overlay.allocated_height()
     ))
 }
 
@@ -394,6 +644,14 @@ fn key(app: &AppRef, name: &str) -> String {
         }
         "closepanel" => {
             app.close_panels();
+            return ok("");
+        }
+        "extensions" => {
+            // The extensions panel has no key of its own: it is reached from
+            // the menu. A test still has to be able to open it, or the panel
+            // that explains what an extension can and cannot do is the one
+            // panel nobody ever looks at.
+            app.toggle_panel(crate::panels::PanelKind::Extensions);
             return ok("");
         }
         "maximise" => {

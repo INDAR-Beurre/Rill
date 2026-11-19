@@ -40,6 +40,8 @@ pub enum Intent {
     Jump(usize),
     CopyAddress,
     Escape,
+    ViewSource,
+    FullScreen,
 }
 
 pub struct Key {
@@ -81,6 +83,10 @@ impl Key {
         let name = self.folded();
         let name = name.as_str();
 
+        if !self.ctrl && !self.alt && name == "f11" {
+            return Intent::FullScreen;
+        }
+
         if self.ctrl {
             let intent = match (name, self.shift) {
                 ("l", _) => Intent::Omni,
@@ -101,6 +107,7 @@ impl Key {
                 ("h", true) => Intent::HideSomething,
                 ("u", true) => Intent::ShowHidden,
                 ("i", true) => Intent::Inspector,
+                ("u", false) => Intent::ViewSource,
                 ("c", true) => Intent::CopyAddress,
                 // Shift Tab is a keyval of its own, and Ctrl Shift Tab is the
                 // one a browser keeps for the other direction.
@@ -151,8 +158,14 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("shortcuts", "Ctrl /", "This list", "slash", true, false, false),
     ("omni", "Ctrl L", "The field", "l", true, false, false),
     ("newtab", "Ctrl T", "New tab", "t", true, false, false),
+    // Ctrl N is the second spelling of a new tab, and it works: the panel is
+    // wrong if it lists one way and not the other.
+    ("newtabn", "Ctrl N", "New tab", "n", true, false, false),
     ("privatetab", "Ctrl Shift N", "Private tab", "n", true, true, false),
     ("closetab", "Ctrl W", "Close tab", "w", true, false, false),
+    // Shift rides along ignored in the ctrl `w` arm, so the key a real browser
+    // spends on the window closes the tab here. It works, so it is listed.
+    ("closetabshift", "Ctrl Shift W", "Close tab", "w", true, true, false),
     ("reopen", "Ctrl Shift T", "Reopen the last closed tab", "t", true, true, false),
     ("nexttab", "Ctrl Tab", "Next tab", "tab", true, false, false),
     ("previoustab", "Ctrl Shift Tab", "Previous tab", "tab", true, true, false),
@@ -160,6 +173,7 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("back", "Alt Left", "Back", "left", false, false, true),
     ("forward", "Alt Right", "Forward", "right", false, false, true),
     ("reload", "Ctrl R", "Reload", "r", true, false, false),
+    ("f5", "F5", "Reload", "f5", false, false, false),
     ("reloadbypass", "Ctrl F5", "Reload past the cache", "f5", true, false, false),
     ("reader", "Ctrl Shift R", "Reading mode (again to leave)", "r", true, true, false),
     ("find", "Ctrl F", "Find in the page", "f", true, false, false),
@@ -172,12 +186,22 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("unhide", "Ctrl Shift U", "Show what is hidden here", "u", true, true, false),
     ("copy", "Ctrl Shift C", "Copy the address", "c", true, true, false),
     ("inspector", "F12", "The inspector", "f12", false, false, false),
-    ("zoomin", "Ctrl +", "Zoom in", "plus", true, false, false),
+    ("inspectorctrl", "Ctrl Shift I", "The inspector", "i", true, true, false),
+    ("source", "Ctrl U", "The page's own source", "u", true, false, false),
+    ("fullscreen", "F11", "Full screen", "f11", false, false, false),
+    ("pagedown", "Ctrl Page Down", "Next tab", "page_down", true, false, false),
+    ("pageup", "Ctrl Page Up", "Previous tab", "page_up", true, false, false),
+    // `+` needs Shift on most layouts, so the key that lands here is usually
+    // `equal`. Both are taken; the label says so instead of adding a row that
+    // would read as a second, different shortcut.
+    ("zoomin", "Ctrl + or Ctrl =", "Zoom in", "plus", true, false, false),
     ("zoomout", "Ctrl -", "Zoom out", "minus", true, false, false),
     ("zoomreset", "Ctrl 0", "Zoom reset", "0", true, false, false),
     ("backbracket", "Ctrl [", "Back", "bracketleft", true, false, false),
     ("forwardbracket", "Ctrl ]", "Forward", "bracketright", true, false, false),
-    ("escape", "Escape", "Close the field, find, a panel, or reading mode", "escape", false, false, false),
+    // Escape has five jobs and the panel has to own all of them: whatever the
+    // browser drew, else a page that is still arriving.
+    ("escape", "Escape", "Close the field, find, a panel or reader, else stop the page", "escape", false, false, false),
 ];
 
 /// The intent a bench verb stands for, through the same fold the keyboard uses.
@@ -203,6 +227,17 @@ pub fn apply(app: &AppRef, intent: Intent) {
                 // Reading mode is the last thing standing between Escape and
                 // the page, so it is the last thing Escape takes away.
                 app.reader();
+            } else {
+                // Nothing the browser drew is open: stop a page that is still
+                // arriving, otherwise the key belongs to the page.
+                let active = app.state.borrow().active;
+                let loading = app.state.borrow().tab(active).is_some_and(|t| t.loading);
+                if loading {
+                    if let Some(view) = app.view(active) {
+                        view.stop_loading();
+                    }
+                    app.set_loading(active, false);
+                }
             }
         }
         Intent::Omni => app.open_omni(true),
@@ -240,6 +275,8 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::ZoomReset => app.reset_zoom(),
         Intent::Jump(number) => app.jump(number),
         Intent::CopyAddress => app.copy_address(),
+        Intent::ViewSource => app.view_source(),
+        Intent::FullScreen => app.toggle_fullscreen(),
     }
 }
 
@@ -254,6 +291,7 @@ pub fn taken(app: &AppRef, intent: Intent) -> bool {
                 || app.find.borrow().visible
                 || app.panels.borrow().open.is_some()
                 || app.reading.get()
+                || app.state.borrow().tab(app.state.borrow().active).is_some_and(|t| t.loading)
         }
         _ => true,
     }
@@ -261,8 +299,11 @@ pub fn taken(app: &AppRef, intent: Intent) -> bool {
 
 pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
     let intent = Key::from_event(event).intent();
+    // Decide before applying: stopping a load changes the state `taken`
+    // reads, but the key must still be consumed.
+    let consume = taken(app, intent);
     apply(app, intent);
-    crate::gtkx::inh(taken(app, intent))
+    crate::gtkx::inh(consume)
 }
 
 #[cfg(test)]
@@ -288,6 +329,145 @@ mod sheet_tests {
                 row.6
             );
         }
+    }
+
+    /// One press, one row. The panel draws every row, so two rows for the
+    /// same press shows the user the same key twice; and because a press
+    /// resolves through one fold, two rows could also claim two meanings for
+    /// one key. Neither belongs in a sheet that is meant to be the truth.
+    #[test]
+    fn no_press_is_claimed_twice() {
+        for (index, first) in SHEET.iter().enumerate() {
+            for second in &SHEET[index + 1..] {
+                let same_press = first.3.to_lowercase() == second.3.to_lowercase()
+                    && first.4 == second.4
+                    && first.5 == second.5
+                    && first.6 == second.6;
+                if !same_press {
+                    continue;
+                }
+                let a = Key::new(first.3, first.4, first.5, first.6).intent();
+                let b = Key::new(second.3, second.4, second.5, second.6).intent();
+                panic!(
+                    "{} ({}) and {} ({}) are the same press: the panel would list it twice ({:?} / {:?})",
+                    first.1, first.0, second.1, second.0, a, b
+                );
+            }
+        }
+    }
+
+    /// The other direction: a key the browser handles but the panel never
+    /// mentions is a key nobody learns. The match below is deliberately
+    /// exhaustive with no wildcard, so adding a variant to `Intent` stops this
+    /// file compiling until someone says whether the panel should list it.
+    /// That pause is the whole point: the gap cannot be forgotten silently.
+    fn must_be_advertised(intent: Intent) -> bool {
+        match intent {
+            Intent::Nothing => false,
+            Intent::Jump(_) => true,
+            Intent::Omni
+            | Intent::NewTab
+            | Intent::NewPrivateTab
+            | Intent::ReopenClosed
+            | Intent::CloseTab
+            | Intent::Reload
+            | Intent::ReloadBypassCache
+            | Intent::Reader
+            | Intent::Bookmark
+            | Intent::Find
+            | Intent::History
+            | Intent::Downloads
+            | Intent::Bookmarks
+            | Intent::Settings
+            | Intent::Shortcuts
+            | Intent::HideSomething
+            | Intent::ShowHidden
+            | Intent::Inspector
+            | Intent::NextTab
+            | Intent::PreviousTab
+            | Intent::Back
+            | Intent::Forward
+            | Intent::ZoomIn
+            | Intent::ZoomOut
+            | Intent::ZoomReset
+            | Intent::CopyAddress
+            | Intent::Escape
+            | Intent::ViewSource
+            | Intent::FullScreen => true,
+        }
+    }
+
+    /// Same meaning even when the number differs: the jump row names one tab
+    /// number, the intent can carry any.
+    fn same_kind(a: Intent, b: Intent) -> bool {
+        match (a, b) {
+            (Intent::Jump(_), Intent::Jump(_)) => true,
+            _ => a == b,
+        }
+    }
+
+    #[test]
+    fn every_intent_the_browser_can_do_is_listed() {
+        let all = [
+            Intent::Nothing,
+            Intent::Omni,
+            Intent::NewTab,
+            Intent::NewPrivateTab,
+            Intent::ReopenClosed,
+            Intent::CloseTab,
+            Intent::Reload,
+            Intent::ReloadBypassCache,
+            Intent::Reader,
+            Intent::Bookmark,
+            Intent::Find,
+            Intent::History,
+            Intent::Downloads,
+            Intent::Bookmarks,
+            Intent::Settings,
+            Intent::Shortcuts,
+            Intent::HideSomething,
+            Intent::ShowHidden,
+            Intent::Inspector,
+            Intent::NextTab,
+            Intent::PreviousTab,
+            Intent::Back,
+            Intent::Forward,
+            Intent::ZoomIn,
+            Intent::ZoomOut,
+            Intent::ZoomReset,
+            Intent::Jump(3),
+            Intent::CopyAddress,
+            Intent::Escape,
+            Intent::ViewSource,
+            Intent::FullScreen,
+        ];
+        for wanted in all {
+            if !must_be_advertised(wanted) {
+                continue;
+            }
+            let listed = SHEET
+                .iter()
+                .map(|row| Key::new(row.3, row.4, row.5, row.6).intent())
+                .any(|intent| same_kind(intent, wanted));
+            assert!(
+                listed,
+                "{:?} can be carried out but no row of the sheet offers it",
+                wanted
+            );
+        }
+    }
+
+    /// Some rows name a second spelling in their label because the keyval is
+    /// layout dependent. That promise is checked here: if `equal` stops
+    /// zooming, "Ctrl + or Ctrl =" becomes a lie.
+    #[test]
+    fn the_other_spellings_a_label_promises_still_work() {
+        let label = SHEET.iter().find(|row| row.0 == "zoomin").map(|row| row.1).unwrap_or_default();
+        assert!(label.contains("Ctrl ="), "the zoom row no longer mentions equal");
+        assert_eq!(Key::new("equal", true, false, false).intent(), Intent::ZoomIn);
+        assert_eq!(Key::new("plus", true, false, false).intent(), Intent::ZoomIn);
+        // Shift arrives as the upper case plus on many layouts.
+        assert_eq!(Key::new("plus", true, true, false).intent(), Intent::ZoomIn);
     }
 
     /// And the bench verb for that row drives the same intent.

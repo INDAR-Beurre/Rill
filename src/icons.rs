@@ -21,6 +21,8 @@ pub enum Icon {
     Tab,
     Minimise,
     Maximise,
+    /// A private tab: the mask, not a hat. Two eye holes in a rounded band.
+    Mask,
 }
 
 pub fn area(kind: Icon, size: i32, color: Rgb) -> gtk::DrawingArea {
@@ -121,6 +123,23 @@ fn draw(cr: &cairo::Context, kind: Icon, w: f64) {
             cr.line_to(c + w * 0.35, c - h - s * 0.10);
             cr.line_to(c + w * 1.1, c - h - s * 0.10);
             let _ = cr.stroke();
+        }
+        Icon::Mask => {
+            // A band across the eyes with two holes in it. Read at 14px it is
+            // a domino mask; read at 40px it is still one.
+            let half_w = s * 0.34;
+            let half_h = s * 0.17;
+            cr.move_to(c - half_w, c - half_h * 0.2);
+            cr.curve_to(c - half_w, c - half_h, c - half_w * 0.4, c - half_h, c, c - half_h * 0.7);
+            cr.curve_to(c + half_w * 0.4, c - half_h, c + half_w, c - half_h, c + half_w, c - half_h * 0.2);
+            cr.curve_to(c + half_w, c + half_h, c + half_w * 0.3, c + half_h, c, c + half_h * 0.55);
+            cr.curve_to(c - half_w * 0.3, c + half_h, c - half_w, c + half_h, c - half_w, c - half_h * 0.2);
+            cr.close_path();
+            let _ = cr.stroke();
+            for side in [-1.0_f64, 1.0_f64] {
+                cr.arc(c + side * s * 0.16, c - s * 0.01, s * 0.055, 0.0, std::f64::consts::TAU);
+                let _ = cr.fill();
+            }
         }
         Icon::Up => {
             cr.move_to(c - s * 0.17, c + s * 0.08);

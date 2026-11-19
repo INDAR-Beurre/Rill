@@ -1,6 +1,32 @@
 # Testing Search
 
-Three layers, none of them mocks.
+Five layers, none of them mocks.
+
+## 0. The three suites beside the stress suite
+
+```sh
+python3 tools/extensions.py    # the extension loader, on built fixtures
+python3 tools/check_shield.py  # every generated filter rule, compiled
+python3 tools/compare.py       # a screenshot measured against the original
+```
+
+`tools/extensions.py` builds three extensions in a temporary folder: one with a
+content script and CSS for `127.0.0.1`, one that asks only for a background
+service worker and the `tabs` and `cookies` permissions, and one locked to
+`example.com`. It installs all three and asserts what each one actually does:
+that the marker lands, that the background-only extension is reported as not
+running with a stated reason, and that the extension locked to another site
+leaves the page alone. So the panel's claim about what runs here is tested
+rather than described.
+
+`tools/check_shield.py` compiles the real generated lists with the engine's own
+parser through PyGObject. It exists because WebKit rejects a whole list for one
+bad rule, which is how 9,565 rules once blocked nothing at all.
+
+`tools/compare.py` measures a screenshot against
+`reference/reference-window.png`: the divider's column, the window controls'
+position, the first row of ink, the ground colour. It is how arguments about a
+few pixels get settled with numbers.
 
 ## 1. Unit tests
 
@@ -9,8 +35,10 @@ cargo test
 ```
 
 The pure parts: turning what was typed into an address, host extraction, the
-search engine's URL, the history's human dates, download filenames. These run
-without a display.
+search engine's URL, the history's human dates, download filenames, extension
+match patterns, the stylesheet's contrast pairs, the key table. These run
+without a display. `cargo test` prints how many it ran; this page does not
+repeat the number, because it changes whenever a test is added.
 
 ## 2. The bench socket
 
@@ -64,14 +92,41 @@ thousand rows, forty images.
 
 The suite starts a browser with a throwaway profile, then works through:
 startup, one idle tab, twenty tabs, three hundred tab switches, hard pages,
-misbehaving pages, panels and find, reading mode, hiding, downloads and pop-ups,
-a resize storm, closing everything, and an idle minute. It measures PSS,
-Pss_Anon, RSS and process count for the whole tree at each step, writes
+misbehaving pages, panels and find, reading mode, hiding, downloads and
+pop-ups, a resize storm, closing everything, and an idle minute. It measures
+PSS, Pss_Anon, RSS and process count for the whole tree at each step, writes
 `build/stress-report.json`, and fails if the browser dies, a check fails, or a
 threshold is missed.
 
-The thresholds are the product's promises: a tab switch under 120 ms, panels
-under 200 ms, one idle tab under 260 MB resident, no growth over an idle minute.
+The thresholds are the product's promises, and they are assertions in the suite
+rather than prose. Each one is in `tools/stress.py`, in the check that measures
+it: `idle one tab` fails above 120 MB of the browser's own memory, 260 MB
+resident or five processes; `tab switches stay quick` fails above a 60 ms mean
+or a 500 ms worst, and records p95; `panels open and close` fails above a 200
+ms mean; `a memory spray is survived` fails above 2,600 MB; `memory comes back
+down` fails above 260 MB after everything closes; `nothing grows while nothing
+happens` fails above 10 MB of drift over the idle minute, in resident and in the
+browser's own memory separately. Three more are relative to what was measured
+rather than absolute, because an absolute bound that the run clears by three
+times cannot catch a regression: `20 tabs open` fails above 40 MB per tab,
+`tabs give their memory back` fails if closing them leaves more than 60 MB
+above the baseline taken before they were opened, and `the engine survives a
+spray and keeps working` fails above twice the idle tab's resident memory. Grep
+the check's name to read the number: the line it sits on moves, the name does
+not.
+
+The measured values. The last run that passed every check, which is the one
+`docs/LIMITS.md` quotes, recorded a tab switch mean of 0.9 ms, p95 1.3 ms and a
+worst of 33 ms over 300 switches, panels at 21 ms mean and 201 ms worst over 80,
+and one idle tab at 49.4 MB of its own memory and 159.0 MB resident. `python3 tools/report_figures.py`
+prints those rows from `build/stress-report.json`, so check them against
+whatever run is in there. Two other full runs on the same machine were recorded
+by hand and are in no file here: a quiet one measured mean 1.7 ms, p95 3.4 ms
+and worst 67 ms, and one made while the host was swapping measured a 259.5 ms
+worst. The mean barely moved between the three; the worst moved by a factor of
+four. The worst case is a property of the host as much as of the browser, which
+is why the assertion is on the mean and the recorded p95 is the evidence about
+the tail.
 
 ## 4. Pictures
 
@@ -90,5 +145,5 @@ headless desktop and produces the same picture every time.
 
 Real input events (mouse, keyboard at the compositor level), because the suite
 drives the browser's actions directly. Full-screen, notifications, media
-playback and the engine's own captchas. Those are checked by hand, and the
-README says so.
+playback and the engine's own captchas. Those are checked by hand, and this
+page is the only place that says what they are.

@@ -12,6 +12,7 @@ build's ./bench speaks to it.
 """
 import json
 import os
+import select as selector
 import socket
 import sys
 import time
@@ -30,7 +31,10 @@ class Bench:
         self.path = path or os.environ.get("SEARCH_BENCH_SOCKET", DEFAULT_SOCKET)
         self.timeout = timeout
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(timeout)
+        # No socket timeout: a read that times out leaves the stream in a state
+        # where every later read raises OSError("cannot read from timed out
+        # object"), so one slow command would poison the whole run. The wait is
+        # done with select() instead, which leaves the socket usable.
         try:
             self.sock.connect(self.path)
         except OSError as error:
@@ -38,13 +42,31 @@ class Bench:
                 f"no bench socket at {self.path}: start the browser with SEARCH_BENCH=1 ({error})"
             )
         self.reader = self.sock.makefile("rw", buffering=1)
+        self.pending = b""
+
+    def _readline(self, deadline):
+        while b"\n" not in self.pending:
+            left = deadline - time.time()
+            if left <= 0:
+                raise BenchError("no answer in time")
+            ready, _, _ = selector.select([self.sock], [], [], left)
+            if not ready:
+                raise BenchError("no answer in time")
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                return b""
+            self.pending += chunk
+        line, _, self.pending = self.pending.partition(b"\n")
+        return line + b"\n"
 
     def command(self, line):
         if "\n" in line:
             raise ValueError("one command per line")
-        self.reader.write(line + "\n")
-        self.reader.flush()
-        answer = self.reader.readline()
+        try:
+            self.sock.sendall((line + "\n").encode())
+        except OSError as error:
+            raise BenchError(f"the browser closed the socket on: {line} ({error})")
+        answer = self._readline(time.time() + self.timeout).decode(errors="replace")
         if not answer:
             raise BenchError(f"the browser closed the socket on: {line}")
         try:
@@ -53,12 +75,27 @@ class Bench:
             raise BenchError(f"bad answer to {line!r}: {answer!r} ({error})")
 
     def must(self, line):
-        answer = self.command(line)
+        try:
+            answer = self.command(line)
+        except BenchError as error:
+            # A machine under memory pressure can freeze any process for
+            # seconds while pages are swapped back in, and that is not the
+            # browser misbehaving. Ask once more on a new connection before
+            # calling it a failure; the answer to a command is the same either
+            # way, because every command is idempotent in its effect.
+            if "no answer in time" not in str(error):
+                raise
+            self.reconnect()
+            answer = self.command(line)
         if not answer.get("ok"):
             raise BenchError(f"{line}: {answer.get('error')}")
         return answer
 
     # -- convenience -----------------------------------------------------
+    def settle(self):
+        """Let the window finish laying itself out before reading geometry."""
+        return self.must("settle")
+
     def probe(self):
         return self.must("probe")
 
@@ -105,7 +142,6 @@ class Bench:
                 if tab.get("id") == tab_id:
                     return not tab.get("loading", False) and bool(tab.get("url"))
             return False
-            return False
 
         return self.wait_for(ready, timeout=timeout)
 
@@ -114,6 +150,12 @@ class Bench:
             self.sock.close()
         except OSError:
             pass
+
+    def reconnect(self):
+        """Drop the connection and make a new one, keeping the same settings."""
+        self.disconnect()
+        fresh = Bench(self.path, self.timeout)
+        self.sock, self.reader, self.pending = fresh.sock, fresh.reader, fresh.pending
 
 
 def main(argv):

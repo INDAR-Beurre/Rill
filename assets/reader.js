@@ -87,6 +87,9 @@ window.__searchReader = function (palette) {
   exit.textContent = 'Leave reading mode';
   // Stays where it can be reached: an article can be thousands of pixels long,
   // and a way out that scrolls away is not a way out.
+  // Fixed at the top right of the page column. The find bar in src/find.rs
+  // places itself at the same inset and top (PAGE_INSET, PAGE_TOP): the two
+  // are one pair, and moving one alone leaves two different edges on screen.
   exit.setAttribute('style', `all: unset; display: inline-block; cursor: pointer; font: 12px system-ui, sans-serif;
     color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 5px 10px;
     position: fixed; top: 14px; right: 18px; background: ${ground}; z-index: 2147483647;`);

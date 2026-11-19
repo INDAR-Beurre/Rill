@@ -6,6 +6,11 @@ use gtk::prelude::*;
 use webkit2gtk::{FindControllerExt, WebView, WebViewExt};
 
 pub const BAR_WIDTH: i32 = 320;
+// The page column has one right edge and one top edge for floating controls.
+// The reading-mode exit pill in assets/reader.js sits at the same numbers, so
+// a change here has to be made there too or the two insets will drift apart.
+pub const PAGE_INSET: i32 = 18;
+pub const PAGE_TOP: i32 = 14;
 
 pub struct FindBar {
     pub holder: gtk::Fixed,
@@ -42,12 +47,17 @@ impl FindBar {
         // match" and "next match", so they point that way.
         let up = crate::icons::button(crate::icons::Icon::Up, 12, palette.muted, "door");
         up.set_valign(gtk::Align::Center);
+        // The arrows are 12px and carry no words, so the tooltip is the only
+        // place the direction and the matching key can be stated.
+        up.set_tooltip_text(Some("Previous match (Shift+Return)"));
         crate::ui::pack(&bar, &up, false);
         let down = crate::icons::button(crate::icons::Icon::Down, 12, palette.muted, "door");
         down.set_valign(gtk::Align::Center);
+        down.set_tooltip_text(Some("Next match (Return)"));
         crate::ui::pack(&bar, &down, false);
         let close = crate::icons::button(crate::icons::Icon::Close, 12, palette.muted, "door");
         close.set_valign(gtk::Align::Center);
+        close.set_tooltip_text(Some("Close find (Escape)"));
         crate::ui::pack(&bar, &close, false);
 
         layer.add(&bar);
@@ -89,8 +99,8 @@ impl FindBar {
 
     /// The bar sits at the page's top right, over the page rather than in it.
     pub fn layout(&self, width: i32) {
-        let x = (width - BAR_WIDTH - 24).max(12);
-        self.layer.place(&self.bar, x, 14, BAR_WIDTH, 34);
+        let x = (width - BAR_WIDTH - PAGE_INSET).max(12);
+        self.layer.place(&self.bar, x, PAGE_TOP, BAR_WIDTH, 34);
     }
 
     pub fn show(&mut self, ui: &crate::ui::Ui) {

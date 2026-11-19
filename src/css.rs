@@ -334,7 +334,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel button.tab label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.tab:checked {{ background-color: {chipbg}; }}
 .panel button.tab:checked label {{ color: {ink}; font-weight: bold; }}
-.panel button.act {{ background-color: {chipbg}; border: none; border-radius: 6px; padding: 5px 10px; }}
+.panel button.act {{ background-color: {chipbg}; border-radius: 6px; padding: 5px 10px; }}
 .panel button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 .panel button.act.quiet {{ background-color: transparent; }}
 .panel button.act.quiet label {{ color: {faint}; }}

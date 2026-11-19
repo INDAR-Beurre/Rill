@@ -2367,7 +2367,8 @@ impl App {
                 let (red, green, blue, alpha) = crate::ui::scrim_colour(&self.palette.borrow());
                 context.set_source_rgba(red, green, blue, alpha);
                 let column = self.ui.side.allocated_width().max(0) as f64;
-                context.rectangle(column, 0.0, width as f64 - column, height as f64);
+                let band = self.ui.desk.allocated_height().max(0) as f64;
+                context.rectangle(column, band, width as f64 - column, height as f64 - band);
                 let _ = context.fill();
             }
 
@@ -2382,6 +2383,19 @@ impl App {
             }
         }
         surface.flush();
+        let r = 14.0;
+        let context = cairo::Context::new(&surface).map_err(|e| e.to_string())?;
+        let width = surface.width() as f64;
+        let band = self.palette.borrow().desk();
+        context.set_source_rgb(band.0 as f64 / 255.0, band.1 as f64 / 255.0, band.2 as f64 / 255.0);
+        context.set_operator(cairo::Operator::Source);
+        context.rectangle(0.0, 0.0, width, 23.0);
+        let _ = context.fill();
+        context.move_to(width, 23.0);
+        context.line_to(width - r, 23.0);
+        context.arc(width - r, 23.0 + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+        context.close_path();
+        context.fill().ok();
         cut_top_left(&surface, self.palette.borrow().desk());
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);

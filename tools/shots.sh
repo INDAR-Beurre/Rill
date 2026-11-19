@@ -165,7 +165,7 @@ done
 if [[ -s "$PIDFILE" ]]; then APP="$(cat "$PIDFILE")"; fi
 
 python3 - "$ROOT" "$OUT" "$PORT" <<'PY' &
-import json, os, subprocess, sys, time, pathlib
+import json, os, subprocess, sys, time, pathlib, re
 
 root, out, port = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 sys.path.insert(0, str(root / "tools"))
@@ -410,7 +410,30 @@ bad = [item for item in manifest if not item["ok"] and not item.get("skipped")]
 tried = [item for item in manifest if not item.get("skipped")]
 skipped = f", {len(unavailable)} state(s) with no way to open" if unavailable else ""
 print(f"\n{len(tried) - len(bad)}/{len(tried)} states captured in {out}{skipped}")
-# A missing way to open a state is a failure of this round's evidence even
+
+# Pixel checks pin the compositor regressions the functional suite could not
+# see: a light corner in dark mode and a white veil in light mode. Use the
+# installed ImageMagick CLI rather than adding a Python imaging dependency.
+def pixels(path, points):
+    result = subprocess.run(
+        ["magick", str(path), "-format", " ".join(f"%[pixel:p{{{x},{y}}}]" for x, y in points), "info:"],
+        capture_output=True, text=True)
+    if result.returncode:
+        return []
+    return [[int(float(v)) for v in re.findall(r"[\d.]+", part)[:3]] for part in result.stdout.split("srgb")[1:]]
+
+if (out / "01-default.png").exists():
+    corner = pixels(out / "01-default.png", [(0, 26), (0, 18)])
+    ok = bool(corner) and max(abs(a-b) for a,b in zip(corner[0], corner[1])) <= 2
+    manifest.append({"name": "pixel dark corner", "ok": ok, "note": str(corner)})
+    print(("  ok   " if ok else "  FAIL ") + "pixel dark corner — " + str(corner))
+if not os.environ.get("SHOT_DARK") and (out / "05-panel-history.png").exists():
+    veil = pixels(out / "05-panel-history.png", [(500, 500), (220, 5), (232, 5)])
+    ok = bool(veil) and 120 <= sum(veil[0]) / 3 <= 220 and max(abs(a-b) for a,b in zip(veil[1], veil[2])) <= 2
+    manifest.append({"name": "pixel light scrim", "ok": ok, "note": str(veil)})
+    print(("  ok   " if ok else "  FAIL ") + "pixel light scrim — " + str(veil))
+
+bad = [item for item in manifest if not item["ok"] and not item.get("skipped")]
 # though it is not a failed picture, so the run does not report success. A
 # round that stopped early is a failure too, whatever it managed to capture.
 sys.exit(1 if bad or unavailable or stopped else 0)

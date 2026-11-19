@@ -67,21 +67,21 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
         if said.trim() != "off" {
             return;
         }
-        let active = app.active_id();
-        // A message from a tab that is not on screen is stale: it is either a
-        // page left behind or one already closed, and neither is this state.
-        if app.view(active).is_none() {
-            return;
+        // The manager is shared, so the message has no sender. Query the
+        // views that carry reading state instead of guessing the active tab.
+        let ids: Vec<_> = app.reading_tabs.borrow().iter().copied().collect();
+        for id in ids {
+            let Some(view) = app.view(id) else {
+                app.reading_tabs.borrow_mut().remove(&id);
+                continue;
+            };
+            let app = app.clone();
+            crate::js::run(&view, "!!window.__searchReaderOn", move |value| {
+                if value.as_deref() != Ok("false") { return; }
+                app.reading_tabs.borrow_mut().remove(&id);
+                if app.active_id() == id { app.reading.set(false); }
+            });
         }
-        // A shared manager cannot identify the sending WebView. Only the
-        // page's explicit exit control may notify, so clear reading only when
-        // the current document confirms its reader is no longer active.
-        let Some(view) = app.view(active) else { return };
-        crate::js::run(&view, "!!window.__searchReaderOn", move |value| {
-            if value.as_deref() != Ok("false") { return; }
-            app.reading_tabs.borrow_mut().remove(&active);
-            if app.active_id() == active { app.reading.set(false); }
-        });
     });
     for (source, allow, at_start, every_frame) in crate::extensions::installable().scripts {
         let when = if at_start {

@@ -36,7 +36,25 @@ impl FindBar {
         entry.set_margin_start(8);
         entry.set_has_frame(false);
         entry.set_valign(gtk::Align::Center);
+        // A placeholder is drawn hint text, not an accessible name, so the
+        // field is unnamed to a screen reader without this.
+        if let Some(access) = entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Find in the page");
+        }
         crate::ui::pack(&bar, &entry, true);
+
+        // `icons::button` turns focus off to keep the marks mouse-only. In this
+        // bar they are the whole set of actions, so they take focus back the
+        // way `ui::window_controls` labels its marks: tooltip for sight and
+        // pointer, accessible name for speech.
+        let label = |button: &gtk::Button, name: &str, tooltip: &str| {
+            button.set_can_focus(true);
+            button.set_tooltip_text(Some(tooltip));
+            if let Some(access) = button.accessible() {
+                // Fully qualified: several preludes bring a `set_name`.
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, name);
+            }
+        };
 
         let count = gtk::Label::new(Some(""));
         crate::ui::class(&count, "empty");
@@ -49,15 +67,15 @@ impl FindBar {
         up.set_valign(gtk::Align::Center);
         // The arrows are 12px and carry no words, so the tooltip is the only
         // place the direction and the matching key can be stated.
-        up.set_tooltip_text(Some("Previous match (Shift+Return)"));
+        label(&up, "Previous match", "Previous match (Shift+Return)");
         crate::ui::pack(&bar, &up, false);
         let down = crate::icons::button(crate::icons::Icon::Down, 12, palette.muted, "door");
         down.set_valign(gtk::Align::Center);
-        down.set_tooltip_text(Some("Next match (Return)"));
+        label(&down, "Next match", "Next match (Return)");
         crate::ui::pack(&bar, &down, false);
         let close = crate::icons::button(crate::icons::Icon::Close, 12, palette.muted, "door");
         close.set_valign(gtk::Align::Center);
-        close.set_tooltip_text(Some("Close find (Escape)"));
+        label(&close, "Close find", "Close find (Escape)");
         crate::ui::pack(&bar, &close, false);
 
         layer.add(&bar);

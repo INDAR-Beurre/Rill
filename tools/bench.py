@@ -26,6 +26,20 @@ class BenchError(RuntimeError):
     pass
 
 
+READ_ONLY = ("probe", "debug", "tabs", "ping", "text", "pins")
+RESET_WORDS = ("Connection reset", "Broken pipe", "closed the socket")
+
+
+def retryable(line, error):
+    """Read-only commands only: after a reset or a closed socket, ask again.
+
+    Replaying a read cannot change the page; replaying open/close/select can.
+    """
+    return line.split(" ", 1)[0] in READ_ONLY and any(
+        word in str(error) for word in RESET_WORDS
+    )
+
+
 class Bench:
     def __init__(self, path=None, timeout=30.0):
         self.path = path or os.environ.get("SEARCH_BENCH_SOCKET", DEFAULT_SOCKET)
@@ -81,9 +95,10 @@ class Bench:
             # A machine under memory pressure can freeze any process for
             # seconds while pages are swapped back in, and that is not the
             # browser misbehaving. Ask once more on a new connection before
-            # calling it a failure; the answer to a command is the same either
-            # way, because every command is idempotent in its effect.
-            if "no answer in time" not in str(error):
+            # calling it a failure. Timeouts retry anything, as before; a reset
+            # or a closed socket retries only read-only commands, because a
+            # mutating command may already have run.
+            if "no answer in time" not in str(error) and not retryable(line, error):
                 raise
             self.reconnect()
             answer = self.command(line)

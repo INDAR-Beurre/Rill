@@ -407,6 +407,17 @@ class Run:
                 f"page text {body[:40]!r}",
             )
 
+            bench.open(self.url("/office"))
+            bench.wait_loaded()
+            bench.must("key history")
+            bench.settle()
+            widgets = bench.must("paneltree").get("widgets", [])
+            filters = [w for w in widgets if w["kind"] == "GtkEntry"]
+            self.check("the history filter has visible geometry",
+                       len(filters) == 1 and filters[0]["size"][0] > 400 and filters[0]["size"][1] > 20,
+                       filters)
+            bench.must("key closepanel")
+
             # The sheet the browser draws is keys::SHEET, and paneltext walks
             # the labels it drew: a panel that opened empty would pass a check
             # on `probe` alone, so the rows are read rather than assumed.
@@ -421,9 +432,12 @@ class Run:
                 and sheet.get("panel") == "Shortcuts"
                 and "Ctrl L" in rows
                 and "The field" in rows
+                and "F3" in rows
+                and "Shift F3" in rows
                 and len(rows) >= 40,
                 f"panel {panel['panel']}, {len(rows)} labels, "
-                f"Ctrl L listed: {'Ctrl L' in rows}",
+                f"Ctrl L listed: {'Ctrl L' in rows}, "
+                f"F3 listed: {'F3' in rows}, Shift F3 listed: {'Shift F3' in rows}",
                 {"panel_rows": len(rows)},
             )
             bench.must("key closepanel")
@@ -747,6 +761,22 @@ class Run:
                        probe.get("findCount", "").endswith("matches")
                        and probe["findCount"] != "no matches",
                        f"count {probe.get('findCount')!r}")
+            # F3 and Shift F3 are rows in the sheet, and a bench verb goes
+            # through `keys::intent_of`, so these press the panel's own
+            # shortcut rather than find_step. Stepping leaves the count alone,
+            # so the page moving is the evidence a match was taken.
+            start = float(bench.must("js window.scrollY").get("value") or 0)
+            bench.must("key findnext")
+            time.sleep(0.2)
+            next_y = float(bench.must("js window.scrollY").get("value") or 0)
+            self.check("F3 steps to the next match",
+                       next_y > start and bench.probe()["find"] is True,
+                       f"scrollY {start:.0f} to {next_y:.0f}")
+            bench.must("key findprevious")
+            time.sleep(0.2)
+            back_y = float(bench.must("js window.scrollY").get("value") or 0)
+            self.check("Shift F3 steps back to the previous match",
+                       back_y < next_y, f"scrollY {next_y:.0f} to {back_y:.0f}")
             bench.must("escape")
 
             bench.must("key reader")
@@ -1000,21 +1030,50 @@ class Run:
             bench.wait_loaded(tab, timeout=20)
             bench.must("escape")
             time.sleep(0.2)
+            # Read from partway down the page, not from the top. A restore that
+            # always lands on 0 looks correct at 0 and is only wrong here.
+            start_y = 200
+            bench.must(f"js window.scrollTo(0, {start_y})")
+            time.sleep(0.1)
+            bench.must("js (() => { const p = document.createElement('p'); p.className = 'byline'; p.textContent = 'By Ada Lovelace'; document.querySelector('article').appendChild(p); return true; })()")
             bench.must("key reader")
             time.sleep(1.2)
             inside = bench.must("js !!window.__searchReaderOn")
             self.check("reading mode enters", inside.get("value") == "true", str(inside)[:60])
             self.check("the browser knows which tab is being read", bench.probe().get("reading") is True, str(bench.probe()))
-            bench.must("js window.__searchReaderScroll")
             way_out = bench.must("js !!document.getElementById('__search_reader_exit')")
             self.check("and carries its own way out", way_out.get("value") == "true", str(way_out)[:60])
+            contrast = bench.must("js (() => { const b = document.querySelector('#__search_reader > .byline'); if (!b) return '0'; const ch = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; const lum = (s) => { const m = (s.match(/[0-9]+/g) || []).map(Number); return 0.2126 * ch(m[0]) + 0.7152 * ch(m[1]) + 0.0722 * ch(m[2]); }; const x = lum(getComputedStyle(document.body).backgroundColor), y = lum(getComputedStyle(b).color); return ((Math.max(x,y) + 0.05) / (Math.min(x,y) + 0.05)).toFixed(2); })()")
+            self.check("reader byline has measured contrast", float(contrast.get("value") or 0) >= 6.0, str(contrast))
+            # The page's own button, clicked as a page clicks it. Toggling from
+            # the host would prove only that the host can leave; this is the
+            # way out a keyboardless user has, and it has to reach the host too.
+            bench.must("js document.getElementById('__search_reader_exit').click()")
+            time.sleep(0.3)
+            clicked = bench.must("js !!window.__searchReaderOn")
+            self.check("the page's exit button leaves reading mode",
+                       clicked.get("value") == "false", str(clicked)[:60])
+            self.check("and the browser is told the page left it",
+                       bench.probe().get("reading") is False, str(bench.probe()))
+            scrolled = bench.must("js window.scrollY")
+            self.check("the exit button puts the page back where it was read from",
+                       abs(float(scrolled.get("value") or 0) - start_y) <= 2,
+                       f"scrollY {scrolled.get('value')!r}, was {start_y}")
+            # Back in by the keyboard, and out by it: the toggle the host owns
+            # still works after the page has left reading mode on its own.
+            bench.must("key reader")
+            time.sleep(1.2)
+            again = bench.must("js !!window.__searchReaderOn")
+            self.check("reading mode enters again after the page left it",
+                       again.get("value") == "true", str(again)[:60])
             bench.must("key reader")
             time.sleep(1.2)
             back = bench.must("js !!window.__searchReaderOn")
             self.check("and leaves again", back.get("value") == "false", str(back)[:60])
             self.check("the browser knows reading ended", bench.probe().get("reading") is False, str(bench.probe()))
             restored = bench.must("js [!!document.querySelector('style[data-search-reader]'), window.scrollY]")
-            self.check("leaving restores the page", restored.get("value") == "false,0", str(restored)[:80])
+            self.check("leaving restores the page",
+                       str(restored.get("value")).startswith("false,"), str(restored)[:80])
 
         @self.scenario("the window itself")
         def _window():
@@ -1216,13 +1275,19 @@ class Run:
     def summary(self):
         passed = sum(1 for result in self.results if result["ok"])
         failed = [result for result in self.results if not result["ok"]]
+        # The numbers the run measured, beside the verdicts it reached: a
+        # report of pass/fail alone cannot show a startup that crept or an
+        # idle tab that grew. Null when the scenario that measures them never
+        # ran, so a missing figure reads as missing and not as zero.
+        idle = getattr(self, "one_tab", None) or {}
         REPORT.parent.mkdir(parents=True, exist_ok=True)
         REPORT.write_text(json.dumps({"results": self.results, "passed": passed,
-                                      "failed": len(failed)}, indent=2))
+                                      "failed": len(failed),
+                                      "startup_seconds": getattr(self, "startup", None),
+                                      "idle_rss_mb": idle.get("rss_mb"),
+                                      "idle_own_mb": idle.get("anon_mb")}, indent=2))
         print("\n" + "=" * 60)
         print(f"{passed} passed, {len(failed)} failed, {len(self.results)} checks")
-        if "one_tab" in vars(self).keys():
-            pass
         if hasattr(self, "one_tab"):
             print(f"one idle tab: {self.one_tab['pss_mb']}MB resident, "
                   f"{self.one_tab['anon_mb']}MB of it the browser's own")

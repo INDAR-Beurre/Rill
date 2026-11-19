@@ -116,8 +116,9 @@ fn main() {
         prefs.skip_restore = true;
     }
 
+    // `start` installs the handle itself, and that install is what arms the
+    // memory tick, so doing it again here armed a second one.
     let app = app::start(prefs);
-    app::install_self(&app);
 
     if bench::enabled() {
         bench::watch_loop();

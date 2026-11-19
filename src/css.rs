@@ -209,6 +209,7 @@ menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 entry {{ background-image: none; box-shadow: none; border: none; }}
 button.mark {{ background: none; background-image: none; border: none; box-shadow: none; padding: 4px; border-radius: 6px; min-width: 0; min-height: 0; }}
 button.mark:hover {{ background-color: {hover}; }}
+button.mark:focus-visible {{ outline: 2px solid {ink}; outline-offset: 1px; }}
 button.mark:active {{ background-color: {wash}; }}
 button.mark:disabled {{ opacity: 0.35; }}
 /* A control that cannot be pressed must not look pressable: "Show them" at a
@@ -503,6 +504,22 @@ mod tests {
                     ground.hex()
                 );
             }
+        }
+    }
+
+    /// The findbar's icon marks are `button.mark`, and they used to take
+    /// keyboard focus with nothing drawn for it.
+    #[test]
+    fn a_focused_mark_draws_an_ink_ring() {
+        for p in [light(), dark()] {
+            let sheet = super::build(&p, 30);
+            let ink = p.ink.hex();
+            // The findbar sits on `fieldbg`, not the page ground.
+            let ground = if p.is_dark() { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
+            let rule = format!("button.mark:focus-visible {{ outline: 2px solid {ink};");
+            assert!(sheet.contains(&rule), "no ink focus ring on the marks ({ink})");
+            let ratio = contrast(p.ink, ground);
+            assert!(ratio >= 3.0, "{ink} ring is {ratio:.2}:1, a boundary wants 3");
         }
     }
 

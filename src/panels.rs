@@ -55,6 +55,9 @@ pub struct Panels {
     pub nav: gtk::Box,
     pub body: gtk::Box,
     pub open: Option<PanelKind>,
+    /// The card width the body was last measured at. A resize changes the width
+    /// a wrapping line needs, so the height has to be asked again.
+    fitted_width: std::cell::Cell<i32>,
 }
 
 impl Panels {
@@ -99,21 +102,8 @@ impl Panels {
         body.set_margin_end(INSET);
         body.set_margin_bottom(16);
         body.set_vexpand(true);
-        // The card is a fixed child of the overlay, so its children's natural
-        // height can otherwise escape below the rounded border. Clipping here
-        // is local to the panel and does not change the capture path.
-        body.connect_size_allocate(|widget, _| {
-            let height = widget.allocated_height();
-            for child in widget.children() {
-                child.set_size_request(-1, height.max(1));
-            }
-        });
-        body.connect_draw(|widget, cr| {
-            let a = widget.allocation();
-            cr.rectangle(0.0, 0.0, a.width() as f64, a.height() as f64);
-            cr.clip();
-            crate::gtkx::inh(false)
-        });
+        // The ScrolledWindow owns clipping. Giving every direct child the
+        // entire body height blanks filter fields and leaves rows half-clipped.
         card.add(&body);
 
         layer.add(&scrim);
@@ -131,6 +121,7 @@ impl Panels {
             nav,
             body,
             open: None,
+            fitted_width: std::cell::Cell::new(0),
         };
 
         close.connect_clicked(move |_| {
@@ -188,24 +179,15 @@ impl Panels {
             }
         };
         let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
-        // Ask the widgets above the list how tall they are instead of adding a
-        // round 140 and hoping. The guess was 34px short, which cut the last
-        // row of a list in half and made a scrollable card look broken.
-        let mut above = 0;
-        for child in self.card.children() {
-            if child == self.body.clone().upcast::<gtk::Widget>() {
-                continue;
-            }
-            above += child.preferred_height().0;
-        }
-        above += 16; // the body's bottom margin
-        let wanted = self
-            .measure_content(card_width - 40)
-            .max(self.body.preferred_height_for_width(card_width - 32).0)
-            + above;
+        // Shown before measured. A widget that is not shown yet reports a
+        // preferred height of 0, so measuring the title row and the nav before
+        // this point counted them as nothing: the card came out 45px shorter
+        // than its own header and nav, and the last of the extensions note was
+        // cut off below the edge. This is the order the two have to be in.
+        self.card.show_all();
         // An empty panel should be a note, not a slab: the floor used to be
         // 300px of nothing under one line of text.
-        self.wanted_height.set(wanted.clamp(200, 640));
+        self.wanted_height.set(self.fit_height(card_width));
         self.card.set_can_focus(true);
         self.layer.show();
         self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
@@ -242,6 +224,12 @@ impl Panels {
         let column = self.column.get();
         self.layer.place(&self.scrim, column, 0, (width - column).max(0), height);
         let card_width = 680.min(width - 48);
+        // A narrower window wraps the body's sentences onto more lines, so the
+        // height the card asked for on the way in is no longer the height it
+        // needs. Re-ask whenever the width moved.
+        if self.open.is_some() && self.fitted_width.get() != card_width {
+            self.wanted_height.set(self.fit_height(card_width));
+        }
         // The card is as tall as what it holds, within reason: a panel with
         // one line in it should not be a window with one line in it.
         let card_height = self.wanted_height.get().min(height - 80).max(240);
@@ -291,19 +279,59 @@ impl Panels {
         }
     }
 
-    /// How tall the rows want to be. A scroller asked for its preferred height
-    /// answers with what the window gives it, not with what it holds, so the
-    /// height the card asks for has to come from the list inside it: otherwise
-    /// a panel opens around two rows and cuts the third in half.
+    /// The height the card has to be at this width, from the measure below.
+    ///
+    /// Ask the widgets above the list how tall they are instead of adding a
+    /// round 140 and hoping: the guess was 34px short, which cut the last row of
+    /// a list in half and made a scrollable card look broken.
+    fn fit_height(&self, card_width: i32) -> i32 {
+        let inner = (card_width - 2 * INSET).max(1);
+        let mut above = 0;
+        for child in self.card.children() {
+            if child == self.body.clone().upcast::<gtk::Widget>() {
+                continue;
+            }
+            above += child.preferred_height().0;
+        }
+        above += 16; // the body's bottom margin
+        let wanted = self
+            .measure_content(inner)
+            .max(self.body.preferred_height_for_width(inner).1)
+            + above;
+        self.fitted_width.set(card_width);
+        wanted.clamp(200, 640)
+    }
+
+    /// How tall the body wants to be at a given width, and the one place that
+    /// tells a scroller how tall its list is.
+    ///
+    /// Every body child counts, not just the scroller. History and bookmarks
+    /// put their count line and their filter field above the list, and
+    /// measuring only the list asked for a card 80px shorter than the body
+    /// holds, which squeezed the field to nothing.
+    ///
+    /// The scroller also needs telling. `propagate_natural_height` asks the
+    /// content for its preferred height at the content's **natural** width, and
+    /// a wrapping sentence's natural width is the whole sentence on one line:
+    /// the answer was 174px while the list, once given 648px, needed 231. The
+    /// viewport stayed 174 tall and the extensions note lost three of its four
+    /// lines below the edge. Asking at the width the body actually has, and
+    /// pinning the list to that answer, makes the two numbers agree.
     fn measure_content(&self, width: i32) -> i32 {
+        let mut total = 0;
         for child in self.body.children() {
-            if let Ok(scroll) = child.downcast::<gtk::ScrolledWindow>() {
+            if let Ok(scroll) = child.clone().downcast::<gtk::ScrolledWindow>() {
                 if let Some(inner) = scroll.child() {
-                    return inner.preferred_height_for_width(width).0 + 4;
+                    let needed = inner.preferred_height_for_width(width).1;
+                    inner.set_size_request(-1, needed);
                 }
             }
+            // The natural height, not the minimum: a scroller's minimum is its
+            // one-pixel floor plus its frame, which is how a 231px list was
+            // measured as 46px.
+            total += child.preferred_height_for_width(width).1;
         }
-        0
+        total
     }
 
     fn body_scroll(&self, content: &gtk::Box) -> gtk::ScrolledWindow {
@@ -387,22 +415,48 @@ impl Panels {
         header.add(&count);
         let clear = gtk::Button::with_label("Clear History");
         crate::ui::class(&clear, "act");
-        clear.set_sensitive(!history.is_empty());
+        // The one irreversible control in the panel says so before it is
+        // pressed. The stylesheet owns the colour: `dangerink` (#C0392B light,
+        // #EE8B76 dark) is 5.44:1 on the white chip and 5.87:1 on the dark one.
+        // This only names the class; the rule belongs to css.rs.
+        crate::ui::class(&clear, "danger");
         {
             let app_weak = app.weak();
             let armed = std::rc::Rc::new(std::cell::Cell::new(false));
+            // Bumped on every arm and on confirm. A five-second tick only
+            // disarms the press it was started for, so a stale timer cannot
+            // reset the label of a newer arm, and a confirm leaves no pending
+            // tick that touches the chip afterwards.
+            let generation = std::rc::Rc::new(std::cell::Cell::new(0u32));
             let for_click = armed.clone();
+            let gen_click = generation.clone();
+            let button_weak = clear.downgrade();
             clear.connect_clicked(move |button| {
-                if !for_click.replace(false) {
-                    button.set_label("Clear history? Click again");
-                    for_click.set(true);
+                if for_click.replace(false) {
+                    gen_click.set(gen_click.get().wrapping_add(1));
+                    if let Some(app) = app_weak.upgrade() {
+                        app.state.borrow_mut().history.clear();
+                        Records::save_history(&[]);
+                        app.toggle_panel_switch(PanelKind::History);
+                    }
                     return;
                 }
-                if let Some(app) = app_weak.upgrade() {
-                    app.state.borrow_mut().history.clear();
-                    Records::save_history(&[]);
-                    app.toggle_panel_switch(PanelKind::History);
-                }
+                for_click.set(true);
+                button.set_label("Clear history? Click again");
+                let tick = gen_click.get().wrapping_add(1);
+                gen_click.set(tick);
+                let later_armed = armed.clone();
+                let later_gen = gen_click.clone();
+                let weak = button_weak.clone();
+                gtk::glib::timeout_add_seconds_local(5, move || {
+                    if later_gen.get() == tick {
+                        later_armed.set(false);
+                        if let Some(button) = weak.upgrade() {
+                            button.set_label("Clear History");
+                        }
+                    }
+                    gtk::glib::ControlFlow::Break
+                });
             });
         }
         header.add(&clear);
@@ -640,6 +694,10 @@ impl Panels {
         crate::ui::class(&note, "settingdesc");
         note.set_xalign(0.0);
         note.set_line_wrap(true);
+        // No width of its own: the body's width bounds it, and measure_content
+        // asks for its height at exactly that width. Capping max_width_chars
+        // here made GTK answer with the height at the cap instead (86px for a
+        // sentence that fills 76), which only added slack to the card.
         note.set_margin_top(10);
         list.add(&note);
 

@@ -4,17 +4,44 @@
 window.__searchReader = function (palette) {
   if (window.__searchReaderOn) {
     window.__searchReaderOn = false;
-    if (window.__searchReaderRestore) {
-      try {
-        eval(window.__searchReaderRestore);
-      } catch (_) {}
-      window.__searchReaderRestore = null;
+    const styles = window.__searchReaderStyles || [null, null];
+    const y = Number(window.__searchReaderScroll) || 0;
+    // The page's own markup, put back from the string the enter path kept.
+    // Written here, not eval'ed from a stored expression: the exit path is a
+    // constant, so nothing in the page can change what it runs, and a page
+    // whose policy blocks eval still gets its words back.
+    const source = window.__searchReaderBody;
+    // Without the page we saved there is nothing to go back to. Saying `left`
+    // here would tell the host the tab is out of reading mode while the
+    // article is still on screen.
+    if (typeof source !== 'string') {
+      window.__searchReaderOn = true;
+      return 'failed';
+    }
+    try {
+      document.body.innerHTML = source;
+      window.__searchReaderBody = null;
+    } catch (_) {
+      // Half a page is worse than the reader it replaces. Stay in and say so,
+      // so the tab's flag keeps matching the page it belongs to, and keep the
+      // source so a later try can still put the page back.
+      window.__searchReaderOn = true;
+      return 'failed';
     }
     document.head.querySelectorAll('style[data-search-reader]').forEach((n) => n.remove());
-    document.body.removeAttribute('style');
-    document.documentElement.removeAttribute('style');
+    // Put back the exact attribute values the page had, null meaning "no attribute".
+    [[document.body, styles[0]], [document.documentElement, styles[1]]].forEach(([node, value]) => {
+      if (value === null) node.removeAttribute('style');
+      else node.setAttribute('style', value);
+    });
+    const pageY = Number(window.__searchReaderScroll) || 0;
+    window.scrollTo(0, pageY);
+    window.__searchReaderStyles = null;
     window.__searchReaderScroll = null;
-    return true;
+    // Retry after late layout, not before the immediate restore has run.
+    requestAnimationFrame(() => window.scrollTo(0, pageY));
+    window.addEventListener('load', () => window.scrollTo(0, pageY), { once: true });
+    return 'left';
   }
 
   const candidates = [
@@ -39,7 +66,7 @@ window.__searchReader = function (palette) {
     }
   }
   if (!best || bestScore < 400) best = document.body;
-  if (!best) return false;
+  if (!best) return 'empty';
 
   const clone = best.cloneNode(true);
   const junk = 'script, style, nav, aside, form, iframe, noscript, footer, header, button, [class*=share], [class*=comment], [class*=newsletter], [class*=cookie], [class*=sidebar], [class*=related], [aria-hidden=true]';
@@ -52,21 +79,26 @@ window.__searchReader = function (palette) {
   const bylineNode = document.querySelector('[rel=author], .byline, .author, [class*=byline]');
   const byline = bylineNode ? (bylineNode.innerText || '').trim().slice(0, 140) : '';
 
-  const oldBody = document.body.innerHTML;
   window.__searchReaderScroll = window.scrollY;
-  window.__searchReaderRestore = 'document.body.innerHTML = window.__searchReaderBody;';
-  window.__searchReaderBody = oldBody;
+  window.__searchReaderStyles = [
+    document.body.getAttribute('style'),
+    document.documentElement.getAttribute('style'),
+  ];
+  // The exit path restores from this string directly; nothing here is code.
+  window.__searchReaderBody = document.body.innerHTML;
 
-  const dark = /#0B0B0B/i.test(palette);
-  const rule = dark ? '#242424' : '#EAEAEA';
-  const muted = dark ? '#8A8A8A' : '#6B6B6B';
-  const ground = dark ? '#0B0B0B' : '#FFFFFF';
+  // Palette owns the pairs; keeping a second set here loses their contrast.
+  const tokens = palette;
+  const pageCss = tokens.palette;
+  const rule = tokens.rule;
+  const muted = tokens.muted;
+  const ground = tokens.ground;
 
   document.head.querySelectorAll('[data-search-reader]').forEach((n) => n.remove());
   const style = document.createElement('style');
   style.setAttribute('data-search-reader', '');
   style.textContent = `
-    html, body { ${palette} !important; }
+    html, body { ${pageCss} !important; }
     body { margin: 0 auto !important; max-width: 720px !important; font: 19px/1.62 "SF Pro Text", Inter, "Adwaita Sans", "Noto Sans", sans-serif !important;
       -webkit-font-smoothing: antialiased; }
     #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 72px 28px 120px; }
@@ -98,11 +130,18 @@ window.__searchReader = function (palette) {
   exit.setAttribute('style', `all: unset; display: inline-block; cursor: pointer; font: 12px system-ui, sans-serif;
     color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 5px 10px;
     position: fixed; top: 14px; right: 18px; background: ${ground}; z-index: 2147483647;`);
-  // The button calls the toggle with the palette it was built with, so leaving
-  // reader mode puts the page back exactly as it was.
-  const exitPalette = palette;
+  // The button calls the toggle with the tokens it was built with, so it can
+  // enter again with real colours if a restore ever leaves it on screen.
+  const exitPalette = tokens;
   exit.addEventListener('click', () => {
-    window.__searchReader(exitPalette);
+    const answer = window.__searchReader(exitPalette);
+    // Tell the host too; it only knows about its own toggle. Only a real exit
+    // is reported: a failed restore is not a tab that left reading mode.
+    // Guarded: the handler is absent under any other WebView.
+    if (answer !== 'left') return;
+    try {
+      window.webkit.messageHandlers.searchReader.postMessage('off');
+    } catch (_) {}
   });
   container.appendChild(exit);
   const title = document.createElement('h1');
@@ -127,5 +166,5 @@ window.__searchReader = function (palette) {
   document.body.scrollTop = 0;
   window.scrollTo(0, 0);
   window.__searchReaderOn = true;
-  return true;
+  return 'entered';
 };

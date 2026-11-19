@@ -14,8 +14,8 @@ copy of Chromium to download, update and keep in memory.
 * about 2.8 MB of binary, stripped. `Cargo.toml` sets `strip = true`, and
   `stat -c %s target/release/search` prints the size of the build in front of you
 * three processes with a tab open, as in Safari: the frame, a page, a network.
-  The last run that passed every check measured **159.0 MB resident, of which
-  49.4 MB was this browser's own** (`Pss_Anon` summed over the tree); the rest is
+  The last run that passed every check measured **203.7 MB proportional resident memory, of which
+  91.8 MB was this browser's own** (`Pss_Anon` summed over the tree); the rest is
   the shared GTK and WebKit libraries the desktop already has, plus 9.9 MB of
   shared file backing. Across runs on this machine the browser's own share has
   ranged from 49 to 119 MB. Both figures move with the page and with the host.
@@ -163,8 +163,8 @@ distribution.
 
 ### What it costs next to what you have
 
-One idle tab measured 159.0 MB resident in the last run that passed every
-check, of which 49.4 MB was this browser's own; across runs the browser's own
+One idle tab measured 203.7 MB proportional resident memory in the last run that passed every
+check, of which 91.8 MB was this browser's own; across runs the browser's own
 share has ranged from 49 to 119 MB. For scale, the same page in Firefox on this
 machine was 480 MB over five processes in a reading taken by hand from
 `ps_mem`. No script in this repository produces that figure, so treat it as one

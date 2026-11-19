@@ -49,8 +49,12 @@ pub struct Tab {
 
 impl Tab {
     pub fn letter(&self) -> char {
-        if let Some(first) = self.title.chars().find(|c| c.is_alphanumeric()) {
+        let title = self.title.trim();
+        if let Some(first) = title.chars().find(|c| c.is_alphabetic()) {
             return first;
+        }
+        if title.is_empty() {
+            return 'N';
         }
         let host = crate::shield::host_of(&self.url);
         let text = if host.is_empty() { "New tab" } else { host.as_str() };
@@ -1750,19 +1754,128 @@ impl App {
         }
     }
 
+    // Finding one match by hand, over the text the reader can see. Nodes are
+    // stitched into one string so a match can cross an inline element, with a
+    // newline between blocks so a word ending one paragraph does not join the
+    // word starting the next. An empty query drops the selection; otherwise
+    // the match after (or before) the current one is selected and centred, and
+    // the search wraps the way the engine's does.
+    const FIND_STEP_JS: &str = r#"(() => {
+        const text = __TEXT__, forward = __FORWARD__;
+        const root = document.body || document.documentElement;
+        if (!root) return 'none';
+        const selection = document.getSelection();
+        if (!text) { if (selection) selection.removeAllRanges(); return 'none'; }
+        // A text node counts when it is drawn: display:none and its subtree are
+        // out, which is what keeps a collapsed menu or a hidden template from
+        // joining the haystack. Nothing is dropped for being scrolled away,
+        // since a match below the fold is exactly the one a step should reach.
+        const visible = (el) => {
+            if (!el) return false;
+            if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true })) return false;
+            // Older engines: the same question asked a node at a time, since a
+            // collapsed ancestor hides everything under it.
+            for (let cur = el; cur && cur !== root; cur = cur.parentElement) {
+                const style = getComputedStyle(cur);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+            }
+            return true;
+        };
+        // A break or a replaced thing between two text nodes renders a gap the
+        // string would not otherwise have, so a word on either side must not be
+        // allowed to match as one.
+        const BREAKS = /^(BR|WBR|HR|IMG|PICTURE|INPUT|SELECT|TEXTAREA|CANVAS|VIDEO|AUDIO|IFRAME|OBJECT|EMBED|SVG|MATH)$/;
+        const nodes = [], starts = [], parts = [];
+        let block = null, length = 0, pending = false;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+            const node = walker.currentNode;
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                if (BREAKS.test(node.nodeName.toUpperCase())) pending = true;
+                continue;
+            }
+            const owner = node.parentElement;
+            if (!owner || !node.nodeValue || !visible(owner)) continue;
+            const here = owner.closest('p,li,td,th,h1,h2,h3,h4,h5,h6,div,section,article,blockquote,pre') || root;
+            const gap = pending || (block && block !== here) ? '\n' : '';
+            pending = false;
+            block = here;
+            parts.push(gap, node.nodeValue);
+            starts.push(length + gap.length);
+            length += gap.length + node.nodeValue.length;
+            nodes.push(node);
+        }
+        const hay = parts.join('');
+        const at = (index) => {
+            for (let i = nodes.length - 1; i >= 0; i--) {
+                if (index >= starts[i]) return [nodes[i], index - starts[i]];
+            }
+            return null;
+        };
+        let current = -1;
+        if (selection && selection.rangeCount && selection.anchorNode && selection.anchorNode.nodeType === Node.TEXT_NODE) {
+            const i = nodes.indexOf(selection.anchorNode);
+            if (i >= 0) current = starts[i] + selection.anchorOffset;
+        }
+        const finder = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        const hits = [];
+        let found;
+        while ((found = finder.exec(hay)) !== null && hits.length < 20000) hits.push([found.index, found[0].length]);
+        if (!hits.length) return 'none';
+        let pick = null;
+        if (forward) {
+            pick = hits.find((hit) => hit[0] > current) || hits[0];
+        } else {
+            for (const hit of hits) if (hit[0] < current) pick = hit;
+            pick = pick || hits[hits.length - 1];
+        }
+        const start = at(pick[0]), end = at(pick[0] + pick[1] - 1);
+        if (!start || !end) return 'none';
+        const range = document.createRange();
+        range.setStart(start[0], start[1]);
+        range.setEnd(end[0], end[1] + 1);
+        if (selection) { selection.removeAllRanges(); selection.addRange(range); }
+        // Centred on the match itself. The element holding it can be a whole
+        // paragraph, so aiming at the element put a short match on a tall
+        // block's middle rather than in the middle of the view; the range's
+        // own box is the text that was actually found. Sideways only when the
+        // match would otherwise be off the edge.
+        const box = range.getBoundingClientRect();
+        if (box.width || box.height) {
+            const dx = box.left < 0 || box.right > window.innerWidth
+                ? box.left + box.width / 2 - window.innerWidth / 2 : 0;
+            window.scrollBy(dx, box.top + box.height / 2 - window.innerHeight / 2);
+        } else {
+            // No box at all (an engine that will not measure a range yet): the
+            // match's own element is the only thing left to aim at.
+            const e = start[0].parentElement;
+            if (e) e.scrollIntoView({ block: 'center', inline: 'nearest' });
+        }
+        return String(pick[0]);
+    })()"#;
+
     /// One step through the matches, in the direction asked for.
+    ///
+    /// The engine's own step found the same text again and left the selection
+    /// where it was, and a fresh search does the same, so a second press of
+    /// Return moved nothing. The step is done in the page instead, over the
+    /// text the reader can see: it selects the match it lands on and brings it
+    /// to the middle of the view, which is also what makes the step visible.
+    /// The count still comes from the engine in `find_query`.
     pub fn find_step(&self, text: &str, forward: bool) {
         let Some(view) = self.view(self.active_id()) else { return };
-        let Some(controller) = view.find_controller() else { return };
         if text.is_empty() {
-            controller.search("", 0, 0);
-            return;
+            if let Some(controller) = view.find_controller() {
+                controller.search("", 0, 0);
+            }
         }
-        if forward {
-            controller.search_next();
-        } else {
-            controller.search_previous();
-        }
+        let quote = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
+        // The flag is filled in first: the query comes next, and a query that
+        // happened to spell the other marker would otherwise be replaced too.
+        let script = Self::FIND_STEP_JS
+            .replacen("__FORWARD__", if forward { "true" } else { "false" }, 1)
+            .replacen("__TEXT__", &quote, 1);
+        crate::js::run(&view, &script, |_| {});
     }
 
     pub fn find_query(&self, text: &str) {
@@ -1773,8 +1886,8 @@ impl App {
             controller.count_matches("", 0, 0);
         } else {
             let options = webkit2gtk::FindOptions::CASE_INSENSITIVE.bits();
-            controller.search(text, options, 200);
             controller.count_matches(text, options, 20_000);
+            controller.search(text, options, 200);
         }
     }
 
@@ -2819,12 +2932,12 @@ fn paint_one(context: &cairo::Context, widget: &gtk::Widget, offset: (i32, i32))
         let _status = context.restore();
         return;
     }
-    if widget.is::<gtk::Switch>() {
-        let _ = widget.draw(context);
-        let _status = context.restore();
-        return;
-    }
-    if widget.is::<gtk::ScrolledWindow>() {
+    // A viewport's draw routine paints its complete child, including rows
+    // below its own allocation. ScrolledWindow remains layout-only so the
+    // viewport gets an explicit clip in the capture walk.
+    if widget.is::<gtk::Viewport>() {
+        context.rectangle(0.0, 0.0, width, height);
+        context.clip();
         let _ = widget.draw(context);
         let _status = context.restore();
         return;

@@ -134,9 +134,9 @@ impl Prefs {
 
     pub fn row_height(&self) -> i32 {
         if self.roomy_tabs {
-            36
+            44
         } else {
-            28
+            34
         }
     }
 

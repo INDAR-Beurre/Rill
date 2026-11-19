@@ -232,14 +232,14 @@ def decimals(number):
 def check(found):
     """Compare every figure the page quotes against the run it cites."""
     problems, compared = [], 0
-    # DIFFERENCES.md quotes the same two memory figures in prose, and prose is
+    # DIFFERENCES.md quotes the same memory figure in prose, and prose is
     # not a table row, so it is checked by pattern instead of being left to rot.
     try:
         prose = (ROOT / "docs" / "DIFFERENCES.md").read_text()
     except OSError:
         prose = ""
     for pattern, keys in (
-        (r"resident total is about (\d+(?:\.\d+)?) MB", "idle pss"),
+        (r"proportional resident memory\s+(?:was\s+)?(\d+(?:\.\d+)?) MB", "idle pss"),
         (r"own anonymous memory is (\d+(?:\.\d+)?) to", "idle anon low"),
     ):
         match = re.search(pattern, prose)
@@ -330,6 +330,45 @@ def main(argv):
                 print(f"  {problem}", file=sys.stderr)
             return 1
         print(f"{DOC.name} agrees with the report")
+        return 0
+
+    # Pick exactly the latest passing figures and insert them in the existing
+    # prose. Historical ranges stay unchanged.
+    if "--write" in argv:
+        report = json.loads(REPORT.read_text())
+        values = {name: usage(by_name(report, name)) for name in
+                  ("idle one tab", "20 tabs open", "a memory spray is survived",
+                   "the engine survives a spray and keeps working", "tab switches stay quick",
+                   "panels open and close")}
+        idle, many, spray, settle, switch, panels = values.values()
+        number = lambda text: re.search(r"\d+(?:\.\d+)?", text).group()
+        mean = lambda name: number(next(r["detail"] for r in report["results"] if r["name"] == name).split("mean ")[1])
+        worst = lambda name: number(next(r["detail"] for r in report["results"] if r["name"] == name).split("worst ")[1])
+        switch_detail = next(r["detail"] for r in report["results"] if r["name"] == "tab switches stay quick")
+        switch_p95 = re.search(r"p95\s+(\d+(?:\.\d+)?)", switch_detail).group(1)
+        panel_mean = float(mean("panels open and close"))
+        panel_worst = float(worst("panels open and close"))
+        updates = [
+            (ROOT / "docs" / "DIFFERENCES.md", r"proportional resident memory(?:\s+was)?\s+\d+(?:\.\d+)? MB", f"proportional resident memory was {idle['pss_mb']:.1f} MB"),
+            (ROOT / "docs" / "LIMITS.md", r"one idle tab \| \d+ MB resident, \d+ MB own", f"one idle tab | {idle['pss_mb']:.0f} MB resident, {idle['anon_mb']:.0f} MB own"),
+            (ROOT / "docs" / "LIMITS.md", r"20 tabs \| \d+ MB resident, \d+ MB own", f"20 tabs | {many['pss_mb']:.0f} MB resident, {many['anon_mb']:.0f} MB own"),
+            (ROOT / "docs" / "LIMITS.md", r"per tab \| \+\d+(?:\.\d+)? MB resident", f"per tab | +{(many['pss_mb']-idle['pss_mb'])/20:.1f} MB resident"),
+            (ROOT / "docs" / "LIMITS.md", r"\d+(?:\.\d+)? MB of total proportional set size", f"{idle['pss_mb']:.1f} MB of total proportional set size"),
+            (ROOT / "docs" / "LIMITS.md", r"\d+(?:\.\d+)? MB of RSS", f"{idle['rss_mb']:.1f} MB of RSS"),
+            (ROOT / "docs" / "LIMITS.md", r"a page that allocates without limit \| \d+ MB resident at its peak, \d+ MB RSS, \d+ MB own", f"a page that allocates without limit | {spray['pss_mb']:.0f} MB resident at its peak, {spray['rss_mb']:.0f} MB RSS, {spray['anon_mb']:.0f} MB own"),
+            (ROOT / "docs" / "LIMITS.md", r"once it settles \| \d+ MB resident", f"once it settles | {settle['pss_mb']:.0f} MB resident"),
+            (ROOT / "docs" / "LIMITS.md", r"tab switch \| mean [^|]+", f"tab switch | mean {mean('tab switches stay quick')} ms, p95 {switch_p95} ms, worst {float(worst('tab switches stay quick')):.0f} ms over 300 switches"),
+            (ROOT / "docs" / "LIMITS.md", r"a panel opening \| mean [^|]+", f"a panel opening | mean {panel_mean:.0f} ms, worst {panel_worst:.0f} ms over 80"),
+        ]
+        for path, pattern, replacement in updates:
+            text = path.read_text()
+            assert re.search(pattern, text), f"no prose anchor {pattern} in {path}"
+            path.write_text(re.sub(pattern, replacement, text, count=1))
+        readme = ROOT / "README.md"
+        text = re.sub(r"\d+(?:\.\d+)? MB proportional resident memory", f"{idle['pss_mb']:.1f} MB proportional resident memory", readme.read_text())
+        text = re.sub(r"\d+(?:\.\d+)? MB was this browser's own", f"{idle['anon_mb']:.1f} MB was this browser's own", text)
+        readme.write_text(text)
+        print("updated latest measured figures; run --check")
         return 0
 
     for line in rows(found):

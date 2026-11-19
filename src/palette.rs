@@ -130,6 +130,32 @@ impl Palette {
     }
 }
 
+/// The four colours reading mode paints with. It sets its own page inside the
+/// document, so its pairs are measured on `ground`, not on the browser's.
+#[derive(Clone, Copy, Debug)]
+pub struct Reader {
+    pub ground: Rgb,
+    pub ink: Rgb,
+    pub muted: Rgb,
+    pub rule: Rgb,
+}
+
+impl Palette {
+    /// Reading mode's tokens, taken from this palette rather than written as
+    /// hexes in assets/reader.js, where `#EAEAEA` on white was 1.20:1 and a
+    /// rule nobody could see. `hairline` is the palette's line: 1.51:1 light,
+    /// 1.54:1 on the dark ground. Body ink keeps its 7:1, the byline keeps
+    /// the 4.5:1 `muted` already has on the card.
+    pub fn reader(&self) -> Reader {
+        Reader {
+            ground: self.card,
+            ink: self.ink,
+            muted: self.muted,
+            rule: self.hairline,
+        }
+    }
+}
+
 /// The font stack: the Mac build's SF Pro, then the closest thing each Linux
 /// install is likely to have. Inter and Adwaita Sans are SF's near neighbours.
 pub const FONT: &str =
@@ -244,6 +270,27 @@ mod tests {
                 ratio >= 1.2,
                 "{appearance}: a live pin is only {ratio:.2}:1 against a sleeping one"
             );
+        }
+    }
+
+    #[test]
+    fn reading_mode_has_a_rule_you_can_see() {
+        // assets/reader.js used #EAEAEA on white for its rule: 1.20:1, the
+        // 1.2 the critic caught. The helper now hands out palette values, so
+        // this measures the same floors as the browser's own page.
+        for (appearance, p) in [("light", light()), ("dark", dark())] {
+            let r = p.reader();
+            assert_eq!(r.ground, p.card);
+            let rule = contrast(r.rule, r.ground);
+            assert!(
+                rule >= 1.5,
+                "{appearance}: the reading rule is {rule:.2}:1 on {}",
+                r.ground.hex()
+            );
+            let muted = contrast(r.muted, r.ground);
+            assert!(muted >= 4.5, "{appearance}: the reading byline is {muted:.2}:1");
+            let ink = contrast(r.ink, r.ground);
+            assert!(ink >= 7.0, "{appearance}: the reading body is {ink:.2}:1");
         }
     }
 

@@ -36,8 +36,8 @@ will fail only here.
 
 Memory is the visible consequence. Safari's WebKit shares a great deal between
 processes because the OS was built for it; on Linux each WebKit process maps the
-same shared libraries again, which is why the resident total is about 159 MB for
-one tab while the browser's own anonymous memory is 49 to 119 MB depending on
+same shared libraries again, which is why proportional resident memory was 203.7 MB for one tab in the latest passing run while the browser's own
+anonymous memory is 49 to 119 MB depending on
 the page and the host.
 
 ## Keys, menus and the system

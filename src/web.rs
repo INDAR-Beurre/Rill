@@ -4,8 +4,9 @@
 use crate::app::{AppRef, TabId};
 use crate::curtain;
 use gtk::prelude::*;
+use javascriptcore::ValueExt;
 use webkit2gtk::{
-    DownloadExt, HardwareAccelerationPolicy, NavigationPolicyDecisionExt, PolicyDecisionExt,
+    CacheModel, DownloadExt, HardwareAccelerationPolicy, NavigationPolicyDecisionExt, PolicyDecisionExt,
     ResponsePolicyDecisionExt, Settings, SettingsExt, URIRequestExt, URIResponseExt,
     UserContentManager, UserContentManagerExt, WebContext, WebContextExt, WebView, WebViewExt,
 };
@@ -54,6 +55,34 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
         crate::shield::install(&manager);
     }
     curtain::install(app, &manager);
+    // Leaving reading mode from the page. Only "off" is trusted: the script
+    // sends it after it has taken the reader out, so any other word is the
+    // page guessing and must not clear the tab's state. Nothing is sent back
+    // into the view from here.
+    manager.register_script_message_handler("searchReader");
+    let weak = app.weak();
+    manager.connect_script_message_received(Some("searchReader"), move |_, value| {
+        let Some(app) = weak.upgrade() else { return };
+        let said = value.js_value().map(|value| value.to_str().to_string()).unwrap_or_default();
+        if said.trim() != "off" {
+            return;
+        }
+        let active = app.active_id();
+        // A message from a tab that is not on screen is stale: it is either a
+        // page left behind or one already closed, and neither is this state.
+        if app.view(active).is_none() {
+            return;
+        }
+        // A shared manager cannot identify the sending WebView. Only the
+        // page's explicit exit control may notify, so clear reading only when
+        // the current document confirms its reader is no longer active.
+        let Some(view) = app.view(active) else { return };
+        crate::js::run(&view, "!!window.__searchReaderOn", move |value| {
+            if value.as_deref() != Ok("false") { return; }
+            app.reading_tabs.borrow_mut().remove(&active);
+            if app.active_id() == active { app.reading.set(false); }
+        });
+    });
     for (source, allow, at_start, every_frame) in crate::extensions::installable().scripts {
         let when = if at_start {
             webkit2gtk::UserScriptInjectionTime::Start
@@ -97,7 +126,9 @@ fn settings() -> Settings {
 }
 
 pub fn ephemeral_context() -> WebContext {
-    WebContext::new_ephemeral()
+    let context = WebContext::new_ephemeral();
+    context.set_cache_model(CacheModel::DocumentBrowser);
+    context
 }
 
 pub fn view_for(app: &AppRef, tab: TabId) -> Option<WebView> {
@@ -109,6 +140,8 @@ pub fn view_for(app: &AppRef, tab: TabId) -> Option<WebView> {
         app.private_context()
     } else {
         let context = WebContext::default()?;
+        // Bound retained resources; the back/forward page cache stays on.
+        context.set_cache_model(CacheModel::DocumentBrowser);
         // Nothing sets the process model: both of its values are deprecated
         // since WebKitGTK 2.40 because several web processes is already what a
         // default context does. Asking for it changes nothing, which was

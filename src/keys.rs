@@ -7,6 +7,7 @@
 use crate::app::AppRef;
 use crate::panels::PanelKind;
 use gtk::gdk::ModifierType;
+use gtk::prelude::EntryExt;
 use webkit2gtk::WebViewExt;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -22,6 +23,8 @@ pub enum Intent {
     Reader,
     Bookmark,
     Find,
+    FindNext,
+    FindPrevious,
     History,
     Downloads,
     Bookmarks,
@@ -139,10 +142,15 @@ impl Key {
             }
         }
 
+        if self.alt || (self.ctrl && name != "f5") {
+            return Intent::Nothing;
+        }
         match name {
             "escape" => Intent::Escape,
             "f5" if self.ctrl => Intent::ReloadBypassCache,
             "f5" => Intent::Reload,
+            "f3" if self.shift => Intent::FindPrevious,
+            "f3" => Intent::FindNext,
             "f12" => Intent::Inspector,
             _ => Intent::Nothing,
         }
@@ -177,6 +185,8 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("reloadbypass", "Ctrl F5", "Reload past the cache", "f5", true, false, false),
     ("reader", "Ctrl Shift R", "Reading mode (again to leave)", "r", true, true, false),
     ("find", "Ctrl F", "Find in the page", "f", true, false, false),
+    ("findnext", "F3", "Next match", "f3", false, false, false),
+    ("findprevious", "Shift F3", "Previous match", "f3", false, true, false),
     ("bookmark", "Ctrl D", "Keep this page", "d", true, false, false),
     ("history", "Ctrl Y", "History", "y", true, false, false),
     ("bookmarks", "Ctrl Shift B", "Bookmarks", "b", true, true, false),
@@ -258,6 +268,14 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::Reader => app.reader(),
         Intent::Bookmark => app.add_bookmark(),
         Intent::Find => app.toggle_find(),
+        Intent::FindNext => {
+            let text = app.find.borrow().entry.text();
+            app.find_step(&text, true);
+        }
+        Intent::FindPrevious => {
+            let text = app.find.borrow().entry.text();
+            app.find_step(&text, false);
+        }
         Intent::History => app.toggle_panel(PanelKind::History),
         Intent::Downloads => app.toggle_panel(PanelKind::Downloads),
         Intent::Bookmarks => app.toggle_panel(PanelKind::Bookmarks),
@@ -375,6 +393,8 @@ mod sheet_tests {
             | Intent::Reader
             | Intent::Bookmark
             | Intent::Find
+            | Intent::FindNext
+            | Intent::FindPrevious
             | Intent::History
             | Intent::Downloads
             | Intent::Bookmarks
@@ -420,6 +440,8 @@ mod sheet_tests {
             Intent::Reader,
             Intent::Bookmark,
             Intent::Find,
+            Intent::FindNext,
+            Intent::FindPrevious,
             Intent::History,
             Intent::Downloads,
             Intent::Bookmarks,
@@ -537,6 +559,16 @@ mod tests {
     fn f5_reloads_and_ctrl_f5_skips_the_cache() {
         assert_eq!(key("F5", false, false, false).intent(), Intent::Reload);
         assert_eq!(key("F5", true, false, false).intent(), Intent::ReloadBypassCache);
+    }
+
+    #[test]
+    fn f3_steps_through_the_find_bar_both_ways() {
+        assert_eq!(key("F3", false, false, false).intent(), Intent::FindNext);
+        assert_eq!(key("F3", false, true, false).intent(), Intent::FindPrevious);
+        // The keyval can arrive folded already; the fold is not case sensitive.
+        assert_eq!(key("f3", false, false, false).intent(), Intent::FindNext);
+        // Ctrl F3 is not a browser key here, so it must not step the bar.
+        assert_eq!(key("F3", true, false, false).intent(), Intent::Nothing);
     }
 
     #[test]

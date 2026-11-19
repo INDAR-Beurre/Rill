@@ -201,6 +201,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         "ping" => ok(&format!(",\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))),
         "probe" => probe(app),
         "paneltext" => paneltext(app),
+        "paneltree" => paneltree(app),
         "debug" => debug(app),
         "settle" => settle(app),
         "tabs" => tabs(app),
@@ -529,6 +530,29 @@ fn paneltext(app: &AppRef) -> String {
         ",\"panel\":\"{kind:?}\",\"text\":\"{}\"",
         json_escape(&text)
     ))
+}
+
+// Geometry of visible panel controls, for checking capture versus layout.
+fn paneltree(app: &AppRef) -> String {
+    let panels = app.panels.borrow();
+    if panels.open.is_none() { return ok(",\"widgets\":[]"); }
+    fn walk(w: &gtk::Widget, out: &mut Vec<String>) {
+        if out.len() >= 200 { return; }
+        if w.is::<gtk::Entry>() || w.is::<gtk::Label>() {
+            let p = w.parent().map(|p| p.type_().name()).unwrap_or_default();
+            let hidden = !w.get_visible();
+            let text = w.dynamic_cast_ref::<gtk::Entry>().map(|e| e.text().to_string())
+                .or_else(|| w.dynamic_cast_ref::<gtk::Label>().map(|l| l.text().to_string())).unwrap_or_default();
+            out.push(format!("{{\"kind\":\"{}\",\"parent\":\"{}\",\"size\":[{},{}],\"mapped\":{},\"visible\":{},\"text\":\"{}\"}}",
+                w.type_().name(), p, w.allocated_width(), w.allocated_height(), w.is_mapped(), !hidden, json_escape(&text)));
+        }
+        if let Some(c) = w.dynamic_cast_ref::<gtk::Container>() {
+            for child in c.children() { walk(&child, out); }
+        }
+    }
+    let mut out = Vec::new();
+    walk(panels.card.upcast_ref(), &mut out);
+    ok(&format!(",\"widgets\":[{}]", out.join(",")))
 }
 
 fn debug(app: &AppRef) -> String {

@@ -145,6 +145,7 @@ pub struct App {
     /// Reading mode is a state of the tab, not of the page, so the browser has
     /// to remember it to be able to leave it.
     pub reading: std::cell::Cell<bool>,
+    pub reading_tabs: RefCell<std::collections::BTreeSet<TabId>>,
     /// The page icons the engine has handed us, per tab. Kept here rather than
     /// asked for during a redraw: a redraw happens while the rows are being
     /// rebuilt, and the view may not exist yet.
@@ -304,6 +305,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         fullscreen: std::cell::Cell::new(false),
         last_layout: RefCell::new((0, 0)),
         reading: std::cell::Cell::new(false),
+        reading_tabs: RefCell::new(std::collections::BTreeSet::new()),
     });
 
     // Installed before `wire`, because every handler that calls `weak()` reads
@@ -342,6 +344,12 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     let active = app.active_id();
     app.select(active);
     app
+}
+
+pub fn view_id(view: &webkit2gtk::WebView) -> Option<TabId> {
+    let app = current()?;
+    let ids: Vec<TabId> = app.state.borrow().tabs.iter().map(|tab| tab.id).collect();
+    ids.into_iter().find(|id| app.view(*id).as_ref() == Some(view))
 }
 
 impl App {
@@ -479,11 +487,16 @@ impl App {
         id
     }
 
+    pub fn tab_reading(&self, id: TabId) -> bool {
+        self.reading_tabs.borrow().contains(&id)
+    }
+
     pub fn select(&self, id: TabId) {
         if self.state.borrow().position(id).is_none() {
             return;
         }
         self.state.borrow_mut().active = id;
+        self.reading.set(self.tab_reading(id));
         self.ensure_view(id);
         self.ui.stack.set_visible_child_name(&format!("tab-{id}"));
         if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
@@ -581,6 +594,10 @@ impl App {
             }
             state.active
         };
+        self.reading_tabs.borrow_mut().remove(&id);
+        if self.reading.get() {
+            self.reading.set(false);
+        }
         self.select(next_active);
         if trace {
             eprintln!(
@@ -825,13 +842,26 @@ impl App {
                     } else {
                         context.remove_class("live");
                     }
+                    if let Some(row) = self.state.borrow().tab(id).and_then(|t| t.row.as_ref()) {
+                        let context = row.title.style_context();
+                        if id == active { context.add_class("liveword"); } else { context.remove_class("liveword"); }
+                    }
                 }
             }
+            // The column was already built, so nothing moved it: a tab that
+            // became active without a click on its row (Ctrl Tab, Ctrl 1..9,
+            // a launcher hand-off) still has to be brought into view.
+            self.scroll_active_into_view();
             return;
         }
         for child in self.ui.rows.children() {
             self.ui.rows.remove(&child);
         }
+        // The old rows are gone with their geometry, so the adjustment still
+        // holds last frame's values: carrying them over would leave a freshly
+        // built column scrolled to a place that no longer means anything.
+        // Re-anchoring below costs one pass and is what keeps the live row
+        // visible after a rebuild.
         let (tabs, active) = {
             let state = self.state.borrow();
             let tabs: Vec<Tab> = state
@@ -883,11 +913,23 @@ impl App {
                     ui::mark(&row.icon, tab.letter(), Some(surface), 16);
                 }
             }
-            row.event.set_tooltip_text(Some(&if tab.url.is_empty() {
+            let tip = if tab.url.is_empty() {
                 "New tab".to_string()
             } else {
                 format!("{}\n{}", if title.is_empty() { "Untitled" } else { title.as_str() }, tab.url)
-            }));
+            };
+            row.event.set_tooltip_text(Some(&tip));
+            // A row is a tab, not a picture of one: the mark is drawn and the
+            // title may be a host name, so a screen reader gets the same words
+            // the pointer gets. No focus is taken: the page keeps the keyboard.
+            if let Some(access) = row.event.accessible() {
+                // Fully qualified: gtk's prelude brings several traits with a
+                // `set_name`, and this one is atk's.
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, &tip);
+                gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
+            }
+            row.event.set_can_focus(false);
+            row.event.set_focus_on_click(false);
             {
                 let weak = self.weak();
                 let id = tab.id;
@@ -944,21 +986,33 @@ impl App {
         }
         ui::pack(&self.ui.rows, &new_tab, false);
         self.ui.rows.show_all();
+        // After show_all, not before: a row that is not mapped has no
+        // allocated height, and the anchor is computed from real geometry.
+        self.scroll_active_into_view();
     }
 
     fn render_pins(&self) {
         for child in self.ui.pins.children() {
             self.ui.pins.remove(&child);
         }
-        let (pinned, active): (Vec<(TabId, char, String)>, TabId) = {
+        // Each pin carries its own words and whether it is the tab you are
+        // on. A pinned tab with no title and no address used to produce an
+        // empty tooltip: the fallback the rows use gives it something to say.
+        let pinned: Vec<(TabId, char, String, bool)> = {
             let state = self.state.borrow();
-            let pinned = state
+            state
                 .tabs
                 .iter()
                 .filter(|t| t.pinned)
-                .map(|t| (t.id, t.letter(), if t.title.is_empty() { t.url.clone() } else { t.title.clone() }))
-                .collect();
-            (pinned, state.active)
+                .map(|t| {
+                    let title = if t.title.is_empty() {
+                        if t.url.is_empty() { "New tab".to_string() } else { t.url.clone() }
+                    } else {
+                        t.title.clone()
+                    };
+                    (t.id, t.letter(), title, t.id == state.active)
+                })
+                .collect()
         };
         if pinned.is_empty() {
             self.ui.pins_holder.hide();
@@ -980,8 +1034,8 @@ impl App {
             let usable = if measured > 40 { measured } else { (self.prefs.borrow().side_width as i32) - 20 };
             (((usable + 3) / (35 + 3)).max(1)) as usize
         };
-        for (index, (id, letter, title)) in pinned.iter().enumerate() {
-            let tile = ui::pin_tile(*letter, *id == active, *self.palette.borrow());
+        for (index, (id, letter, title, live)) in pinned.iter().enumerate() {
+            let tile = ui::pin_tile(*letter, *live, *self.palette.borrow());
             // A page that offers a mark shows it and drops the letter; a page
             // with neither keeps the letter, which is at least its own.
             if let Some(surface) = self.icons.borrow().get(id).cloned() {
@@ -990,7 +1044,26 @@ impl App {
                 tile.icon.show_all();
                 tile.letter.hide();
             }
-            tile.event.set_tooltip_text(Some(title));
+            // The tooltip alone said what the page was, so the pin you were
+            // on read exactly like the other three. It now says which one is
+            // live, and the tile - a letter or a favicon, with no text inside
+            // - gets the same words as an accessible name under a tab role,
+            // because a screen reader cannot read the letter at all.
+            let tip = if *live {
+                format!("{}\nActive tab", title)
+            } else {
+                title.clone()
+            };
+            let name = if *live {
+                format!("Pinned tab: {}, active", title)
+            } else {
+                format!("Pinned tab: {}", title)
+            };
+            tile.event.set_tooltip_text(Some(&tip));
+            if let Some(access) = tile.event.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
+                gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
+            }
             {
                 let weak = self.weak();
                 let id = *id;
@@ -1749,7 +1822,6 @@ impl App {
     }
 
     pub fn reader(&self) {
-        self.reading.set(!self.reading.get());
         let Some(app) = current() else { return };
         let Some(view) = self.view(self.active_id()) else { return };
         crate::reader::enter(&app, &view);
@@ -2178,7 +2250,7 @@ impl App {
             // child whose allocation is still pending, which is exactly the
             // state a layer is in at capture time. A solid rectangle over the
             // page is the whole of what the scrim is, so fill it here.
-            if self.omni.visible.get() {
+            if self.omni.visible.get() || self.panels.borrow().open.is_some() {
                 let (red, green, blue, alpha) = crate::ui::scrim_colour(&self.palette.borrow());
                 context.set_source_rgba(red, green, blue, alpha);
                 let column = self.ui.side.allocated_width().max(0) as f64;
@@ -2675,7 +2747,6 @@ fn layout_only(widget: &gtk::Widget) -> bool {
         || widget.is::<gtk::Overlay>()
         || widget.is::<gtk::Stack>()
         || widget.is::<gtk::Paned>()
-        || widget.is::<gtk::Viewport>()
         || widget.is::<gtk::ScrolledWindow>()
 }
 
@@ -2735,6 +2806,26 @@ fn paint_one(context: &cairo::Context, widget: &gtk::Widget, offset: (i32, i32))
     if layout_only(widget) {
         gtk::render_background(&style, context, 0.0, 0.0, width, height);
         gtk::render_frame(&style, context, 0.0, 0.0, width, height);
+        let _status = context.restore();
+        return;
+    }
+    // A viewport's draw routine paints its complete child, including rows
+    // below its own allocation. ScrolledWindow remains layout-only so the
+    // viewport gets an explicit clip in the capture walk.
+    if widget.is::<gtk::Viewport>() {
+        context.rectangle(0.0, 0.0, width, height);
+        context.clip();
+        let _ = widget.draw(context);
+        let _status = context.restore();
+        return;
+    }
+    if widget.is::<gtk::Switch>() {
+        let _ = widget.draw(context);
+        let _status = context.restore();
+        return;
+    }
+    if widget.is::<gtk::ScrolledWindow>() {
+        let _ = widget.draw(context);
         let _status = context.restore();
         return;
     }

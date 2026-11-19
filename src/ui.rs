@@ -13,8 +13,8 @@ pub struct Ui {
     pub shell: gtk::Box,
     pub desk: gtk::EventBox,
     pub paned: gtk::Paned,
-    /// The band above the window. It is what makes the top edge read as
-    /// chrome rather than as page, and it drags the window like a title bar.
+    /// The column: the tab rows and their foot, with the hairline on its
+    /// right edge.
     pub side: gtk::Box,
     /// The whole band at the top of the column, which is the window's handle:
     /// a titlebar that is not drawn still has to be somewhere to grab.
@@ -83,16 +83,27 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     paned.set_wide_handle(false);
     paned.set_hexpand(true);
     paned.set_vexpand(true);
+
     // The window's own band above everything, the way the original has one:
     // 23px of desk-coloured chrome across the whole width, then the white
     // window with its top-left corner rounded into it. Without it the top edge
     // of the window is page, and the window has no edge at all.
+    //
+    // It is one strip above the paned, not a strip inside each side of it.
+    // Split in two, the paned's own 1px handle was left between the halves:
+    // in `01-default.png` rows y=1..23 read the band's grey at every x but
+    // 232, which was white, so the band was full width with a one-pixel hole
+    // punched in it. Above the paned there is nothing between the two sides
+    // for the hole to open in.
+    let deskband = gtk::EventBox::new();
+    crate::ui::class(&deskband, "desk");
+    deskband.set_size_request(-1, 23);
+    deskband.set_visible_window(true);
 
     let side_width = prefs.side_width.round() as i32;
     let side = widget_box(gtk::Orientation::Vertical, 0);
     crate::ui::class(&side, "side");
     side.set_size_request(if prefs.sidebar { side_width } else { 0 }, -1);
-
 
     // The lights and the page's own doors, in the band they share. The band
     // is one EventBox so the whole of it can be the window's handle, not only
@@ -168,15 +179,12 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pack(&footer, &menu, false);
     pack(&side, &footer, false);
 
-    let sidecol = widget_box(gtk::Orientation::Vertical, 0);
-    crate::ui::class(&sidecol, "sidecol");
-    let sideband = gtk::EventBox::new();
-    crate::ui::class(&sideband, "desk");
-    sideband.set_size_request(-1, 23);
-    sideband.set_visible_window(true);
-    pack(&sidecol, &sideband, false);
-    pack(&sidecol, &side, true);
-    paned.pack1(&sidecol, false, false);
+    // The column is the paned's first child itself, with no wrapper around
+    // it. `.side` draws the hairline as its own right border, so the line is
+    // exactly as tall as the widget; wrapped, the 23px strip above the column
+    // was outside that border and the line began at y=24 instead of at the
+    // band's edge. Unwrapped it runs from the band to the window's bottom.
+    paned.pack1(&side, false, false);
 
     // The pages you kept, in one row, above the page and below the column's
     // top band. Hidden unless it has something to show.
@@ -283,24 +291,17 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     stack.add_named(&error_holder, "error");
     pack(&card, &stack, true);
 
-    // The band above the page, inside the paned's page side. The frame cannot
-    // wrap the paned: the paned IS the shell the capture walks, so a frame
-    // outside it was painted after the column and over it, and the whole
-    // sidebar came out the band's grey.
-    let pagecol = widget_box(gtk::Orientation::Vertical, 0);
-    crate::ui::class(&pagecol, "pagecol");
-    let pagedesk = gtk::EventBox::new();
-    crate::ui::class(&pagedesk, "desk");
-    pagedesk.set_size_request(-1, 23);
-    pagedesk.set_visible_window(true);
-    pack(&pagecol, &pagedesk, false);
-    pack(&pagecol, &card, true);
-    paned.pack2(&pagecol, true, false);
+    // The page is the paned's second child itself: the band it used to begin
+    // with is the one strip above the paned now, and a wrapper here would buy
+    // a box with a single child in it.
+    paned.pack2(&card, true, false);
 
-    // The outer frame is what the capture walks, so the band above the
-    // sidebar is inside it and painted before the column rather than over it.
+    // The outer frame is what the capture walks. The band is its first child
+    // and the paned its second, so the band is laid out above both columns and
+    // painted before them rather than over them.
     let frame = widget_box(gtk::Orientation::Vertical, 0);
     crate::ui::class(&frame, "shell");
+    pack(&frame, &deskband, false);
     pack(&frame, &paned, true);
     overlay.add(&frame);
 
@@ -308,7 +309,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         window,
         overlay,
         shell: frame,
-        desk: sideband,
+        desk: deskband,
         paned,
         side,
         top,

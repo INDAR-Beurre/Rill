@@ -92,10 +92,28 @@ impl Panels {
         card.add(&nav);
 
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // The scroller clips to its allocation; a box does not. Let the
+        // viewport own scrolling and let this wrapper shrink with the card.
+        body.set_hexpand(true);
         body.set_margin_start(INSET);
         body.set_margin_end(INSET);
         body.set_margin_bottom(16);
         body.set_vexpand(true);
+        // The card is a fixed child of the overlay, so its children's natural
+        // height can otherwise escape below the rounded border. Clipping here
+        // is local to the panel and does not change the capture path.
+        body.connect_size_allocate(|widget, _| {
+            let height = widget.allocated_height();
+            for child in widget.children() {
+                child.set_size_request(-1, height.max(1));
+            }
+        });
+        body.connect_draw(|widget, cr| {
+            let a = widget.allocation();
+            cr.rectangle(0.0, 0.0, a.width() as f64, a.height() as f64);
+            cr.clip();
+            crate::gtkx::inh(false)
+        });
         card.add(&body);
 
         layer.add(&scrim);
@@ -188,8 +206,12 @@ impl Panels {
         // An empty panel should be a note, not a slab: the floor used to be
         // 300px of nothing under one line of text.
         self.wanted_height.set(wanted.clamp(200, 640));
+        self.card.set_can_focus(true);
         self.layer.show();
         self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
+        if field.is_none() {
+            self.card.grab_focus();
+        }
         field
     }
 
@@ -223,8 +245,6 @@ impl Panels {
         // The card is as tall as what it holds, within reason: a panel with
         // one line in it should not be a window with one line in it.
         let card_height = self.wanted_height.get().min(height - 80).max(240);
-        // Centred on the page the panel covers. Centring on the window would
-        // put the card half a column left of what it is talking about.
         let page = (width - column).max(0);
         self.layer.place(
             &self.card,
@@ -289,7 +309,10 @@ impl Panels {
     fn body_scroll(&self, content: &gtk::Box) -> gtk::ScrolledWindow {
         let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroll.set_vexpand(true);
+        scroll.set_propagate_natural_height(true);
+        scroll.set_min_content_height(1);
+        scroll.set_max_content_height(640);
+        scroll.set_vexpand(false);
         scroll.add(content);
         scroll
     }
@@ -364,9 +387,17 @@ impl Panels {
         header.add(&count);
         let clear = gtk::Button::with_label("Clear History");
         crate::ui::class(&clear, "act");
+        clear.set_sensitive(!history.is_empty());
         {
             let app_weak = app.weak();
-            clear.connect_clicked(move |_| {
+            let armed = std::rc::Rc::new(std::cell::Cell::new(false));
+            let for_click = armed.clone();
+            clear.connect_clicked(move |button| {
+                if !for_click.replace(false) {
+                    button.set_label("Clear history? Click again");
+                    for_click.set(true);
+                    return;
+                }
                 if let Some(app) = app_weak.upgrade() {
                     app.state.borrow_mut().history.clear();
                     Records::save_history(&[]);
@@ -833,10 +864,8 @@ impl Panels {
         about.set_margin_top(16);
         list.add(&about);
 
-        // Settings has grown past the tallest card the window allows, so it
-        // scrolls like every other panel. Given to the body directly, its last
-        // rows — the search engine, this page's hidden elements, the version —
-        // were painted past the card's edge and could not be reached.
+        // Settings is intentionally compact in a small window. Its scroller
+        // owns the overflow; the capture clips the viewport to the card.
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
     }
@@ -895,6 +924,17 @@ impl Panels {
         let switch = gtk::Switch::new();
         switch.set_active(value);
         switch.set_valign(gtk::Align::Center);
+        // The switch is drawn, not typed: there is no text in it for a screen
+        // reader to read and nothing under the pointer to say what it sets, so
+        // the row's name is given to it both ways. The subtitle is a sentence,
+        // not a name, and is left out. The switch already reports that it is a
+        // switch; only the name is missing.
+        switch.set_tooltip_text(Some(title));
+        if let Some(access) = switch.accessible() {
+            // Fully qualified: gtk's prelude brings several traits with a
+            // `set_name`, and this one is atk's.
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, title);
+        }
         let app_weak = app.weak();
         let changed = std::rc::Rc::new(changed);
         switch.connect_active_notify(move |switch| {
@@ -942,6 +982,8 @@ impl Panels {
         let row = gtk::EventBox::new();
         crate::ui::class(&row, "ptrow");
         row.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+        row.set_can_focus(true);
+        row.set_tooltip_text(Some(title));
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         hbox.set_margin_top(7);
         hbox.set_margin_bottom(7);
@@ -999,6 +1041,16 @@ impl Panels {
         {
             let app_weak = app.weak();
             let run = std::rc::Rc::new(run);
+            let run_row = run.clone();
+            let app_key = app.weak();
+            row.connect_key_press_event(move |_, event| {
+                let name = event.keyval().name().unwrap_or_default();
+                if name == "Return" || name == "KP_Enter" {
+                    if let Some(app) = app_key.upgrade() { run_row(&app); }
+                    return crate::gtkx::inh(true);
+                }
+                crate::gtkx::inh(false)
+            });
             let run_row = run.clone();
             row.connect_button_press_event(move |_, event| {
                 if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {

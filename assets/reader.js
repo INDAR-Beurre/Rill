@@ -10,6 +10,10 @@ window.__searchReader = function (palette) {
       } catch (_) {}
       window.__searchReaderRestore = null;
     }
+    document.head.querySelectorAll('style[data-search-reader]').forEach((n) => n.remove());
+    document.body.removeAttribute('style');
+    document.documentElement.removeAttribute('style');
+    window.__searchReaderScroll = null;
     return true;
   }
 
@@ -49,6 +53,7 @@ window.__searchReader = function (palette) {
   const byline = bylineNode ? (bylineNode.innerText || '').trim().slice(0, 140) : '';
 
   const oldBody = document.body.innerHTML;
+  window.__searchReaderScroll = window.scrollY;
   window.__searchReaderRestore = 'document.body.innerHTML = window.__searchReaderBody;';
   window.__searchReaderBody = oldBody;
 
@@ -64,7 +69,7 @@ window.__searchReader = function (palette) {
     html, body { ${palette} !important; }
     body { margin: 0 auto !important; max-width: 720px !important; font: 19px/1.62 "SF Pro Text", Inter, "Adwaita Sans", "Noto Sans", sans-serif !important;
       -webkit-font-smoothing: antialiased; }
-    #__search_reader { max-width: 660px; margin: 0 auto; padding: 72px 28px 120px; }
+    #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 72px 28px 120px; }
     #__search_reader h1 { font-size: 34px; line-height: 1.18; letter-spacing: -0.012em; font-weight: 700; margin: 0 0 12px; }
     #__search_reader .byline { color: ${muted}; font-size: 13px; margin: 0 0 40px; }
     #__search_reader p, #__search_reader li, #__search_reader blockquote { margin: 0 0 1.05em; }

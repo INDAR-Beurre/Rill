@@ -173,6 +173,8 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             let Some(app) = weak.upgrade() else { return };
             match event {
                 webkit2gtk::LoadEvent::Started => {
+                    app.reading_tabs.borrow_mut().remove(&tab);
+                    if app.active_id() == tab { app.reading.set(false); }
                     app.set_loading(tab, true);
                     if let Some(slot) = app.state.borrow_mut().tab_mut(tab) {
                         slot.failed = false;

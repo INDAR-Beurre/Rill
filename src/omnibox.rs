@@ -229,6 +229,28 @@ impl Omnibox {
             });
         }
 
+        // Ctrl Return is the field's way of opening what it names beside the
+        // page instead of over it. GTK owns plain Return; a modified Return is
+        // not promised to reach the same `activate`, so it is taken here and
+        // handed to the same `commit` the key reaches. Plain Return is left to
+        // GTK, so one press is still one commit.
+        entry.connect_key_press_event(|_, event| {
+            let control = event.state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            let returns = matches!(
+                event.keyval().name().as_deref(),
+                Some("Return") | Some("KP_Enter") | Some("ISO_Enter")
+            );
+            if !control || !returns {
+                return crate::gtkx::inh(false);
+            }
+            // A field is only up with an app behind it, and with none there is
+            // nothing to commit to.
+            if let Some(app) = crate::app::current() {
+                commit(&app);
+            }
+            crate::gtkx::inh(true)
+        });
+
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "suggest");
         list.set_size_request(FIELD_WIDTH, -1);
@@ -431,12 +453,36 @@ impl Omnibox {
 
             row.add(&hbox);
             self.rows.borrow_mut().push(row.clone());
+            // A press on a row is a pick, and a pick has to leave the field
+            // behind: the modifier is read from the press's own state, so a
+            // Ctrl click and a Ctrl Return cannot disagree about where the
+            // address goes.
             let app_weak = app.weak();
             let target = offer.url.clone();
-            row.connect_button_press_event(move |_, _| {
+            let from_key = target.clone();
+            row.connect_button_press_event(move |_, event| {
                 if let Some(app) = app_weak.upgrade() {
-                    app.close_omni();
-                    app.navigate_active(&target);
+                    choose(&app, &target, opens_beside(Some(event.state())));
+                }
+                crate::gtkx::inh(true)
+            });
+            // A row can hold focus (`set_can_focus(true)` above), so Return on
+            // a focused row is the same pick as a press on it. Without this the
+            // row takes the keyboard's focus and answers nothing, which leaves
+            // the field standing over a list the user cannot choose from. A
+            // row is not the entry: other keys, Escape included, are left to
+            // the handlers that already know the field, not swallowed here.
+            let app_weak = app.weak();
+            row.connect_key_press_event(move |_, event| {
+                let returns = matches!(
+                    event.keyval().name().as_deref(),
+                    Some("Return") | Some("KP_Enter") | Some("ISO_Enter")
+                );
+                if !returns {
+                    return crate::gtkx::inh(false);
+                }
+                if let Some(app) = app_weak.upgrade() {
+                    choose(&app, &from_key, opens_beside(Some(event.state())));
                 }
                 crate::gtkx::inh(true)
             });
@@ -562,11 +608,38 @@ fn whole_address(current: &str, typed: &str) -> String {
     format!("{before}{authority}{path}")
 }
 
+/// Whether a commit opens beside the page rather than over it. Ctrl is the
+/// browser's "not in this tab" modifier, and it is read from the event that
+/// asked for the commit: a field that remembered the last modifier held would
+/// open a tab nobody asked for on the next plain Return.
+fn opens_beside(state: Option<gtk::gdk::ModifierType>) -> bool {
+    match state {
+        Some(state) => state.contains(gtk::gdk::ModifierType::CONTROL_MASK),
+        None => false,
+    }
+}
+
+/// Take the field's answer: the page beside this one when `beside`, otherwise
+/// this tab. Taking it puts the field away, always — a field left standing
+/// over the page it just opened holds the next keystroke somewhere the user is
+/// not looking, and the page it names is no longer the page under it.
+fn choose(app: &App, target: &str, beside: bool) {
+    if beside {
+        // A chosen tab closes the field from `select`, so the order here is
+        // the tab first: at the tab limit `new_tab` refuses and says so, and a
+        // field closed ahead of that refusal would throw away the address it
+        // could not open. Nothing else can fail to close it.
+        app.new_tab(Some(target), false, false);
+        return;
+    }
+    app.close_omni();
+    app.navigate_active(target);
+}
+
 /// Return in the field: the picked row if there is one, else the typed words.
 pub fn commit(app: &App) {
     if let Some(url) = app.omni.picked_url() {
-        app.close_omni();
-        app.navigate_active(&url);
+        choose(app, &url, opens_beside(gtk::current_event_state()));
         return;
     }
     let typed = app.omni.entry.text().to_string();
@@ -582,8 +655,7 @@ pub fn commit(app: &App) {
         app.close_omni();
         return;
     }
-    app.close_omni();
-    app.navigate_active(&target);
+    choose(app, &target, opens_beside(gtk::current_event_state()));
 }
 
 #[cfg(test)]
@@ -729,6 +801,22 @@ mod tests {
         assert_eq!(whole_address("https://example.com/x", "other.com/y"), "other.com/y");
         assert_eq!(whole_address("", "/elsewhere"), "/elsewhere");
         assert_eq!(whole_address("about:blank", "/elsewhere"), "/elsewhere");
+    }
+
+    #[test]
+    fn a_held_control_is_the_only_thing_that_opens_beside() {
+        use gtk::gdk::ModifierType;
+        // Ctrl Return is the "not in this tab" Return. A commit with no event
+        // beside it — the bench calling `commit` directly, a paste — is a
+        // plain Return rather than a guess, and Shift or Alt held with it is
+        // still the same tab.
+        assert!(opens_beside(Some(ModifierType::CONTROL_MASK)));
+        assert!(!opens_beside(Some(ModifierType::SHIFT_MASK)));
+        assert!(!opens_beside(Some(ModifierType::MOD1_MASK)));
+        assert!(!opens_beside(None));
+        // The row press reads the same mask, so a modifier pressed in either
+        // order still means "beside".
+        assert!(opens_beside(Some(ModifierType::SHIFT_MASK | ModifierType::CONTROL_MASK)));
     }
 
     #[test]

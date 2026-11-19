@@ -44,8 +44,21 @@ pub mod quiet {
     /// The sentence under a page that did not open. 5.93 light / 7.93 dark.
     pub const BLANK_HINT: (Rgb, Rgb) = (hex(0x646462), hex(0xA6A6A6));
     /// The outline of a field: the boundary a reader has to find without
-    /// hunting. 3.04:1 on white, 3.41:1 on the dark field's own fill.
-    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x949492), hex(0x6E6E6E));
+    /// hunting. It has to be found on every ground a field sits on, not just
+    /// on its own fill: the old #949492 read 2.39:1 on the scrim and 2.64:1 on
+    /// the light panel, and the dark #6E6E6E read 3.04:1 on the scrim and
+    /// 2.23:1 on a picked chip. #808080 is 3.95:1 on white, 3.43:1 on the
+    /// panel, 3.11:1 on the scrim; #868686 is 4.78:1 on the dark field and
+    /// 4.26:1 on the dark scrim.
+    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x808080), hex(0x868686));
+    /// A control that cannot be pressed: quieter than a live one, still
+    /// legible. Fading the whole chip to 0.4 left 1.69:1 text in light and
+    /// 2.19:1 in dark. 3.22:1 on the light panel, 3.47:1 on a dark chip.
+    pub const DISABLED: (Rgb, Rgb) = (hex(0x858583), hex(0x8E8E8C));
+    /// Danger written as text on a chip rather than painted as a fill. The
+    /// palette's #D25041 is a fill colour and reads 2.69:1 as text on the dark
+    /// chip; #EE8B76 reads 4.65:1 there and 6.11:1 on the hover behind it.
+    pub const DANGER: (Rgb, Rgb) = (hex(0xC0392B), hex(0xEE8B76));
     /// A switch that is off. 3.35:1 on the light wash, 3.94:1 on the dark panel.
     pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x828280), hex(0x787878));
 
@@ -163,6 +176,10 @@ button {{
      the browser's to choose, per class. */
   font-weight: normal;
 }}
+/* The weight belongs to the browser, so it also belongs on the label inside a
+   button: nothing in the chrome — nav, marks, chips, the new-tab row — is set
+   bold, and the headings below re-assert their own weight. */
+button label {{ font-weight: normal; }}
 button:hover {{ background-color: {hover}; }}
 button:active {{ background-color: {wash}; }}
 button.act {{
@@ -195,9 +212,16 @@ button.mark:hover {{ background-color: {hover}; }}
 button.mark:active {{ background-color: {wash}; }}
 button.mark:disabled {{ opacity: 0.35; }}
 /* A control that cannot be pressed must not look pressable: "Show them" at a
-   count of zero was sensitive=false and painted exactly like a live button. */
-.panel button:disabled {{ opacity: 0.4; }}
-.panel button:disabled label {{ color: {faint}; }}
+   count of zero was sensitive=false and painted exactly like a live button.
+   The chip gives up its fill and its label goes quiet, which reads as inert
+   without moving anything by a pixel. Fading the whole chip instead took the
+   text to 1.69:1 in light and 2.19:1 in dark, so the dimming is in the ink.
+   The selectors name `.act` because that is the chip the panel paints, and at
+   equal weight the later `.panel button.act` rules would otherwise win. The
+   drawn marks keep their own dimming from `button.mark:disabled`; nothing here
+   touches opacity, so a disabled mark is still told apart from a live one. */
+.panel button.act:disabled {{ background-color: transparent; }}
+.panel button:disabled label, .panel button.act:disabled label {{ color: {disabledink}; }}
 
 row, flowbox {{ background-color: transparent; }}
 flowboxchild {{ background-color: transparent; padding: 0; }}
@@ -219,8 +243,11 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
    row you are on did nothing. */
 .row:hover, .row.live:hover {{ background-color: {livehover}; }}
 .rowtitle {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {rowfg}; }}
-/* On the label itself, not through a descendant selector. */
-.liveword {{ color: {liveink}; font-weight: bold; }}
+/* On the label itself, not through a descendant selector. The row you are on
+   is marked by its only-just-dark ink against the resting grey, not by weight:
+   the reference's live title is regular, and bold here made it read as a
+   heading heavier than every unselected row beside it. */
+.liveword {{ color: {liveink}; font-weight: normal; }}
 /* A tab that gave its memory back. Still readable — it is a tab you can click,
    not a disabled control — but plainly not the one that is running. */
 .row.asleep .rowtitle {{ color: {faint}; }}
@@ -311,7 +338,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel button.act.quiet {{ background-color: transparent; }}
 .panel button.act.quiet label {{ color: {faint}; }}
 .panel button.act.quiet:hover {{ background-color: {chipbg}; }}
-.panel button.act.quiet:hover label {{ color: {danger}; }}
+.panel button.act.quiet:hover label {{ color: {dangerink}; }}
 .panel button.act.chosen {{ background-color: {ink}; border: none; }}
 .panel button.act.chosen label {{ color: {ground}; font-weight: bold; }}
 .panel switch {{ }}
@@ -382,9 +409,11 @@ scrollbar trough {{ background: transparent; }}
         fieldbg = if p.is_dark() { "#1A1A1A".to_string() } else { "#FFFFFF".to_string() },
         // The edge of the address field is the one boundary a reader has to
         // find without hunting: #B4B4B2 on white was 2.08:1, under the 3:1 a
-        // control's outline wants. #949492 is 3.03:1 on white and 3.00:1 on
-        // the field's own fill; the dark pair is 3.05:1 on the dark ground.
+        // control's outline wants. The pair in `quiet` is measured on every
+        // ground the edge is painted on, including the scrim it sits over.
         fieldborder = quiet::pick(quiet::FIELD_BORDER, p.is_dark()).hex(),
+        disabledink = quiet::pick(quiet::DISABLED, p.is_dark()).hex(),
+        dangerink = quiet::pick(quiet::DANGER, p.is_dark()).hex(),
         scroll = if p.is_dark() { "#3A3A3A".to_string() } else { "#D6D6D4".to_string() },
         scrollhover = if p.is_dark() { "#4A4A4A".to_string() } else { "#C2C2C0".to_string() },
         caps = scale.caps,

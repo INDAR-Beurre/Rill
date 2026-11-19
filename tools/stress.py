@@ -1004,12 +1004,17 @@ class Run:
             time.sleep(1.2)
             inside = bench.must("js !!window.__searchReaderOn")
             self.check("reading mode enters", inside.get("value") == "true", str(inside)[:60])
+            self.check("the browser knows which tab is being read", bench.probe().get("reading") is True, str(bench.probe()))
+            bench.must("js window.__searchReaderScroll")
             way_out = bench.must("js !!document.getElementById('__search_reader_exit')")
             self.check("and carries its own way out", way_out.get("value") == "true", str(way_out)[:60])
             bench.must("key reader")
             time.sleep(1.2)
             back = bench.must("js !!window.__searchReaderOn")
             self.check("and leaves again", back.get("value") == "false", str(back)[:60])
+            self.check("the browser knows reading ended", bench.probe().get("reading") is False, str(bench.probe()))
+            restored = bench.must("js [!!document.querySelector('style[data-search-reader]'), window.scrollY]")
+            self.check("leaving restores the page", restored.get("value") == "false,0", str(restored)[:80])
 
         @self.scenario("the window itself")
         def _window():

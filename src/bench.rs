@@ -68,6 +68,9 @@ pub fn serve(_app: &AppRef) -> std::io::Result<PathBuf> {
     let path = socket_path();
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
+    // The bench is a control surface, not a world-writable socket.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
@@ -475,7 +478,7 @@ fn probe(app: &AppRef) -> String {
         .map(|label| label.to_string())
         .unwrap_or_default();
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{},\"viewWidth\":{},\"viewHeight\":{},\"error\":{},\"errorAction\":\"{}\"}}",
+        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"orphanViews\":{},\"reading\":{},\"width\":{},\"height\":{},\"viewWidth\":{},\"viewHeight\":{},\"error\":{},\"errorAction\":\"{}\"}}",
         active,
         json_escape(&url),
         json_escape(&title),
@@ -495,6 +498,8 @@ fn probe(app: &AppRef) -> String {
         app.state.borrow().bookmarks.len(),
         app.ui.stack.visible_child_name().map(|name| name.to_string()).unwrap_or_default(),
         app.ui.stack.children().len(),
+        app.orphan_views(),
+        app.reading.get(),
         app.ui.window.allocated_width(),
         app.ui.window.allocated_height(),
         app.view(active).map(|v| v.allocated_width()).unwrap_or(0),

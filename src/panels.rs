@@ -402,7 +402,7 @@ impl Panels {
             if which != day {
                 day = which.clone();
                 let head = gtk::Label::new(Some(&day));
-                crate::ui::class(&head, "ptgroup");
+                crate::ui::class(&head, "group");
                 head.set_xalign(0.0);
                 head.set_margin_top(if shown == 0 { 0 } else { 10 });
                 head.set_margin_bottom(4);

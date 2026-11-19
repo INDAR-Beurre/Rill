@@ -419,14 +419,14 @@ class Run:
             time.sleep(3)
             usage = self.ram()
             # 120MB of the browser's own memory is the promise, and a run of
-            # one idle tab measures 62-119MB, so the threshold sits at the top
+            # one idle tab measures 49-119MB, so the threshold sits at the top
             # of the measured range rather than above it. Resident memory is
             # the engine's shared pages as well, and 260MB is what an idle tab
             # honestly costs with them included.
             self.check(
                 "idle one tab",
                 usage["anon_mb"] < 120 and usage["pss_mb"] < 260 and usage["processes"] <= 5,
-                f"{json.dumps(usage)} (one idle tab measures 62-119MB of its own memory)",
+                f"{json.dumps(usage)} (one idle tab measures 49-119MB of its own memory)",
                 {"memory": usage},
             )
             self.one_tab = usage

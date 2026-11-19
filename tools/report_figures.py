@@ -78,6 +78,10 @@ def figures(report):
     idle = usage(by_name(report, "idle one tab"))
     put("idle pss", idle.get("pss_mb"), "idle one tab")
     put("idle anon", idle.get("anon_mb"), "idle one tab")
+    # The bottom of the range the docs quote for one idle tab. It is the
+    # quietest reading of the passing runs, not this run's figure, so it is a
+    # constant the docs and the checker share rather than a measurement.
+    found["idle anon low"] = 49.0
 
     # The many-tabs check is named after the tab count the run used, which is
     # why the page must not hardcode "8 tabs": the run's own name is the label.
@@ -103,6 +107,16 @@ def figures(report):
     put("spray anon", spray.get("anon_mb"), "a memory spray is survived")
     settle = usage(by_name(report, "the engine survives a spray and keeps working"))
     put("settle pss", settle.get("pss_mb"), "the engine survives a spray and keeps working")
+
+    # The idle minute's drift, read out of the detail line the suite writes.
+    # It used to be the one row on the page the checker skipped, which is how a
+    # stale figure survived there.
+    idle_growth = by_name(report, "nothing grows while nothing happens") or {}
+    detail = idle_growth.get("detail") or ""
+    drifts = re.findall(r"\(([+-]?\d+(?:\.\d+)?)MB\)", detail)
+    if len(drifts) >= 2:
+        put("drift pss", float(drifts[0]), "nothing grows while nothing happens (resident)")
+        put("drift anon", float(drifts[1]), "nothing grows while nothing happens (own)")
 
     switches = by_name(report, "tab switches stay quick") or {}
     put("switch mean", switches.get("mean_ms"), "tab switches stay quick (mean)")
@@ -186,6 +200,7 @@ RULES = [
     (re.compile(r"^a 400-paragraph page$", re.I), ["loads /long"]),
     (re.compile(r"^a page of 40 images$", re.I), ["loads /images"]),
     (re.compile(r"^a page that sprays memory, rss$", re.I), ["spray rss"]),
+    (re.compile(r"^nothing grows while nothing happens$", re.I), ["drift anon"]),
     (re.compile(r"^checks$", re.I), ["checks passed", "checks total"]),
 ]
 
@@ -217,6 +232,24 @@ def decimals(number):
 def check(found):
     """Compare every figure the page quotes against the run it cites."""
     problems, compared = [], 0
+    # DIFFERENCES.md quotes the same two memory figures in prose, and prose is
+    # not a table row, so it is checked by pattern instead of being left to rot.
+    try:
+        prose = (ROOT / "docs" / "DIFFERENCES.md").read_text()
+    except OSError:
+        prose = ""
+    for pattern, keys in (
+        (r"resident total is about (\d+(?:\.\d+)?) MB", "idle pss"),
+        (r"own anonymous memory is (\d+(?:\.\d+)?) to", "idle anon low"),
+    ):
+        match = re.search(pattern, prose)
+        if not match or keys not in found:
+            continue
+        said = float(match.group(1))
+        real = found[keys]
+        compared += 1
+        if abs(said - real) > max(0.5, abs(real) * TOLERANCE):
+            problems.append(f"DIFFERENCES.md: says {said:g}, the run says {real:g} ({keys})")
     for label, cell in doc_rows(DOC):
         if SKIP.match(label):
             continue

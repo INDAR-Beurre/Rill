@@ -83,6 +83,9 @@ Things that decide whether you can switch, stated plainly:
   not work.
 - **No multiple windows and no tab dragging between them.** One window, tabs in
   its column.
+- **No reordering tabs by dragging.** A tab sits where it was opened. The row's
+  menu can pin, duplicate or close it, and pinning moves it to the pinned grid,
+  but nothing in the browser moves a tab to a position you choose.
 - **No print dialog.** `Ctrl P` is the page's own.
 
 ## Extensions

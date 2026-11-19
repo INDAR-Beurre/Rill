@@ -7,8 +7,15 @@ council/*/raw*
 *.tmp
 *.log
 
-# nothing else: the screenshots and reports under council/ are the evidence
-# the scores refer to, so they stay in the repository.
+# Only the last two rounds of evidence stay. Each round is fifteen full-window
+# screenshots, and thirty rounds of them was 34 MB of PNGs that no score in the
+# repository refers to any more. The two that remain are the ones the current
+# scores cite.
+council/round-*/
+!council/round-32/
+!council/round-32-dark/
+!council/round-33/
+!council/round-33-dark/
 
 # python bytecode from the tools
 __pycache__/

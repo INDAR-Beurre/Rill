@@ -58,6 +58,51 @@ pub mod quiet {
     }
 }
 
+/// The type scale, in pixels, from the desktop's own font size.
+///
+/// Thirty-five absolute pixel sizes meant a person who had set their desktop
+/// to 12pt got the same 13px tab titles as everyone else. GTK exposes that
+/// setting as `gtk-font-name`; the four stops below are offsets from it, so
+/// the interface follows the desktop instead of ignoring it.
+///
+/// The default desktop size here is 10pt, which GTK renders at 13px, and the
+/// four stops come out 10 / 12 / 13 / 15 — the sizes the design was drawn at.
+/// A larger desktop setting moves all four together.
+#[derive(Debug)]
+pub struct Scale {
+    pub caps: i32,
+    pub small: i32,
+    pub body: i32,
+    pub title: i32,
+}
+
+impl Scale {
+    pub fn from_desktop() -> Scale {
+        use gtk::prelude::GtkSettingsExt;
+        // Reading a setting before GTK is up panics rather than returning
+        // None, and the stylesheet is also built by the unit tests.
+        if !gtk::is_initialized() {
+            return Scale { caps: 10, small: 12, body: 13, title: 15 };
+        }
+        let points: f64 = gtk::Settings::default()
+            .and_then(|s| s.gtk_font_name())
+            .and_then(|name| {
+                name.split_whitespace()
+                    .last()
+                    .and_then(|size| size.parse::<f64>().ok())
+            })
+            .unwrap_or(10.0f64);
+        // Points to CSS pixels at 96dpi, which is what GTK itself uses.
+        let body = (points * 96.0 / 72.0).round() as i32;
+        Scale {
+            caps: (body - 3).max(9),
+            small: (body - 1).max(10),
+            body: body.max(11),
+            title: body + 2,
+        }
+    }
+}
+
 pub fn build(p: &Palette, row_height: i32) -> String {
     // Square window edges. The compositor clips the frame with its own mask
     // before GTK's rounded corner is honoured, so a radius here shows on one
@@ -65,6 +110,8 @@ pub fn build(p: &Palette, row_height: i32) -> String {
     // the surfaces inside the window keep theirs.
     let radius = 0;
     let ground = p.card.hex();
+    let scale = Scale::from_desktop();
+
     format!(
         r#"
 window {{ background-color: {ground}; }}
@@ -75,15 +122,13 @@ decoration {{ box-shadow: none; border-width: 0; margin: 0; padding: 0; backgrou
 headerbar.nobar > box {{ min-height: 0; padding: 0; margin: 0; border: none; }}
 .shell {{ background-color: {ground}; border-radius: {radius}px; }}
 .shell separator, paned separator {{ background-color: {divider}; background-image: none; min-width: 1px; min-height: 1px; border: none; }}
-.shell > separator:hover, paned > separator:hover {{ background-color: {hairline}; }}
+.shell separator:hover, paned separator:hover {{ background-color: {hairline}; }}
 
-/* `frame` is GTK's own class for a GtkFrame, and GTK puts one around every
-   scrolled window. Naming the browser's outer box `frame` painted the whole
-   tab column the colour of the band above the window. */
+/* The band above the window, one strip on each side of the divider. It is
+   deliberately not called `frame`: that is GTK's own class for a GtkFrame, and
+   GTK puts one around every scrolled window, so naming it that painted the
+   whole tab column the band's grey. */
 .desk {{ background-color: {desk}; }}
-/* The window is white with its top-left corner cut back into the band, the
-   way the original's is. A paned separator with a narrow handle paints nothing
-   at all, so the column's edge is drawn on the column. */
 /* A paned separator with a narrow handle paints nothing at all, so the column
    draws its own edge. No radius here: GTK rounds the widget's background but
    not its border, so a rounded column gets a square line drawn through the
@@ -127,7 +172,7 @@ button.act {{
   padding: 5px 11px;
 }}
 button.act:hover {{ background-color: {hairline}; }}
-button.act label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 .panel button.chosen, button.chosen {{ background-color: {ink}; border-color: {ink}; }}
 button.chosen label {{ color: {ground}; font-weight: bold; }}
 combobox button {{
@@ -138,12 +183,12 @@ combobox button {{
   color: {ink};
 }}
 combobox button:hover {{ background-color: {hairline}; }}
-combobox button label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+combobox button label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 combobox arrow {{ color: {muted}; min-width: 10px; min-height: 10px; }}
 menu {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 4px; }}
 menuitem {{ border-radius: 5px; padding: 4px 8px; }}
 menuitem:hover {{ background-color: {hover}; }}
-menuitem label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 entry {{ background-image: none; box-shadow: none; border: none; }}
 button.mark {{ background: none; background-image: none; border: none; box-shadow: none; padding: 4px; border-radius: 6px; min-width: 0; min-height: 0; }}
 button.mark:hover {{ background-color: {hover}; }}
@@ -159,7 +204,7 @@ flowboxchild {{ background-color: transparent; padding: 0; }}
 
 .pin {{ border-radius: 9px; background-color: {tile}; }}
 .pin.live {{ background-color: {pinlive}; }}
-.pinletter {{ font-family: {font}; font-size: 13px; font-weight: normal; color: {pinfg}; }}
+.pinletter {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {pinfg}; }}
 .pin.live .pinletter {{ color: {pinlivefg}; }}
 .pin:hover {{ background-color: {sidehover}; }}
 
@@ -173,7 +218,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
    `.row.live` — at equal specificity the earlier rule won and hovering the
    row you are on did nothing. */
 .row:hover, .row.live:hover {{ background-color: {livehover}; }}
-.rowtitle {{ font-family: {font}; font-size: 13px; font-weight: normal; color: {rowfg}; }}
+.rowtitle {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {rowfg}; }}
 /* On the label itself, not through a descendant selector. */
 .liveword {{ color: {liveink}; font-weight: bold; }}
 /* A tab that gave its memory back. Still readable — it is a tab you can click,
@@ -186,7 +231,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .row.asleep .tileletter {{ color: {faint}; }}
 .row.private .rowtitle {{ color: {muted}; }}
 .tile {{ border-radius: 4px; background-color: {tilebg}; }}
-.tileletter {{ font-family: {font}; font-size: 11px; font-weight: bold; color: {tilefg}; }}
+.tileletter {{ font-family: {font}; font-size: {small}px; font-weight: bold; color: {tilefg}; }}
 .panel switch {{ background-color: {switchoff}; border: none; min-width: 34px; min-height: 20px; border-radius: 10px; }}
 .panel switch:checked {{ background-color: {ink}; }}
 .panel switch slider {{ min-width: 16px; min-height: 16px; border-radius: 8px; margin: 2px; background-color: {knob}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.28); }}
@@ -194,7 +239,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 
 .newtab {{ border-radius: 7px; }}
 .newtab:hover {{ background-color: {hover}; }}
-.newtablabel {{ font-family: {font}; font-size: 13px; font-weight: normal; color: {faint}; }}
+.newtablabel {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {faint}; }}
 .newtab:hover .newtablabel {{ color: {muted}; }}
 
 .helm {{ }}
@@ -203,13 +248,13 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .blank {{ background-color: {ground}; }}
 .fakefield {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 9px; }}
 .fakefield:hover {{ border-color: {faint}; }}
-.fakefieldtext {{ font-family: {font}; font-size: 15px; color: {faint}; }}
-.blanktitle {{ font-family: {font}; font-size: 15px; font-weight: bold; color: {muted}; letter-spacing: -0.01em; }}
-.blankhint {{ font-family: {font}; font-size: 12px; color: {blankhint}; }}
-.erraddress {{ font-family: {mono}; font-size: 11px; color: {emptyfg}; margin-top: 4px; }}
+.fakefieldtext {{ font-family: {font}; font-size: {title}px; color: {faint}; }}
+.blanktitle {{ font-family: {font}; font-size: {title}px; font-weight: bold; color: {muted}; letter-spacing: -0.01em; }}
+.blankhint {{ font-family: {font}; font-size: {small}px; color: {blankhint}; }}
+.erraddress {{ font-family: {mono}; font-size: {small}px; color: {emptyfg}; margin-top: 4px; }}
 .blank button.act {{ background-color: {wash}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 6px 14px; }}
 .blank button.act:hover {{ background-color: {hairline}; }}
-.blank button.act label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+.blank button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 
 
 .scrim {{ background-color: {scrim}; }}
@@ -219,19 +264,19 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
    without a ring GTK draws under the text. */
 .omni entry {{ background: none; background-image: none; border: none; box-shadow: none; padding: 0; }}
 .omni entry:focus {{ border: none; box-shadow: none; }}
-.omnitext {{ font-family: {font}; font-size: 15px; color: {ink}; }}
-.omnisite {{ font-family: {font}; font-size: 12px; color: {muted}; }}
+.omnitext {{ font-family: {font}; font-size: {title}px; color: {ink}; }}
+.omnisite {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .suggest {{ background-color: {fieldbg}; border-radius: 10px; border: 1px solid {fieldborder}; }}
 .suggest .sgrow {{ border-radius: 6px; }}
 .suggest .sgrow:hover {{ background-color: {hover}; }}
 .suggest .sgrow.picked {{ background-color: {wash}; }}
-.suggest .sghead {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {muted}; letter-spacing: 0.06em; }}
+.suggest .sghead {{ font-family: {font}; font-size: {caps}px; font-weight: bold; color: {muted}; letter-spacing: 0.06em; }}
 .suggest .sgrow {{ min-height: 44px; }}
 .suggest .sgrow {{ border-left: 2px solid transparent; }}
 .suggest .sgrow.picked {{ border-left: 2px solid {ink}; border-top-left-radius: 0; border-bottom-left-radius: 0; }}
 /* The bookmarks bar: a row of kept pages, one chip each, quiet until hovered. */
 .bmarkbar {{ background-color: {ground}; border-bottom: 1px solid {divider}; padding-top: 6px; }}
-.bmark {{ font-family: {font}; font-size: 12px; color: {muted}; background-color: transparent;
+.bmark {{ font-family: {font}; font-size: {small}px; color: {muted}; background-color: transparent;
           background-image: none; border: none; box-shadow: none; padding: 1px 8px;
           min-height: 20px; border-radius: 5px; }}
 .bmark:hover {{ background-color: {hover}; color: {ink}; }}
@@ -240,30 +285,29 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel .ptrow {{ border-radius: 7px; }}
 .panel .ptrow:hover {{ background-color: {hover}; }}
 .suggest row:hover {{ background-color: {hover}; }}
-.suggest .sgtitle {{ font-family: {font}; font-size: 13px; color: {ink}; }}
-.suggest .sgurl {{ font-family: {font}; font-size: 11px; color: {muted}; }}
-.suggest .sgkind {{ font-family: {font}; font-size: 11px; color: {faint}; }}
+.suggest .sgtitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
+.suggest .sgurl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.suggest .sgkind {{ font-family: {font}; font-size: {small}px; color: {faint}; }}
 
 /* GTK clips a child's box-shadow behind its parent, so the panel's shadow
    never reaches the page. Its edge has to be the fill itself: the panel is
    the wash in light and the field colour in dark, both a step off the page. */
 .panel {{ background-color: {panelbg}; border-radius: 12px; border: 1px solid {fieldborder}; box-shadow: 0 18px 48px rgba(0,0,0,0.16); }}
-.panel .head {{ font-family: {font}; font-size: 15px; font-weight: bold; color: {ink}; }}
-.panel .sub {{ font-family: {font}; font-size: 11px; color: {muted}; }}
+.panel .head {{ font-family: {font}; font-size: {title}px; font-weight: bold; color: {ink}; }}
+.panel .sub {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel entry {{ background-color: {chipbg}; border-radius: 7px; border: 1px solid {fieldborder}; padding: 6px 10px; }}
-.panel entry text {{ font-family: {font}; font-size: 13px; color: {ink}; }}
+.panel entry text {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
 .panel row {{ border-radius: 7px; padding: 4px 6px; }}
 .panel row:hover {{ background-color: {hover}; }}
-.panel .ptgroup {{ font-family: {font}; font-size: 11px; font-weight: bold; color: {muted}; }}
-.panel .ptitle {{ font-family: {font}; font-size: 13px; color: {ink}; }}
-.panel .purl {{ font-family: {font}; font-size: 11px; color: {muted}; }}
-.keycap {{ font-family: {mono}; font-size: 12px; color: {muted}; background-color: {chipbg}; border-radius: 5px; padding: 2px 6px; }}
+.panel .ptitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
+.panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.keycap {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {chipbg}; border-radius: 5px; padding: 2px 6px; }}
 .panel button.tab {{ background: none; background-image: none; box-shadow: none; border: none; padding: 5px 10px; border-radius: 6px; }}
-.panel button.tab label {{ font-family: {font}; font-size: 12px; color: {muted}; }}
+.panel button.tab label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.tab:checked {{ background-color: {chipbg}; }}
 .panel button.tab:checked label {{ color: {ink}; font-weight: bold; }}
 .panel button.act {{ background-color: {chipbg}; border: none; border-radius: 6px; padding: 5px 10px; }}
-.panel button.act label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+.panel button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 .panel button.act.quiet {{ background-color: transparent; }}
 .panel button.act.quiet label {{ color: {faint}; }}
 .panel button.act.quiet:hover {{ background-color: {chipbg}; }}
@@ -271,20 +315,20 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel button.act.chosen {{ background-color: {ink}; border: none; }}
 .panel button.act.chosen label {{ color: {ground}; font-weight: bold; }}
 .panel switch {{ }}
-.setting {{ font-family: {font}; font-size: 13px; color: {ink}; }}
-.group {{ font-family: {font}; font-size: 10px; font-weight: bold; color: {muted}; letter-spacing: 0.07em; margin-top: 14px; margin-bottom: 2px; }}
-.keyhint {{ font-family: {mono}; font-size: 11px; color: {muted}; background-color: {wash}; border-radius: 5px; padding: 1px 5px; }}
-.settingdesc {{ font-family: {font}; font-size: 11px; color: {muted}; }}
+.setting {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
+.group {{ font-family: {font}; font-size: {caps}px; font-weight: bold; color: {muted}; letter-spacing: 0.07em; margin-top: 14px; margin-bottom: 2px; }}
+.keyhint {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {wash}; border-radius: 5px; padding: 1px 5px; }}
+.settingdesc {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel stack, .panel box {{ background-color: transparent; }}
 .panel scrolledwindow {{ background-color: transparent; }}
-.empty {{ font-family: {font}; font-size: 13px; color: {faint}; }}
+.empty {{ font-family: {font}; font-size: {body}px; color: {faint}; }}
 
 .findbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; }}
 .findbar entry {{ background: none; border: none; box-shadow: none; }}
-.findbar label {{ font-family: {font}; font-size: 11px; color: {muted}; }}
+.findbar label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 
 .dlbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; }}
-.dlbar label {{ font-family: {font}; font-size: 12px; color: {ink}; }}
+.dlbar label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 
 scrollbar {{ background: transparent; }}
 scrollbar slider {{ background-color: {scroll}; border-radius: 6px; min-width: 6px; min-height: 6px; }}
@@ -343,10 +387,41 @@ scrollbar trough {{ background: transparent; }}
         fieldborder = quiet::pick(quiet::FIELD_BORDER, p.is_dark()).hex(),
         scroll = if p.is_dark() { "#3A3A3A".to_string() } else { "#D6D6D4".to_string() },
         scrollhover = if p.is_dark() { "#4A4A4A".to_string() } else { "#C2C2C0".to_string() },
+        caps = scale.caps,
+        small = scale.small,
+        body = scale.body,
+        title = scale.title,
         font = FONT,
         mono = MONO,
         row_height = row_height,
     )
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::Scale;
+
+    #[test]
+    fn the_default_desktop_size_gives_the_sizes_the_design_was_drawn_at() {
+        // No GTK in a unit test, so the fallback is what is measured here.
+        let s = Scale::from_desktop();
+        assert_eq!((s.caps, s.small, s.body, s.title), (10, 12, 13, 15));
+    }
+
+    #[test]
+    fn every_stop_stays_readable_and_in_order() {
+        for points in [8.0f64, 9.0, 10.0, 11.0, 12.0, 14.0, 18.0] {
+            let body = (points * 96.0 / 72.0).round() as i32;
+            let s = Scale {
+                caps: (body - 3).max(9),
+                small: (body - 1).max(10),
+                body: body.max(11),
+                title: body + 2,
+            };
+            assert!(s.caps >= 9, "caps {s:?} too small at {points}pt");
+            assert!(s.caps <= s.small && s.small <= s.body && s.body < s.title);
+        }
+    }
 }
 
 #[cfg(test)]

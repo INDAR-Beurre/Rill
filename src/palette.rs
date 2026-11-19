@@ -120,6 +120,10 @@ impl Palette {
         }
     }
 
+    pub fn desk(&self) -> Rgb {
+        if self.is_dark() { Rgb(0x0A, 0x0A, 0x0A) } else { Rgb(0xEA, 0xEA, 0xE9) }
+    }
+
     /// The column's own ground: the page's white in the Mac build.
     pub fn side_bg(&self) -> Rgb {
         self.card

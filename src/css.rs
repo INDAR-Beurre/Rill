@@ -393,7 +393,7 @@ scrollbar trough {{ background: transparent; }}
         // The strip above the window. The original's runs #EDEDEC at the top
         // to #E6E6E5 at the bottom; one flat value in the middle of that range
         // is the same read at 23px tall.
-        desk = if p.is_dark() { "#0A0A0A".to_string() } else { "#EAEAE9".to_string() },
+        desk = p.desk().hex(),
         switchoff = quiet::pick(quiet::SWITCH_OFF, p.is_dark()).hex(),
         knob = if p.is_dark() { "#EDEDED".to_string() } else { "#FFFFFF".to_string() }, /* 3.77 / 3.85 on the track */
         // A page that failed has one sentence to read, and it used to be the

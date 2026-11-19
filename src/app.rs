@@ -2382,7 +2382,7 @@ impl App {
             }
         }
         surface.flush();
-        cut_top_left(&surface, width, height);
+        cut_top_left(&surface, self.palette.borrow().desk());
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -2805,11 +2805,11 @@ fn draw_shell(
 /// rounds a widget's background but not its border, so the column's hairline
 /// would be drawn straight through the curve. So it is cut here, out of the
 /// finished picture, with the band's colour put back into the sliver.
-fn cut_top_left(surface: &cairo::Surface, width: i32, height: i32) {
+fn cut_top_left(surface: &cairo::Surface, band: crate::palette::Rgb) {
     let r = 14.0;
     let Ok(context) = cairo::Context::new(surface) else { return };
-    // The sliver outside the curve, in the band's own grey.
-    context.set_source_rgb(234.0 / 255.0, 234.0 / 255.0, 233.0 / 255.0);
+    // Match the frame in the current appearance, not a hardcoded light grey.
+    context.set_source_rgb(band.0 as f64 / 255.0, band.1 as f64 / 255.0, band.2 as f64 / 255.0);
     context.set_operator(cairo::Operator::Source);
     context.move_to(0.0, 23.0);
     context.line_to(r, 23.0);
@@ -2817,8 +2817,6 @@ fn cut_top_left(surface: &cairo::Surface, width: i32, height: i32) {
     context.line_to(0.0, 23.0);
     context.close_path();
     let _ = context.fill();
-    let _ = width;
-    let _ = height;
 }
 
 fn draw_at(context: &cairo::Context, widget: &impl IsA<gtk::Widget>, ancestor: &impl IsA<gtk::Widget>) {

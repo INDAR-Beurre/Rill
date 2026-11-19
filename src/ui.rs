@@ -681,10 +681,10 @@ pub fn pin_tile(letter: char, live: bool, _palette: Palette) -> PinWidget {
 pub fn scrim_colour(palette: &Palette) -> (f64, f64, f64, f64) {
     if palette.is_dark() {
         let c = palette.ground;
-        (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0, 0.86)
+        (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0, 0.78)
     } else {
-        let c = palette.card;
-        (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0, 0.88)
+        // A light scrim is a black veil, not white paint over the page.
+        (0.0, 0.0, 0.0, 0.28)
     }
 }
 

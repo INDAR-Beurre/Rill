@@ -339,6 +339,8 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel button.act.quiet {{ background-color: transparent; }}
 .panel button.act.quiet label {{ color: {faint}; }}
 .panel button.act.quiet:hover {{ background-color: {chipbg}; }}
+.panel button.act.danger label {{ color: {dangerink}; }}
+.panel button.act.danger {{ border-color: {dangerink}; }}
 .panel button.act.quiet:hover label {{ color: {dangerink}; }}
 .panel button.act.chosen {{ background-color: {ink}; border: none; }}
 .panel button.act.chosen label {{ color: {ground}; font-weight: bold; }}

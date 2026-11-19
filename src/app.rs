@@ -2930,16 +2930,6 @@ fn paint_one(context: &cairo::Context, widget: &gtk::Widget, offset: (i32, i32))
         let _status = context.restore();
         return;
     }
-    // A viewport's draw routine paints its complete child, including rows
-    // below its own allocation. ScrolledWindow remains layout-only so the
-    // viewport gets an explicit clip in the capture walk.
-    if widget.is::<gtk::Viewport>() {
-        context.rectangle(0.0, 0.0, width, height);
-        context.clip();
-        let _ = widget.draw(context);
-        let _status = context.restore();
-        return;
-    }
     // A leaf is drawn with its own style context pushed onto the stack.
     // `gtk_widget_draw` alone resolves the colour against whatever context is
     // current, so a tab title on the active row came out the resting grey

@@ -74,7 +74,9 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
 
 fn settings() -> Settings {
     let settings = Settings::new();
-    settings.set_enable_developer_extras(true);
+    // The inspector is a debugging tool, and a page can tell it is there. It
+    // is off unless the person asked for it with SEARCH_DEVTOOLS=1.
+    settings.set_enable_developer_extras(std::env::var_os("SEARCH_DEVTOOLS").is_some());
     settings.set_enable_smooth_scrolling(true);
     settings.set_enable_webgl(true);
     settings.set_enable_media_stream(true);
@@ -275,33 +277,66 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         let weak = app.weak();
         view.connect_web_process_terminated(move |_, reason| {
             if let Some(app) = weak.upgrade() {
-                use webkit2gtk::WebProcessTerminationReason;
-                // A crash the user did not ask for is the engine's, and the
-                // browser explains it in its own voice instead of leaving a
-                // grey frame.
-                if !matches!(reason, WebProcessTerminationReason::Crashed) {
-                    return;
-                }
+                // Every reason leaves a dead view behind, so every reason gets
+                // a sentence. Only `Crashed` used to be answered, which left a
+                // tab the engine had killed for using too much memory sitting
+                // grey with nothing said and no way to try again.
+                let sentence = reason_for_termination(reason);
                 let uri = app.state.borrow().tab(tab).map(|t| t.url.clone()).unwrap_or_default();
                 app.mark_failed(tab);
-                app.show_error(tab, "The page stopped responding.", &uri);
+                app.show_error(tab, &sentence, &uri);
             }
         });
     }
     // The page asks, the browser answers: a fresh address syncs what is hidden
     // there before the first frame, and anything that wants a window of its
     // own becomes a tab.
-    // A navigation decision is a place to look, not to touch: the style sheet
-    // is set when the load starts instead.
-    view.connect_decide_policy(|_, decision, kind| {
-        if kind != webkit2gtk::PolicyDecisionType::NavigationAction {
-            return false;
-        }
-        decision
-            .downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
-            .and_then(|policy| policy.navigation_action())
-            .is_some()
-            && false
+    // A navigation to a scheme the browser does not handle is refused here
+    // rather than handed to the desktop. `mailto:` and `tel:` belong to
+    // whatever the person has registered, and a page that can fire one on
+    // load can open a mail composer with a body it wrote. Nothing outside the
+    // list below is navigated to at all.
+    {
+        let weak = app.weak();
+        view.connect_decide_policy(move |_, decision, kind| {
+            if kind != webkit2gtk::PolicyDecisionType::NavigationAction {
+                return false;
+            }
+            let Some(policy) = decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
+            else {
+                return false;
+            };
+            let Some(mut action) = policy.navigation_action() else { return false };
+            let Some(uri) = action.request().and_then(|request| request.uri()) else {
+                return false;
+            };
+            let main_frame = action.frame_name().map(|name| name == "_main").unwrap_or(true);
+            if scheme_is_allowed(&uri, !main_frame) {
+                return false;
+            }
+            // Only the page the address bar is showing gets an explanation. A
+            // subframe that tries a custom scheme is that frame's business.
+            if main_frame {
+                if let Some(app) = weak.upgrade() {
+                    app.mark_failed(tab);
+                    app.show_error(
+                        tab,
+                        "That address is not a web page, so this browser did not open it.",
+                        &uri,
+                    );
+                }
+            }
+            decision.ignore();
+            true
+        });
+    }
+    // The page does not get the camera, the microphone or the position by
+    // asking. WebKit's own prompt is a stock GTK dialog with no relationship to
+    // this window. Denial leaves the page and the reading flow intact.
+    view.connect_permission_request(|_, request| {
+        use webkit2gtk::PermissionRequestExt;
+        request.deny();
+        true
     });
     // window.open: a tab, never a pop-up. The page asks for a window, the
     // browser answers with a tab and gives WebKit no view of its own.
@@ -310,6 +345,10 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         view.connect_create(move |_, action| {
             if let Some(app) = weak.upgrade() {
                 if let Some(uri) = action.request().and_then(|request| request.uri().map(|u| u.to_string())) {
+                    if !scheme_is_allowed(&uri, false) {
+                        app.flash_toast("This link asks for an address the browser cannot open.");
+                        return None;
+                    }
                     // A window asked for by a private tab is a private tab.
                     // It used to become an ordinary one, and be written down.
                     let private = app
@@ -476,7 +515,7 @@ pub fn downloads_dir() -> PathBuf {
         .map(PathBuf::from)
         .filter(|dir| !dir.as_os_str().is_empty())
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join("Downloads")))
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from(".").join("Downloads"))
 }
 
 /// A filename a server suggested, reduced to something that can only name a
@@ -521,7 +560,7 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let path = Path::new(name);
     let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
     let extension = path.extension().map(|s| s.to_string_lossy().to_string());
-    for n in 1..1000 {
+    for n in 1..10000 {
         let file = match &extension {
             Some(ext) => format!("{stem} ({n}).{ext}"),
             None => format!("{stem} ({n})"),
@@ -531,7 +570,37 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
             return candidate;
         }
     }
-    dir.join(name)
+    dir.join(format!("download-{}", std::process::id()))
+}
+
+/// The schemes this browser will navigate to.
+///
+/// Everything else — `mailto:`, `tel:`, `file:` from a remote page, and any
+/// custom scheme a desktop application registered — is refused. A browser that
+/// hands those to `xdg-open` lets a page launch a program on the person's
+/// machine, which is not a thing a page should be able to do by being loaded.
+/// `file:` is allowed only when the address bar asked for it, which is handled
+/// by the caller: a local file the person opened is a page like any other.
+pub fn scheme_is_allowed(uri: &str, user_entered: bool) -> bool {
+    let lower = uri.trim().to_ascii_lowercase();
+    (user_entered && lower.starts_with("file://"))
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("about:")
+        || lower.starts_with("data:")
+        || lower.starts_with("blob:")
+}
+
+/// What the engine says when it stops a page's process, in the browser's words.
+fn reason_for_termination(reason: webkit2gtk::WebProcessTerminationReason) -> String {
+    use webkit2gtk::WebProcessTerminationReason as Reason;
+    match reason {
+        Reason::Crashed => "The page stopped responding.".to_string(),
+        Reason::ExceededMemoryLimit => {
+            "The page used more memory than the system would give it, so it was stopped.".to_string()
+        }
+        _ => "The page was stopped by the engine.".to_string(),
+    }
 }
 
 /// The sentence a status code is answered with, in the words a person would
@@ -642,7 +711,7 @@ mod tests {
 
 #[cfg(test)]
 mod filename_tests {
-    use super::safe_filename;
+    use super::{safe_filename, scheme_is_allowed, unique_path};
 
     /// A download starts without a prompt, so the server's suggested name is
     /// the only thing standing between a page and the person's home directory.
@@ -691,5 +760,26 @@ mod filename_tests {
     fn a_silly_length_is_cut() {
         let long = format!("{}.txt", "x".repeat(500));
         assert!(safe_filename(&long).chars().count() <= 200);
+    }
+
+    #[test]
+    fn a_remote_page_cannot_read_a_local_file() {
+        assert!(scheme_is_allowed("file:///tmp/a.html", true));
+        assert!(!scheme_is_allowed("file:///tmp/a.html", false));
+        assert!(scheme_is_allowed(" https://example.com ", false));
+        assert!(!scheme_is_allowed("mailto:person@example.com", false));
+        assert!(!scheme_is_allowed("javascript:alert(1)", true));
+    }
+
+    #[test]
+    fn a_download_name_is_never_reused() {
+        let root = std::env::temp_dir().join(format!("search-name-{}", std::process::id()));
+        let first = unique_path(&root, "report.pdf");
+        std::fs::write(&first, b"one").unwrap();
+        let second = unique_path(&root, "report.pdf");
+        assert_ne!(first, second);
+        assert_eq!(second, root.join("report (1).pdf"));
+        std::fs::remove_file(first).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 }

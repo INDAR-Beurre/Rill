@@ -203,6 +203,27 @@ class Run:
         self.start_browser(fresh=False)
         return self.bench
 
+    def restart_with_prefs(self, path, prefs):
+        """Quit, write prefs while nothing is running to overwrite them, start."""
+        if self.bench:
+            try:
+                self.bench.command("quit")
+            except Exception:
+                pass
+        if self.browser and self.browser.poll() is None:
+            try:
+                self.browser.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.browser.terminate()
+                try:
+                    self.browser.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.browser.kill()
+        self.bench = None
+        path.write_text(json.dumps(prefs))
+        self.start_browser(fresh=False)
+        return self.bench
+
     def stop(self):
         if self.bench:
             try:
@@ -612,6 +633,13 @@ class Run:
                 f"other tab loaded in {took:.1f}s, busy tab still here: {busy in titles}",
             )
 
+            # The reading to come back to is this one, taken with the same six
+            # tabs open that are still open after the spray closes. Twice one
+            # idle tab was the wrong bar: it compared a browser carrying six
+            # live tabs, two of them pages that never finish, with a browser
+            # carrying one, and sat within 1% of the measured 420-426 MB on
+            # every run, so it failed on noise and not on a leak.
+            before_spray = self.ram()
             spray = bench.open(self.url("/js-leak"))
             time.sleep(3)
             usage = self.ram()
@@ -624,12 +652,11 @@ class Run:
             # browser that gave the sprayed tab back should be within a factor
             # of two of one idle tab, not within a rounding error of its own
             # worst moment.
-            idle = getattr(self, "one_tab", None) or {"pss_mb": 213.0}
             self.check("the engine survives a spray and keeps working",
-                       bench.probe().get("ok") and after["pss_mb"] < 2 * idle["pss_mb"],
+                       bench.probe().get("ok") and after["pss_mb"] < before_spray["pss_mb"] + 60,
                        f"{usage['pss_mb']}MB -> {after['pss_mb']}MB, still answering "
-                       f"(one idle tab is {idle['pss_mb']}MB)",
-                       {"memory": after})
+                       f"(was {before_spray['pss_mb']}MB before the spray)",
+                       {"memory": after, "before": before_spray})
             # This scenario opens seven tabs, several of them pages that never
             # finish. A later check about an idle browser must not measure
             # those, so they go now.
@@ -937,21 +964,33 @@ class Run:
             # The restart replaces the socket; every later scenario reads the
             # same name, so it has to point at the new browser.
             nonlocal bench
-            # Tabs come back, and they come back asleep: a restored tab should
-            # cost nothing until it is clicked.
+            # Tabs come back, and the ones in the background come back asleep:
+            # a restored tab should cost nothing until it is clicked. The tab
+            # in front is woken at start, because the window has to show a
+            # page and not the blank pane, so the check needs a second tab.
+            front = bench.open(self.url("/titled?t=Front"))
+            bench.wait_loaded(front, timeout=20)
             tab = bench.open(self.url("/titled?t=Remembered"))
             bench.wait_loaded(tab, timeout=20)
             bench.must("key bookmark")     # something to notice afterwards
+            bench.must(f"select {front}")
             bench.must("session")          # the session write is debounced; ask now
             bench = self.restart()
+            time.sleep(1)
             probe = bench.probe()
             urls = [t["url"] for t in probe["tabs"]]
             self.check("a fresh start brings the tabs back",
                        any("/titled?t=Remembered" in url for url in urls),
                        f"{len(urls)} tabs")
-            asleep = [t["asleep"] for t in probe["tabs"] if "/titled?t=Remembered" in t["url"]]
+            asleep = [t["asleep"] for t in probe["tabs"]
+                      if "/titled?t=Remembered" in t["url"] and t["id"] != probe["active"]]
             self.check("and they come back asleep",
                        bool(asleep) and all(asleep), f"asleep {asleep}")
+            shown = [t for t in probe["tabs"] if t["id"] == probe["active"]]
+            self.check("except the one in front, which shows its page",
+                       bool(shown) and not shown[0]["asleep"]
+                       and probe.get("visibleChild") == f"tab-{probe['active']}",
+                       f"active {probe['active']} -> {probe.get('visibleChild')}")
 
         @self.scenario("reading mode")
         def _reading():
@@ -986,6 +1025,16 @@ class Run:
             self.check("the window survives resizing",
                        abs(width - 1200) <= 40 and abs(height - 780) <= 40,
                        f"{width}x{height}, asked for 1200x780")
+            # The window taking the size is not the page taking it. A resize
+            # that reaches the frame but not the view leaves the page painted
+            # at the old size inside a bigger window, which the window's own
+            # numbers cannot show.
+            bench.settle()
+            probe = bench.probe()
+            vw, vh = probe.get("viewWidth", 0), probe.get("viewHeight", 0)
+            self.check("the page fills the resized window",
+                       vw > width - 300 and abs(vh - (height - 23)) <= 40,
+                       f"view {vw}x{vh} inside {width}x{height}")
             before = bench.probe()["maximised"]
             bench.must("key maximise")
             time.sleep(0.4)
@@ -1082,6 +1131,68 @@ class Run:
             probe = bench.probe()
             self.check("keeping a page shows the bar", probe.get("bookmarkBar") is True, str(probe.get("bookmarkBar")))
             self.check("with one chip in it", probe.get("bookmarkCount") == 1, str(probe.get("bookmarkCount")))
+
+        @self.scenario("a tab that is not looked at lets go of its page")
+        def _sleep():
+            # The sleep timer had never been exercised by any run: the docs
+            # described it and every check measured tabs that were all awake.
+            # A minute is the shortest setting, and the tick is a minute, so
+            # this waits long enough for one tick to find an old tab.
+            # The restart below replaces the socket, and every later scenario
+            # reads the same name, so it has to point at the new browser.
+            nonlocal bench
+            prefs_dir = self.tmp / "config" / "search"
+            prefs_dir.mkdir(parents=True, exist_ok=True)
+            prefs_path = prefs_dir / "prefs.json"
+            try:
+                prefs = json.loads(prefs_path.read_text()) if prefs_path.exists() else {}
+            except (OSError, ValueError):
+                prefs = {}
+            prefs["memory_saver"] = True
+            prefs["sleep_minutes"] = 0
+            # Written while the browser is down, not before quitting it: the
+            # window's delete handler saves its own prefs on close, which put
+            # the old values back over this file and the tab never slept.
+            self.restart_with_prefs(prefs_path, prefs)
+            bench = self.bench
+
+            bench.must("closeall")
+            keep = bench.open(self.url("/plain"))
+            away = bench.open(self.url("/long"))
+            bench.must(f"select {keep}")
+            time.sleep(3)
+            before = self.ram()
+            awake = [t for t in bench.probe()["tabs"] if t["id"] == away]
+            self.check("the tab starts awake", bool(awake) and not awake[0]["asleep"],
+                       f"tab {away} asleep={awake[0]['asleep'] if awake else 'gone'}")
+            # The tick is two minutes. Zero minutes means "anything not looked
+            # at", so the first tick after the tabs are opened is the one that
+            # matters; 130s covers it wherever in the cycle the restart landed.
+            time.sleep(130)
+            probe = bench.probe()
+            slept = [t for t in probe["tabs"] if t["id"] == away]
+            after = self.ram()
+            self.check("a tab left alone falls asleep",
+                       bool(slept) and slept[0]["asleep"] and not slept[0]["hasView"],
+                       f"asleep={slept[0]['asleep'] if slept else 'gone'}, "
+                       f"hasView={slept[0]['hasView'] if slept else 'gone'}")
+            self.check("sleeping gives memory back",
+                       after["anon_mb"] < before["anon_mb"],
+                       f"{before['anon_mb']}MB -> {after['anon_mb']}MB own")
+            # And it wakes up when it is asked for, which is the other half of
+            # the promise: a slept tab is still a tab you can click.
+            bench.must(f"select {away}")
+            time.sleep(2.5)
+            woke = [t for t in bench.probe()["tabs"] if t["id"] == away]
+            self.check("a slept tab wakes when it is selected",
+                       bool(woke) and not woke[0]["asleep"] and woke[0]["hasView"],
+                       f"asleep={woke[0]['asleep'] if woke else 'gone'}")
+            # Leave the setting as it was found, so later scenarios measure the
+            # browser the rest of the suite describes.
+            prefs["memory_saver"] = False
+            prefs["sleep_minutes"] = 30
+            self.restart_with_prefs(prefs_path, prefs)
+            bench = self.bench
 
         @self.scenario("stopped talking about the page that is gone")
         def _no_stale():

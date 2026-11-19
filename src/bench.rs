@@ -475,7 +475,7 @@ fn probe(app: &AppRef) -> String {
         .map(|label| label.to_string())
         .unwrap_or_default();
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{},\"error\":{},\"errorAction\":\"{}\"}}",
+        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"width\":{},\"height\":{},\"viewWidth\":{},\"viewHeight\":{},\"error\":{},\"errorAction\":\"{}\"}}",
         active,
         json_escape(&url),
         json_escape(&title),
@@ -497,6 +497,8 @@ fn probe(app: &AppRef) -> String {
         app.ui.stack.children().len(),
         app.ui.window.allocated_width(),
         app.ui.window.allocated_height(),
+        app.view(active).map(|v| v.allocated_width()).unwrap_or(0),
+        app.view(active).map(|v| v.allocated_height()).unwrap_or(0),
         error,
         json_escape(&error_action)
     )

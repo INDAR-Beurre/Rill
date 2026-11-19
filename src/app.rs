@@ -335,7 +335,12 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     app.wire();
     app.apply_style();
     app.render();
-    app.start_memory_timer();
+    // A restored session comes back asleep, which is right for every tab but
+    // the one in front: nothing made its view, so the window opened on the
+    // blank page while the column highlighted a tab with an address. Waking
+    // the active tab here is what a click on it would have done.
+    let active = app.active_id();
+    app.select(active);
     app
 }
 
@@ -441,6 +446,15 @@ impl App {
     }
 
     pub fn new_tab(&self, url: Option<&str>, private: bool, background: bool) -> TabId {
+        // Every tab is a web process. A page that opens tabs in a loop, or a
+        // person holding Ctrl+T, would otherwise keep forking until the system
+        // kills something — and what it kills is not necessarily this browser.
+        // Forty is far past what the column can show and far short of what the
+        // machine can carry.
+        if self.state.borrow().tabs.len() >= TAB_LIMIT {
+            self.flash_error("That is as many tabs as this browser will hold");
+            return self.active_id();
+        }
         let id = {
             let mut state = self.state.borrow_mut();
             let id = state.next_id;
@@ -1118,6 +1132,24 @@ impl App {
         if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
             tab.loading = loading;
         }
+        let view = {
+            let state = self.state.borrow();
+            state.tab(id).and_then(|tab| tab.row.as_ref().map(|row| (row.event.clone(), row.icon.clone(), tab.private, tab.letter())))
+        };
+        if let Some((row, icon, private, letter)) = view {
+            let context = row.style_context();
+            if loading { context.add_class("loading"); } else { context.remove_class("loading"); }
+            // Update the existing row. Rebuilding it here would restart the
+            // spinner and recreate its close button on every engine signal.
+            if !private {
+                let surface = self.icons.borrow().get(&id).cloned();
+                if loading {
+                    crate::ui::loading_mark(&icon, self.palette.borrow().muted);
+                } else {
+                    crate::ui::mark(&icon, letter, surface.as_ref(), 16);
+                }
+            }
+        }
     }
 
     pub fn sync_nav(&self, id: TabId, view: &webkit2gtk::WebView) {
@@ -1171,12 +1203,20 @@ impl App {
         });
     }
 
+    /// A remote document must not turn the address bar into a file reader.
+    /// `file` is for an address the person entered or a link on a local page,
+    /// never a redirect or link supplied by a remote page.
     pub fn navigate(&self, id: TabId, target: &str) {
         if target.is_empty() {
             return;
         }
         let url = resolve(self, target);
         if url.is_empty() {
+            return;
+        }
+        if !crate::web::scheme_is_allowed(&url, true) {
+            self.show_error(id, "This browser only opens local pages or web addresses.", &url);
+            self.render();
             return;
         }
         self.ensure_view(id);
@@ -1381,9 +1421,17 @@ impl App {
 
     /// The tab-sleeping promise, kept: a minute's tick drops the pages of tabs
     /// that have not been looked at for as long as the setting says.
+    /// Started from `install_self`, not from `start`: `self.weak()` reads the
+    /// thread-local that `install_self` fills, so a timer armed inside `start`
+    /// held an empty weak reference and broke on its first tick. Tabs never
+    /// slept, and nothing said so.
     pub fn start_memory_timer(&self) {
         let weak = self.weak();
-        glib::timeout_add_seconds_local(60, move || {
+        // Two minutes, not one. A setting of N minutes means "not looked at
+        // for N minutes", and a one-minute tick makes that N+1 at best and 2N
+        // at worst. Two minutes keeps the promise inside half a minute of what
+        // the setting says, at the default half hour, for no measurable cost.
+        glib::timeout_add_seconds_local(120, move || {
             let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
             app.sleep_others();
             glib::ControlFlow::Continue
@@ -2495,8 +2543,14 @@ impl App {
     }
 }
 
+/// The most tabs one window will hold. See `new_tab`.
+pub const TAB_LIMIT: usize = 40;
+
 pub fn install_self(app: &AppRef) {
     CURRENT.with(|c| *c.borrow_mut() = Some(app.clone()));
+    // Only now can `weak()` see the app, so this is where the minute's tick is
+    // armed. See `start_memory_timer`.
+    app.start_memory_timer();
 }
 
 /// Draw a widget where it stands inside an ancestor.

@@ -506,6 +506,35 @@ pub struct TabState {
     pub private: bool,
 }
 
+pub fn loading_mark(icon: &gtk::Box, colour: crate::palette::Rgb) {
+    for child in icon.children() {
+        icon.remove(&child);
+    }
+    let area = gtk::DrawingArea::new();
+    area.set_size_request(14, 14);
+    area.set_valign(gtk::Align::Center);
+    let angle = std::rc::Rc::new(std::cell::Cell::new(0.0_f64));
+    let for_draw = angle.clone();
+    area.connect_draw(move |_, cr| {
+        let a = for_draw.get();
+        cr.set_source_rgb(colour.0 as f64 / 255.0, colour.1 as f64 / 255.0, colour.2 as f64 / 255.0);
+        cr.set_line_width(1.6);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.arc(7.0, 7.0, 5.0, a, a + std::f64::consts::TAU * 0.7);
+        let _ = cr.stroke();
+        crate::gtkx::inh(false)
+    });
+    let weak = area.downgrade();
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
+        let Some(area) = weak.upgrade() else { return gtk::glib::ControlFlow::Break };
+        angle.set((angle.get() + 0.35) % std::f64::consts::TAU);
+        area.queue_draw();
+        gtk::glib::ControlFlow::Continue
+    });
+    icon.pack_start(&area, false, false, 0);
+    area.show();
+}
+
 pub fn tab_row(
     title: &str,
     palette: Palette,
@@ -555,37 +584,8 @@ pub fn tab_row(
     // Loading is an arc that turns, in the same 18px box the letter lives in,
     // so a row does not change width when a page starts or stops loading.
     let spinner = if state.loading && !state.private {
-        let area = gtk::DrawingArea::new();
-        area.set_size_request(14, 14);
-        area.set_valign(gtk::Align::Center);
-        let colour = palette.muted;
-        let angle = std::rc::Rc::new(std::cell::Cell::new(0.0_f64));
-        let for_draw = angle.clone();
-        area.connect_draw(move |_, cr| {
-            let a = for_draw.get();
-            cr.set_source_rgb(colour.0 as f64 / 255.0, colour.1 as f64 / 255.0, colour.2 as f64 / 255.0);
-            cr.set_line_width(1.6);
-            cr.set_line_cap(cairo::LineCap::Round);
-            cr.arc(7.0, 7.0, 5.0, a, a + std::f64::consts::TAU * 0.7);
-            let _ = cr.stroke();
-            crate::gtkx::inh(false)
-        });
-        {
-            let weak = area.downgrade();
-            let angle = angle.clone();
-            gtk::glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
-                let Some(area) = weak.upgrade() else { return gtk::glib::ControlFlow::Break };
-                angle.set((angle.get() + 0.35) % std::f64::consts::TAU);
-                area.queue_draw();
-                gtk::glib::ControlFlow::Continue
-            });
-        }
-        for child in icon.children() {
-            icon.remove(&child);
-        }
-        icon.pack_start(&area, false, false, 0);
-        area.show();
-        Some(area)
+        loading_mark(&icon, palette.muted);
+        Some(())
     } else {
         None
     };

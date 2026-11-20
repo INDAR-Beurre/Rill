@@ -5,14 +5,23 @@ set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD="$ROOT/build"
 APPDIR="$BUILD/AppDir"
-OUT="$BUILD/Search-1.0.0-x86_64.AppImage"
+OUT="$BUILD/Search-1.0.1-x86_64.AppImage"
 TOOL="${APPIMAGETOOL:-$BUILD/tools/appimagetool-x86_64.AppImage}"
+HOOK="$BUILD/tools/libapprun_hooks-x86_64.so"
 [[ $(uname -m) == x86_64 ]] || { echo 'This script builds x86_64 only.' >&2; exit 2; }
 mkdir -p "$BUILD/tools"
 if [[ ! -x "$TOOL" ]]; then
   curl -fL --retry 2 --connect-timeout 15 -o "$TOOL" \
     https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
   chmod +x "$TOOL"
+fi
+if [[ ! -s "$HOOK" ]]; then
+  curl -fL --retry 2 --connect-timeout 15 -o "$HOOK" \
+    https://github.com/AppImageCrafters/AppRun/releases/download/v2.0.0/libapprun_hooks-Release-x86_64.so
+fi
+if [[ ! -s "$BUILD/tools/AppRun-LICENSE" ]]; then
+  curl -fL --retry 2 --connect-timeout 15 -o "$BUILD/tools/AppRun-LICENSE" \
+    https://raw.githubusercontent.com/AppImageCrafters/AppRun/master/LICENSE
 fi
 if ! command -v patchelf >/dev/null; then
   PATCHER="$BUILD/tools/patchelf/bin/patchelf"
@@ -35,6 +44,8 @@ cp packaging/search.png "$APPDIR/.DirIcon"
 install -Dm644 packaging/search.png "$APPDIR/usr/share/icons/hicolor/512x512/apps/search.png"
 install -Dm644 packaging/search.metainfo.xml "$APPDIR/usr/share/metainfo/search.metainfo.xml"
 install -Dm755 packaging/AppRun "$APPDIR/AppRun"
+cp "$HOOK" "$APPDIR/usr/lib/libapprun_hooks.so"
+cp "$BUILD/tools/AppRun-LICENSE" "$APPDIR/usr/share/AppRun-LICENSE"
 mkdir -p "$APPDIR/usr/share/search"
 cp -a assets/reader.js "$APPDIR/usr/share/search/reader.js"
 cp -a assets/shield "$APPDIR/usr/share/search/shield"
@@ -104,7 +115,7 @@ cat > "$APPDIR/etc/fonts/fonts.conf" <<'EOF'
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
   <dir>/usr/share/fonts</dir>
-  <dir prefix="xdg">fonts</dir>
+  <cachedir>/var/cache/fontconfig</cachedir>
   <cachedir prefix="xdg">fontconfig</cachedir>
   <include ignore_missing="yes">/etc/fonts/conf.d</include>
 </fontconfig>

@@ -31,6 +31,18 @@
 - The suite asserts the numbers this documentation quotes, so a threshold that
   drifts and a page that drifts cannot disagree without a red run.
 
+## 1.0.1
+
+- AppImage now loads WebKit's own packaged process helpers and fonts. The
+  original package silently used `/usr/lib` helpers and left a real page stuck
+  loading; AppRun's MIT-licensed relocation hooks fix that boundary.
+- Error pages paint the browser's readable reason, address and action instead
+  of being hidden by the WebView snapshot beneath them.
+- Downloads can be searched, with progress refreshes keeping the search.
+- Extensions can be installed through a native file/folder chooser.
+- Ctrl Left and Ctrl Right switch panels; Tab moves focus into the open panel.
+- The packaged candidate passed 123 Rust tests and 101 browser checks.
+
 ## 1.0.0
 
 The first Linux build.

@@ -215,6 +215,26 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             let adjustment = panels.scroll.vadjustment();
             ok(&format!(",\"card\":[{},{}],\"body\":[{},{}],\"scroll\":[{},{}],\"value\":{},\"upper\":{},\"page\":{}", panels.card.allocated_width(), panels.card.allocated_height(), panels.body.allocated_width(), panels.body.allocated_height(), panels.scroll.allocated_width(), panels.scroll.allocated_height(), adjustment.value(), adjustment.upper(), adjustment.page_size()))
         }
+        "panelkey" => {
+            let intent = match argument.trim() {
+                "left" => Intent::PanelLeft,
+                "right" => Intent::PanelRight,
+                "tab" => Intent::PanelFocus,
+                _ => return fail("panelkey needs left, right or tab"),
+            };
+            crate::keys::apply(app, intent);
+            ok(",\"handled\":true")
+        }
+        "panelfocus" => {
+            let card = &app.panels.borrow().card;
+            let focus = app.ui.window.focused_widget();
+            let inside = focus.as_ref().is_some_and(|widget| card.is_ancestor(widget) || card == widget);
+            ok(&format!(",\"inside\":{inside},\"focus\":\"{}\",\"focusParent\":\"{}\"", focus.as_ref().map(|widget| widget.type_().name()).unwrap_or_default(), focus.and_then(|widget| widget.parent()).map(|widget| widget.type_().name()).unwrap_or_default()))
+        }
+        "errorgeometry" => {
+            let ui = &app.ui;
+            ok(&format!(",\"page\":[{},{}],\"holder\":[{},{}],\"stackSize\":[{},{}],\"reason\":\"{}\",\"address\":\"{}\",\"visible\":{},\"mapped\":{},\"stack\":\"{}\"", ui.errorpage.allocated_width(), ui.errorpage.allocated_height(), ui.error_holder.allocated_width(), ui.error_holder.allocated_height(), ui.stack.allocated_width(), ui.stack.allocated_height(), json_escape(&ui.error_reason.text()), json_escape(&ui.error_address.text()), ui.errorpage.get_visible(), ui.errorpage.is_mapped(), ui.stack.visible_child_name().unwrap_or_default()))
+        }
         "debug" => debug(app),
         "settle" => settle(app),
         "tabs" => tabs(app),

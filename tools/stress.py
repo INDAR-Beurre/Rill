@@ -917,12 +917,59 @@ class Run:
                     inside = self.downloads.resolve() in Path(path).resolve().parents
                 except OSError:
                     inside = False
+            geometry = bench.must("settle")
+            geometry = bench.must("errorgeometry")
+            self.check("a failed page has readable text and real geometry",
+                       geometry["holder"][0] > 500 and geometry["holder"][1] > 400
+                       and bool(geometry["reason"]) and bool(geometry["address"]), geometry)
+            failed_shot = ROOT / "build" / "error-state.png"
+            bench.must(f"shot {failed_shot}")
+            self.check("a failed page capture is not blank",
+                       failed_shot.exists() and failed_shot.stat().st_size > 28000,
+                       f"{failed_shot.stat().st_size if failed_shot.exists() else 0} bytes")
+            bench.open(self.url("/plain?after-error=1"))
+            bench.wait_loaded(timeout=20)
             self.check(
                 "the file landed",
                 path.exists() and path.stat().st_size > 0 and inside,
                 f"{path} {path.stat().st_size if path.exists() else 0} bytes, "
                 f"inside the suite's folder: {inside}",
             )
+            bench.must("key downloads")
+            bench.settle()
+            name = downloads[0]["name"] if downloads else "download"
+            bench.must(f"filter {name}")
+            shown = bench.must("paneltext").get("text") or ""
+            self.check("downloads can be searched",
+                       name in shown and "No download matches" not in shown, shown[:160])
+            bench.must("filter no-such-download")
+            missing = bench.must("paneltext").get("text") or ""
+            self.check("a download search has an empty answer",
+                       "No download matches what you typed" in missing, missing[:160])
+            bench.must("filter ")
+            self.check("clearing a download search keeps its rows",
+                       name in (bench.must("paneltext").get("text") or ""), name)
+            bench.must("key closepanel")
+            bench.must("key downloads")
+            bench.settle()
+            right = bench.must("panelkey right")
+            bench.wait_for(lambda probe: probe["panel"] == "Extensions", timeout=3)
+            self.check("arrow keys move between panel tabs",
+                       right.get("handled") is True and bench.probe()["panel"] == "Extensions", right)
+            bench.must("panelkey left")
+            bench.wait_for(lambda probe: probe["panel"] == "Downloads", timeout=3)
+            self.check("arrow keys move back to Downloads",
+                       bench.probe()["panel"] == "Downloads", bench.probe()["panel"])
+            bench.must("panelkey tab")
+            time.sleep(0.15)
+            self.check("Tab moves into the panel",
+                       bench.must("panelfocus").get("inside") is True, bench.must("panelfocus"))
+            bench.must("key closepanel")
+            bench.must("key extensions")
+            self.check("extensions can be chosen with a native picker",
+                       "Choose a file or folder" in (bench.must("paneltext").get("text") or ""),
+                       bench.must("paneltext").get("text", "")[-400:])
+            bench.must("key closepanel")
 
         @self.scenario("the blocker runs before the page")
         def _blocker():

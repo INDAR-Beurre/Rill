@@ -30,7 +30,7 @@ impl PanelKind {
             PanelKind::Shortcuts => "Shortcuts",
         }
     }
-    fn all() -> [PanelKind; 6] {
+    pub fn all() -> [PanelKind; 6] {
         [
             PanelKind::Bookmarks,
             PanelKind::History,
@@ -55,6 +55,7 @@ pub struct Panels {
     pub nav: gtk::Box,
     pub body: gtk::Box,
     pub scroll: gtk::ScrolledWindow,
+    pub close_button: gtk::Button,
     pub open: Option<PanelKind>,
     /// The card width the body was last measured at. A resize changes the width
     /// a wrapping line needs, so the height has to be asked again.
@@ -85,6 +86,8 @@ impl Panels {
         title.set_hexpand(true);
         head.add(&title);
         let close = crate::icons::button(crate::icons::Icon::Close, 13, palette.muted, "door");
+        close.set_can_focus(true);
+        close.set_focus_on_click(false);
         close.set_valign(gtk::Align::Center);
         crate::ui::class(&close, "panelclose");
         head.add(&close);
@@ -115,6 +118,8 @@ impl Panels {
         // The ScrolledWindow owns clipping. Giving every direct child the
         // entire body height blanks filter fields and leaves rows half-clipped.
         card.add(&scroll);
+        // Panel arrow keys and focus go through keys::apply, like every other
+        // browser action. No second event router belongs on this card.
 
         layer.add(&scrim);
         layer.add(&card);
@@ -131,6 +136,7 @@ impl Panels {
             nav,
             body,
             scroll,
+            close_button: close.clone(),
             open: None,
             fitted_width: std::cell::Cell::new(0),
         };
@@ -172,10 +178,7 @@ impl Panels {
         let field = match kind {
             PanelKind::Bookmarks => self.build_bookmarks(app),
             PanelKind::History => self.build_history(app),
-            PanelKind::Downloads => {
-                self.build_downloads(app);
-                None
-            }
+            PanelKind::Downloads => self.build_downloads(app),
             PanelKind::Extensions => {
                 self.build_extensions(app);
                 None
@@ -205,6 +208,16 @@ impl Panels {
         if field.is_none() {
             self.card.grab_focus();
         }
+        glib::timeout_add_local_once(std::time::Duration::from_millis(30), {
+            let card = self.card.clone();
+            move || {
+                if let Some(app) = crate::app::current() {
+                    if app.panels.borrow().open.is_some() {
+                        card.grab_focus();
+                    }
+                }
+            }
+        });
         field
     }
 
@@ -532,18 +545,32 @@ impl Panels {
         Some(filter)
     }
 
-    fn build_downloads(&self, app: &AppRef) {
-        self.clear_empty_or_list(app);
+    fn build_downloads(&self, app: &AppRef) -> Option<gtk::Entry> {
+        self.clear_empty_or_list(app)
     }
 
-    fn clear_empty_or_list(&self, app: &AppRef) {
+    fn clear_empty_or_list(&self, app: &AppRef) -> Option<gtk::Entry> {
         self.clear_body();
         let downloads = app.state.borrow().downloads.clone();
         if downloads.is_empty() {
             self.body.add(&self.empty_state("Files you download land here and in your Downloads folder."));
+            let open = gtk::Button::with_label("Open Downloads folder");
+            crate::ui::class(&open, "act");
+            open.set_halign(gtk::Align::Center);
+            open.set_can_focus(true);
+            open.connect_clicked(|_| {
+                let _ = std::process::Command::new("xdg-open").arg(crate::web::downloads_dir()).spawn();
+            });
+            self.body.add(&open);
             self.body.show_all();
-            return;
+            return None;
         }
+        let filter = self.filter_field("Search downloads", |text| {
+            if let Some(app) = crate::app::current() {
+                app.filter_panel(PanelKind::Downloads, text);
+            }
+        });
+        self.body.add(&filter);
         let where_to = gtk::Label::new(Some(&format!(
             "Saved in {}",
             crate::web::downloads_dir().to_string_lossy()
@@ -555,7 +582,9 @@ impl Panels {
         self.body.add(&where_to);
 
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        for download in downloads {
+        let mut shown = 0;
+        for download in downloads.into_iter().filter(|download| self.matches(&format!("{} {}", download.name, download.path))) {
+            shown += 1;
             let sub = download_subtitle(&download);
             let remove_path = download.path.clone();
             // "Open" only when there is a file to open: a button that does
@@ -585,8 +614,12 @@ impl Panels {
             }))));
             list.add(&row);
         }
+        if shown == 0 {
+            list.add(&self.empty_state("No download matches what you typed."));
+        }
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
+        Some(filter)
     }
 
     /// Extensions, and the truth about them.
@@ -680,23 +713,39 @@ impl Panels {
         let app_field = app.weak();
         field.connect_activate(move |field| {
             let Some(app) = app_field.upgrade() else { return };
-            let path = std::path::PathBuf::from(field.text().to_string());
-            match crate::extensions::install(&path) {
-                Ok(entry) => {
-                    let message = if entry.runs {
-                        format!("{} installed", entry.name)
-                    } else {
-                        format!("{} installed, but {}", entry.name, entry.why_not.replace('\n', " "))
-                    };
-                    app.rebuild_every_view();
-                    app.flash_toast(&message);
-                    app.toggle_panel_switch(PanelKind::Extensions);
-                    app.toggle_panel_switch(PanelKind::Extensions);
-                }
-                Err(why) => app.flash_toast(&format!("Could not install: {why}")),
-            }
+            install_extension_path(&app, &std::path::PathBuf::from(field.text().to_string()));
         });
         list.add(&field);
+
+        let choose = gtk::Button::with_label("Choose a file or folder…");
+        crate::ui::class(&choose, "act");
+        choose.set_margin_bottom(8);
+        choose.set_tooltip_text(Some("Install a .crx, .xpi or an unpacked extension folder"));
+        let app_choose = app.weak();
+        choose.connect_clicked(move |_| {
+            let Some(app) = app_choose.upgrade() else { return };
+            let dialog = gtk::FileChooserNative::new(
+                Some("Install an extension"),
+                Some(&app.ui.window),
+                gtk::FileChooserAction::Open,
+                Some("Install"),
+                Some("Cancel"),
+            );
+            dialog.set_select_multiple(false);
+            let app_native = app.weak();
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept {
+                    if let Some(app) = app_native.upgrade() {
+                        if let Some(path) = dialog.filename() {
+                            install_extension_path(&app, &path);
+                        }
+                    }
+                }
+                dialog.destroy();
+            });
+            dialog.show();
+        });
+        list.add(&choose);
 
         let note = gtk::Label::new(Some(
             "Choose a .crx, .xpi, or an unpacked folder above. This engine supports content scripts and styles on the sites an extension requests, not the WebExtensions background-page API. Unsupported parts are shown as not running, never silently ignored.",
@@ -949,7 +998,7 @@ impl Panels {
         for (_, key, what, ..) in crate::keys::SHEET {
             let group = match *what {
                 "New tab" | "Private tab" | "Close tab" | "Reopen the last closed tab" | "Next tab" | "Previous tab" | "Jump to a tab" => "TABS",
-                "Back" | "Forward" | "Reload" | "Reload without the cache" | "Reading mode" | "Keep this page" | "Find in this page" | "Find the next match" | "Find the previous match" | "Copy the address" | "See the source" | "Full screen" | "Hide something" | "Show what you hid" => "PAGE",
+                "Back" | "Forward" | "Reload" | "Reload past the cache" | "Reading mode (again to leave)" | "Keep this page" | "Find in the page" | "Next match" | "Previous match" | "Copy the address" | "The page's own source" | "Full screen" | "Hide something on this site" | "Show what is hidden here" => "PAGE",
                 "History" | "Downloads" | "Bookmarks" | "Settings" | "This list" | "The field" => "BROWSER",
                 _ => section,
             };
@@ -1100,14 +1149,14 @@ impl Panels {
         let button = gtk::Button::with_label(action);
         crate::ui::class(&button, "act");
         button.set_valign(gtk::Align::Center);
-        crate::ui::pack(&hbox, &button, false);
-
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        crate::ui::pack(&actions, &button, false);
         if let Some((label, run_second)) = second {
             let other = gtk::Button::with_label(label);
             crate::ui::class(&other, "act quiet");
             other.set_valign(gtk::Align::Center);
             other.set_tooltip_text(Some(label));
-            crate::ui::pack(&hbox, &other, false);
+            crate::ui::pack(&actions, &other, false);
             let app_weak = app.weak();
             other.connect_clicked(move |_| {
                 if let Some(app) = app_weak.upgrade() {
@@ -1115,6 +1164,7 @@ impl Panels {
                 }
             });
         }
+        crate::ui::pack(&hbox, &actions, false);
 
         row.add(&hbox);
 
@@ -1153,6 +1203,33 @@ impl Panels {
             });
         }
         row
+    }
+}
+
+/// Refresh the list without throwing away a search typed into Downloads.
+pub fn refresh_downloads(app: &AppRef) {
+    if app.panels.borrow().open.as_ref() != Some(&PanelKind::Downloads) {
+        return;
+    }
+    let text = app.panels.borrow().filter.borrow().clone();
+    app.filter_panel(PanelKind::Downloads, &text);
+}
+
+/// Install a local extension from a typed path or a native chooser.
+/// The chooser must never start navigation or overwrite the current page.
+fn install_extension_path(app: &AppRef, path: &std::path::Path) {
+    match crate::extensions::install(path) {
+        Ok(entry) => {
+            let message = if entry.runs {
+                format!("{} installed", entry.name)
+            } else {
+                format!("{} installed, but {}", entry.name, entry.why_not.replace('\n', " "))
+            };
+            app.rebuild_every_view();
+            app.flash_toast(&message);
+            app.toggle_panel_switch(PanelKind::Extensions);
+        }
+        Err(why) => app.flash_toast(&format!("Could not install: {why}")),
     }
 }
 

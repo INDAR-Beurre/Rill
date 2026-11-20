@@ -130,11 +130,11 @@ search-linux/
 An x86_64 / AMD64 AppImage bundles Search, WebKitGTK, its process helpers and the GTK runtime. No installation, root access or bundled Chromium.
 
 ```sh
-chmod +x Search-1.0.0-x86_64.AppImage
-./Search-1.0.0-x86_64.AppImage
+chmod +x Search-1.0.1-x86_64.AppImage
+./Search-1.0.1-x86_64.AppImage
 ```
 
-The current artifact passed **92/92** packaged-browser checks. It was built with glibc 2.44; older distributions need a build on an older glibc. This is not a 32-bit i686 build. See [AppImage instructions and verification](packaging/README.md).
+The current artifact passed **101/101** packaged-browser checks. It was built with glibc 2.44; older distributions need a build on an older glibc. This is not a 32-bit i686 build. See [AppImage instructions and verification](packaging/README.md).
 
 ## Build and run
 
@@ -173,7 +173,7 @@ EOF
 xdg-mime default search.desktop x-scheme-handler/https
 ```
 
-There is no AppImage, Flatpak or installer yet: one binary plus one desktop file.
+There is no Flatpak or native installer yet. For a source build, use one binary plus one desktop file.
 
 </details>
 
@@ -191,7 +191,7 @@ python3 tools/report_figures.py --check
 
 The stress suite drives real browser behavior: many tabs, hostile pages, redirects, stalled loads, downloads, privacy, reading mode, keyboard actions, panels, scrolling and memory pressure. It writes `build/stress-report.json` and exits non-zero on failure.
 
-Latest verified candidate: **123 Rust tests and 92/92 browser checks**. Screenshots above come from the same candidate's light and dark evidence runs.
+Latest verified candidate: **123 Rust tests and 101/101 browser checks**. Screenshots above come from the corresponding light and dark evidence runs.
 
 ## Memory, honestly
 

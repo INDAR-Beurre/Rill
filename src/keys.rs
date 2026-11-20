@@ -45,6 +45,9 @@ pub enum Intent {
     Escape,
     ViewSource,
     FullScreen,
+    PanelLeft,
+    PanelRight,
+    PanelFocus,
 }
 
 pub struct Key {
@@ -92,6 +95,8 @@ impl Key {
 
         if self.ctrl {
             let intent = match (name, self.shift) {
+                ("left", false) => Intent::PanelLeft,
+                ("right", false) => Intent::PanelRight,
                 ("l", _) => Intent::Omni,
                 ("t", false) => Intent::NewTab,
                 ("t", true) => Intent::ReopenClosed,
@@ -144,6 +149,9 @@ impl Key {
 
         if self.alt || (self.ctrl && name != "f5") {
             return Intent::Nothing;
+        }
+        if !self.ctrl && !self.alt && name == "tab" {
+            return Intent::PanelFocus;
         }
         match name {
             "escape" => Intent::Escape,
@@ -212,6 +220,9 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     // Escape has five jobs and the panel has to own all of them: whatever the
     // browser drew, else a page that is still arriving.
     ("escape", "Escape", "Close the field, find, a panel or reader, else stop the page", "escape", false, false, false),
+    ("panelleft", "Ctrl Left", "Previous panel", "left", true, false, false),
+    ("panelright", "Ctrl Right", "Next panel", "right", true, false, false),
+    ("panelfocus", "Tab", "Focus the panel", "tab", false, false, false),
 ];
 
 /// The intent a bench verb stands for, through the same fold the keyboard uses.
@@ -295,6 +306,9 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::CopyAddress => app.copy_address(),
         Intent::ViewSource => app.view_source(),
         Intent::FullScreen => app.toggle_fullscreen(),
+        Intent::PanelLeft => app.panel_arrow(false),
+        Intent::PanelRight => app.panel_arrow(true),
+        Intent::PanelFocus => app.panel_focus(),
     }
 }
 
@@ -310,6 +324,9 @@ pub fn taken(app: &AppRef, intent: Intent) -> bool {
                 || app.panels.borrow().open.is_some()
                 || app.reading.get()
                 || app.state.borrow().tab(app.state.borrow().active).is_some_and(|t| t.loading)
+        }
+        Intent::PanelLeft | Intent::PanelRight | Intent::PanelFocus => {
+            app.panels.borrow().open.is_some()
         }
         _ => true,
     }
@@ -413,7 +430,10 @@ mod sheet_tests {
             | Intent::CopyAddress
             | Intent::Escape
             | Intent::ViewSource
-            | Intent::FullScreen => true,
+            | Intent::FullScreen
+            | Intent::PanelLeft
+            | Intent::PanelRight
+            | Intent::PanelFocus => true,
         }
     }
 
@@ -462,6 +482,9 @@ mod sheet_tests {
             Intent::Escape,
             Intent::ViewSource,
             Intent::FullScreen,
+            Intent::PanelLeft,
+            Intent::PanelRight,
+            Intent::PanelFocus,
         ];
         for wanted in all {
             if !must_be_advertised(wanted) {

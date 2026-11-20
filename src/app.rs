@@ -1734,6 +1734,26 @@ impl App {
         self.open_panel(kind);
     }
 
+    pub fn panel_arrow(&self, forwards: bool) {
+        let current = self.panels.borrow().open.clone();
+        let Some(current) = current.as_ref().and_then(|kind| PanelKind::all().iter().position(|candidate| candidate == kind)) else { return };
+        let all = PanelKind::all();
+        let next = if forwards { (current + 1) % all.len() } else { (current + all.len() - 1) % all.len() };
+        self.open_panel(all[next].clone());
+    }
+
+    pub fn panel_focus(&self) {
+        let card = self.panels.borrow().card.clone();
+        card.grab_focus();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(10), move || {
+            if !card.child_focus(gtk::DirectionType::TabForward) {
+                if let Some(app) = current() {
+                    app.panels.borrow().close_button.grab_focus();
+                }
+            }
+        });
+    }
+
     pub fn close_panels(&self) {
         self.panels.borrow_mut().close(&self.ui);
     }
@@ -2182,6 +2202,9 @@ impl App {
         // told it is visible before it can be the visible child.
         self.ui.errorpage.show_all();
         self.ui.stack.set_visible_child_name("error");
+        self.ui.window.check_resize();
+        self.ui.overlay.check_resize();
+        self.ui.error_holder.queue_resize();
     }
 
     /// The engine says the load ended; only a load that did not fail takes the
@@ -2305,14 +2328,18 @@ impl App {
             .overlay
             .translate_coordinates(&self.ui.window, 0, 0)
             .unwrap_or((0, 0));
-        let page = match self.view(self.active_id()) {
-            Some(view) => {
-                let surface = self.page_snapshot(&view);
-                let origin = view.translate_coordinates(&self.ui.overlay, 0, 0).unwrap_or((0, 0));
-                surface.map(|surface| (surface, origin.0, origin.1, view.allocated_width(), view.allocated_height()))
-            }
-            None => None,
-        };
+            let page = if self.ui.stack.visible_child_name().as_deref() == Some("error") {
+                None
+            } else {
+                match self.view(self.active_id()) {
+                    Some(view) => {
+                        let surface = self.page_snapshot(&view);
+                        let origin = view.translate_coordinates(&self.ui.overlay, 0, 0).unwrap_or((0, 0));
+                        surface.map(|surface| (surface, origin.0, origin.1, view.allocated_width(), view.allocated_height()))
+                    }
+                    None => None,
+                }
+            };
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)
             .map_err(|error| error.to_string())?;
         {
@@ -2364,6 +2391,12 @@ impl App {
                 let _ = context.paint();
                 context.set_operator(cairo::Operator::Over);
                 let _ = context.restore();
+            }
+
+            // A failed page is not the WebView behind it. Draw the browser's
+            // own error child explicitly, once, after the page composite.
+            if self.ui.stack.visible_child_name().as_deref() == Some("error") {
+                draw_at(&context, &self.ui.error_holder, &self.ui.overlay);
             }
 
             // 2b. the scrim, painted rather than drawn. Its widget is a

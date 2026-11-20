@@ -499,7 +499,7 @@ fn install_context(app: &AppRef, context: &WebContext) {
                 }
                 drop(state);
                 if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
-                    app.open_panel(crate::panels::PanelKind::Downloads);
+                    crate::panels::refresh_downloads(&app);
                 }
             });
         }
@@ -519,7 +519,7 @@ fn install_context(app: &AppRef, context: &WebContext) {
                     crate::store::Records::save_downloads(&state.downloads);
                 }
                 if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
-                    app.open_panel(crate::panels::PanelKind::Downloads);
+                    crate::panels::refresh_downloads(&app);
                 }
             }
         });
@@ -538,13 +538,13 @@ fn install_context(app: &AppRef, context: &WebContext) {
                     }
                     app.flash_error("That download failed");
                     if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
-                        app.open_panel(crate::panels::PanelKind::Downloads);
+                        crate::panels::refresh_downloads(&app);
                     }
                 }
             });
         }
         if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
-            app.open_panel(crate::panels::PanelKind::Downloads);
+            crate::panels::refresh_downloads(&app);
         }
     });
 }

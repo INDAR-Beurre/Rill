@@ -27,7 +27,7 @@ One idle tab, three processes: the frame, a page, a network.
 
 | what | measured | result in the report |
 |---|---|---|
-| one idle tab | 159 MB resident, 69 MB own | `idle one tab` |
+| one idle tab | 159 MB total PSS, 69 MB own | `idle one tab` |
 | 20 tabs | 505 MB resident, 394 MB own | `20 tabs open` |
 | per tab | +17.3 MB resident | `20 tabs open` |
 | the difference | the shared GTK and WebKit libraries, counted once per process | |
@@ -39,11 +39,18 @@ that the range was 62.0 to 118.7 MB. A single number would be a claim about a
 machine and a page, not about the browser, so treat 49 to 119 MB as the honest
 range and the row above as that run's point in it.
 
-The measure is `Pss_Anon` summed over the process tree: anonymous memory, each
-shared page divided by the number of processes mapping it. It is the browser's
-own allocations and its pages' heaps. It is not the whole cost: the same run
-reads 159.3 MB of total proportional set size, of which 9.9 MB is shared file
-backing, and 289.8 MB of RSS. Both are printed in the report beside it.
+The requested target is about 100 MB total PSS. This sample does not meet it.
+The suite records `target_pss_mb: 100` and `target_met: false` alongside its
+regression thresholds. Anonymous PSS is a diagnostic figure, not a substitute
+for total memory.
+
+The own-memory measure is `Pss_Anon` summed over the browser's dedicated
+process group: anonymous memory, each shared page divided by the number of
+processes mapping it. Group membership includes WebKit helpers that are
+reparented during startup and would be missed by a parent/child walk. It is
+not the whole cost: the same run reads 159.3 MB of total proportional set size,
+of which 9.9 MB is shared file backing, and 289.8 MB of RSS. All are printed
+in the report beside it.
 
 The `20 tabs` row is the check's own name: the suite opens twenty more tabs, so
 the window held 22 when it measured, which is what the check's detail line

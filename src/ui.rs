@@ -145,7 +145,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let pins_holder = widget_box(gtk::Orientation::Vertical, 0);
     pins_holder.set_margin_start(10);
     pins_holder.set_margin_end(10);
-    pins_holder.set_margin_top(24);
+    pins_holder.set_margin_top(12);
     let pins = gtk::Grid::new();
     pins.set_column_spacing(3);
     pins.set_row_spacing(4);

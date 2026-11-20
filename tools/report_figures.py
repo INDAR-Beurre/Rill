@@ -350,8 +350,8 @@ def main(argv):
         panel_worst = float(worst("panels open and close"))
         updates = [
             (ROOT / "docs" / "DIFFERENCES.md", r"proportional resident memory(?:\s+was)?\s+\d+(?:\.\d+)? MB", f"proportional resident memory was {idle['pss_mb']:.1f} MB"),
-            (ROOT / "docs" / "LIMITS.md", r"one idle tab \| \d+ MB resident, \d+ MB own", f"one idle tab | {idle['pss_mb']:.0f} MB resident, {idle['anon_mb']:.0f} MB own"),
-            (ROOT / "docs" / "LIMITS.md", r"20 tabs \| \d+ MB resident, \d+ MB own", f"20 tabs | {many['pss_mb']:.0f} MB resident, {many['anon_mb']:.0f} MB own"),
+            (ROOT / "docs" / "LIMITS.md", r"one idle tab \| \d+ MB (?:resident|total PSS), \d+ MB own", f"one idle tab | {idle['pss_mb']:.0f} MB total PSS, {idle['anon_mb']:.0f} MB own"),
+            (ROOT / "docs" / "LIMITS.md", r"20 tabs \| \d+ MB (?:resident|total PSS), \d+ MB own", f"20 tabs | {many['pss_mb']:.0f} MB total PSS, {many['anon_mb']:.0f} MB own"),
             (ROOT / "docs" / "LIMITS.md", r"per tab \| \+\d+(?:\.\d+)? MB resident", f"per tab | +{(many['pss_mb']-idle['pss_mb'])/20:.1f} MB resident"),
             (ROOT / "docs" / "LIMITS.md", r"\d+(?:\.\d+)? MB of total proportional set size", f"{idle['pss_mb']:.1f} MB of total proportional set size"),
             (ROOT / "docs" / "LIMITS.md", r"\d+(?:\.\d+)? MB of RSS", f"{idle['rss_mb']:.1f} MB of RSS"),

@@ -85,6 +85,7 @@ impl Panels {
         head.add(&title);
         let close = crate::icons::button(crate::icons::Icon::Close, 13, palette.muted, "door");
         close.set_valign(gtk::Align::Center);
+        crate::ui::class(&close, "panelclose");
         head.add(&close);
         card.add(&head);
 

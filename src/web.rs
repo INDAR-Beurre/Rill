@@ -67,17 +67,23 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
         if said.trim() != "off" {
             return;
         }
-        // The manager is shared, so the message has no sender. Query the
-        // views that carry reading state instead of guessing the active tab.
+        // A shared manager cannot identify its sender. Treat this untrusted
+        // page message only as a request to probe current reader state. Never
+        // clear membership from the message alone: page JavaScript can send it.
         let ids: Vec<_> = app.reading_tabs.borrow().iter().copied().collect();
         for id in ids {
             let Some(view) = app.view(id) else {
                 app.reading_tabs.borrow_mut().remove(&id);
                 continue;
             };
+            let uri = view.uri().map(|value| value.to_string());
             let app = app.clone();
             crate::js::run(&view, "!!window.__searchReaderOn", move |value| {
                 if value.as_deref() != Ok("false") { return; }
+                let same_document = app.view(id)
+                    .and_then(|view| view.uri())
+                    .map(|value| value.to_string()) == uri;
+                if !same_document { return; }
                 app.reading_tabs.borrow_mut().remove(&id);
                 if app.active_id() == id { app.reading.set(false); }
             });

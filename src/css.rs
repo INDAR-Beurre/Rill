@@ -330,21 +330,22 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel .ptitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
 .panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .keycap {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {chipbg}; border-radius: 5px; padding: 2px 6px; }}
-.panel button.tab {{ background: none; background-image: none; box-shadow: none; border: none; padding: 5px 10px; border-radius: 6px; }}
+.panel button.tab {{ background: none; background-image: none; box-shadow: none; border: none; padding: 5px 10px; border-radius: 6px; min-height: 32px; }}
 .panel button.tab label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.tab:checked {{ background-color: {chipbg}; }}
 .panel button.tab:checked label {{ color: {ink}; font-weight: bold; }}
-.panel button.act {{ background-color: {chipbg}; border-radius: 6px; padding: 5px 10px; }}
+.panel button.act {{ background-color: {chipbg}; border-radius: 6px; padding: 5px 10px; min-height: 32px; }}
+.panel button.panelclose {{ min-width: 32px; min-height: 32px; }}
 .panel button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 .panel button.act.quiet {{ background-color: transparent; }}
 .panel button.act.quiet label {{ color: {faint}; }}
 .panel button.act.quiet:hover {{ background-color: {chipbg}; }}
 .panel button.act.danger label {{ color: {dangerink}; }}
 .panel button.act.danger {{ border-color: {dangerink}; }}
-.panel button.act.quiet:hover label {{ color: {dangerink}; }}
+.panel button.act.danger:hover label {{ color: {dangerink}; }}
 .panel button.act.chosen {{ background-color: {ink}; border: none; }}
 .panel button.act.chosen label {{ color: {ground}; font-weight: bold; }}
-.panel switch {{ }}
+.panel switch {{ min-width: 44px; min-height: 28px; }}
 .setting {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
 .group {{ font-family: {font}; font-size: {caps}px; font-weight: bold; color: {muted}; letter-spacing: 0.07em; margin-top: 14px; margin-bottom: 2px; }}
 .keyhint {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {wash}; border-radius: 5px; padding: 1px 5px; }}

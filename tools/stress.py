@@ -33,7 +33,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 from bench import Bench, BenchError  # noqa: E402
 
-BINARY = ROOT / "target/release/search"
+BINARY = Path(os.environ.get("SEARCH_BINARY", str(ROOT / "target/release/search")))
 REPORT = ROOT / "build/stress-report.json"
 PORT = 0  # chosen at start: a stale server on a fixed port has fooled this before
 

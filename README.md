@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/MIT-license-a5b4fc?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Linux-Wayland%20%2F%20X11-818cf8?style=flat-square&logo=linux&logoColor=white)](#build-and-run)
 
-[Explore the browser](#the-browser) · [Build it](#build-and-run) · [Architecture](#architecture) · [Testing](#testing)
+[Explore the browser](#the-browser) · [Run the AppImage](#appimage) · [Build it](#build-and-run) · [Architecture](#architecture) · [Testing](#testing)
 
 </div>
 
@@ -124,6 +124,17 @@ search-linux/
 ├── reference/          Original-browser visual references
 └── council/            Verified review rounds and evidence
 ```
+
+## AppImage
+
+An x86_64 / AMD64 AppImage bundles Search, WebKitGTK, its process helpers and the GTK runtime. No installation, root access or bundled Chromium.
+
+```sh
+chmod +x Search-1.0.0-x86_64.AppImage
+./Search-1.0.0-x86_64.AppImage
+```
+
+The current artifact passed **92/92** packaged-browser checks. It was built with glibc 2.44; older distributions need a build on an older glibc. This is not a 32-bit i686 build. See [AppImage instructions and verification](packaging/README.md).
 
 ## Build and run
 

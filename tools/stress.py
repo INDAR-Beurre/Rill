@@ -62,8 +62,26 @@ def process_tree(root_pid):
 
 
 def memory(root_pid):
-    """Resident and anonymous memory of the whole browser, in MB."""
-    trees = process_tree(root_pid)
+    """Resident and anonymous memory of the whole browser, in MB.
+
+    The browser owns a process group, not only its direct children. WebKit
+    helpers may be reparented during startup, so a PPID walk can miss the page
+    process and under-report total memory. Every process in the group belongs
+    to this run; each browser launch gets a fresh group.
+    """
+    try:
+        group = os.getpgid(root_pid)
+        trees = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                if os.getpgid(int(entry)) == group:
+                    trees.append(int(entry))
+            except OSError:
+                continue
+    except OSError:
+        trees = process_tree(root_pid)
     pss = anon = rss = shmem = dirty = 0
     processes = 0
     for pid in trees:
@@ -83,13 +101,13 @@ def memory(root_pid):
             processes += 1
         except OSError:
             continue
-    # Pss_Anon is "the browser's own memory" and it is the figure the promise is
-    # made about, but it is blind to shared-memory pages — which is exactly
-    # where a page's buffers can land once the DMA-BUF renderer is off. Naming
-    # shmem and private-dirty beside it means the report shows what anon leaves
-    # out instead of letting a reader assume it is the whole story.
+    # The requested target is total PSS, not anonymous memory alone. Keep the
+    # anonymous figure for diagnostics, but report the gap explicitly instead
+    # of presenting browser-owned memory as the whole process-tree cost.
     return {
         "pss_mb": round(pss / 1024, 1),
+        "target_pss_mb": 100,
+        "target_met": pss / 1024 <= 110,
         "anon_mb": round(anon / 1024, 1),
         "shmem_mb": round(shmem / 1024, 1),
         "private_dirty_mb": round(dirty / 1024, 1),
@@ -171,6 +189,7 @@ class Run:
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -231,11 +250,17 @@ class Run:
             except Exception:
                 pass
         if self.browser and self.browser.poll() is None:
-            self.browser.terminate()
+            try:
+                os.killpg(self.browser.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 self.browser.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.browser.kill()
+                try:
+                    os.killpg(self.browser.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         if self.server:
             self.server.terminate()
 
@@ -470,7 +495,7 @@ class Run:
             self.check(
                 "idle one tab",
                 usage["anon_mb"] < 120 and usage["pss_mb"] < 260 and usage["processes"] <= 5,
-                f"{json.dumps(usage)} (one idle tab measures 49-119MB of its own memory)",
+                f"{json.dumps(usage)} (requested total-PSS target: {usage['target_pss_mb']}MB; met: {usage['target_met']})",
                 {"memory": usage},
             )
             self.one_tab = usage

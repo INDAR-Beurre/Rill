@@ -1,147 +1,153 @@
-# Search
+<div align="center">
 
-A small, fast, quiet web browser for Linux: a column of tabs and the page. No
-toolbar, no start page, no account, no sidebar of suggestions.
+![Search for Linux: the page is the product](docs/hero.svg)
 
-![Search, with its tabs down the left and a page taking the rest of the window](docs/screenshot.png)
+### A small, quiet WebKit browser for Linux.
 
-Search was made for macOS by [Office Commun](https://officecommun.com) and is
-open source at [driceroland/Search](https://github.com/driceroland/Search).
-This is a Linux build of the same idea, written from scratch in Rust against
-the web engine your desktop already ships, WebKitGTK, so there is no second
-copy of Chromium to download, update and keep in memory.
+**Vertical tabs · Rust shell · Shared WebKit engine · Local-first**
 
-* about 2.8 MB of binary, stripped. `Cargo.toml` sets `strip = true`, and
-  `stat -c %s target/release/search` prints the size of the build in front of you
-* three processes with a tab open, as in Safari: the frame, a page, a network.
-  The last run that passed every check measured **210.5 MB proportional resident memory, of which
-  91.7 MB was this browser's own** (`Pss_Anon` summed over the tree); the rest is
-  the shared GTK and WebKit libraries the desktop already has, plus 9.9 MB of
-  shared file backing. Across runs on this machine the browser's own share has
-  ranged from 49 to 119 MB. Both figures move with the page and with the host.
-  Turn on Settings → *Use less memory* and the same tab measured 62 to 66 MB of
-  its own memory across four runs taken before two of those knobs became
-  unconditional. The suite fails a run where one
-  idle tab takes more than 120 MB of the browser's own memory, more than 260 MB
-  resident, or more than five processes.
-* every page runs in WebKit's own process
+[![Rust](https://img.shields.io/badge/Rust-native-38bdf8?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
+[![WebKitGTK](https://img.shields.io/badge/WebKitGTK-4.1-14b8a6?style=flat-square)](docs/ARCHITECTURE.md)
+[![License](https://img.shields.io/badge/MIT-license-a5b4fc?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/Linux-Wayland%20%2F%20X11-818cf8?style=flat-square&logo=linux&logoColor=white)](#build-and-run)
+
+[Explore the browser](#the-browser) · [Build it](#build-and-run) · [Architecture](#architecture) · [Testing](#testing)
+
+</div>
+
+---
+
+## The browser
+
+No toolbar. No account. No bundled Chromium. A column of tabs and the page.
+
+<table>
+  <tr>
+    <td width="50%"><strong>Light</strong><br><sub>Quiet chrome, readable pages.</sub></td>
+    <td width="50%"><strong>Dark</strong><br><sub>The same interface, after hours.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/light.png" alt="Search in light mode with vertical tabs"></td>
+    <td><img src="docs/screenshots/dark.png" alt="Search in dark mode with vertical tabs"></td>
+  </tr>
+  <tr>
+    <td><strong>One field</strong><br><sub>Addresses, search, history and open tabs.</sub></td>
+    <td><strong>Pinned pages</strong><br><sub>Daily pages stay within reach.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/omnibox.png" alt="Address field with suggestions"></td>
+    <td><img src="docs/screenshots/pins.png" alt="Pinned pages and vertical tabs"></td>
+  </tr>
+</table>
+
+<details>
+<summary><strong>More real screenshots: reading, history and settings</strong></summary>
+<br>
+<table>
+  <tr>
+    <td><img src="docs/screenshots/reading.png" alt="Article in reading mode"></td>
+    <td><img src="docs/screenshots/history.png" alt="History panel"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Reading mode</strong><br><sub>The article, set in the browser's own type.</sub></td>
+    <td align="center"><strong>History</strong><br><sub>Local, searchable and under your control.</sub></td>
+  </tr>
+</table>
+
+![Settings panel with appearance, privacy and memory options](docs/screenshots/settings.png)
+
+</details>
 
 ## What it does
 
-- **One field.** `Ctrl L` raises it over the page. Type an address and you go
-  there; type words and you search. It suggests from your own history, your
-  open tabs and your bookmarks, and sends nothing anywhere until you press
-  Return.
-- **Tabs that stay out of the way.** Tabs down the left, in a column that is
-  yours to drag wider. Pin the pages you keep open all day and they shrink to a
-  letter. Tabs from your last session come back, and cost nothing until you
-  click one.
-- **An ad and tracker blocker that runs before the page.** EasyList and
-  EasyPrivacy compiled into a WebKit content blocker and enforced inside
-  WebKit's own networking: nothing to render, nothing to pay for per frame. The
-  compiled rule list is a JSON file you can read, and the engine's own store
-  keeps it between launches instead of recompiling it every start.
-- **Hide anything, for good.** `Ctrl Shift H`, click a cookie banner, a
-  newsletter overlay, a rail of "related" nonsense: it goes, and it is still
-  gone on that site next time, before the page has drawn a single frame.
-- **Reading mode.** `Ctrl Shift R` takes the article out of the page and sets
-  it again in the browser's own type.
-- **A bookmarks bar**, a row of the pages you keep above the page, hidden until
-  there is something in it and switchable in Settings.
-- **Find, downloads, bookmarks, history, shortcuts, extensions**: each a panel,
-  each one keystroke away. The shortcuts panel (`Ctrl /`) exists so the keys
-  are discoverable, not folklore.
-- **Extensions, from a `.crx`, an `.xpi` or a folder.** Content scripts and
-  their CSS, limited to the sites they ask for, with the panel telling you what
-  will and will not run here. See [Extensions](#extensions) for the honest
-  version.
-- **A window that remembers its size**, and maximised state, across launches.
-- **Light, dark, or the desktop's own.** The frame follows. Pages follow when a
-  site offers a dark page; for the ones that never do, Settings has a switch
-  that gives them the browser's ground instead.
-- **A private tab** with its own cookie jar, gone when it closes.
-
-## What it does not do
-
-On purpose: no sync, no account, no cloud, no telemetry, no second window, and
-no WebExtensions API behind the extension loader. Tabs, history, bookmarks and
-what you have hidden are small JSON files in your own folders and nowhere else.
-
-Things that decide whether you can switch, stated plainly:
-
-- **DRM video does not play.** Netflix, Spotify's web player and anything else
-  that needs Widevine will refuse, because the engine ships without it. YouTube
-  is fine.
-- **No password manager and no autofill.** Use your desktop's clipboard or a
-  password manager's own app.
-- **PDFs open in the engine's own viewer**, which is basic: no annotations, no
-  form saving.
-- **No WebExtensions API, so no `chrome.*`.** WebKitGTK has no such layer, so
-  an extension here is content scripts, their CSS and an options page, and
-  nothing more; anything that lives in a background page does not run.
-  [Extensions](#extensions) is the whole of it, including which extensions will
-  not work.
-- **No multiple windows and no tab dragging between them.** One window, tabs in
-  its column.
-- **No reordering tabs by dragging.** A tab sits where it was opened. The row's
-  menu can pin, duplicate or close it, and pinning moves it to the pinned grid,
-  but nothing in the browser moves a tab to a position you choose.
-- **No print dialog.** `Ctrl P` is the page's own.
-
-## Extensions
-
-Install one from the panel (`Ctrl ,`, then Extensions) by typing or pasting a
-path: a `.crx` from the Chrome store, an `.xpi` from the Firefox store, or an
-unpacked folder. It is unpacked into `~/.local/share/search/extensions/` and
-listed with its own switch.
-
-What runs here is what the engine can do:
-
-| | |
+| Area | What you get |
 |---|---|
-| Content scripts (`content_scripts`, `run_at`, `matches`) | run, before or after the document, only on the sites the extension asks for |
-| Their style sheets (`css`, `user_scripts`) | applied, at document start |
-| An options page (`options_ui`, `options_page`) | opens in a tab, if the file stays inside the extension's folder |
-| `browser.storage.local` | **not available.** Without an API layer there is nowhere for it to live, so an extension that keeps its state there keeps nothing |
-| A background page or service worker | **does not run.** There is no WebExtensions API in WebKitGTK |
-| `chrome.tabs`, `chrome.cookies`, `webRequest`, `chrome.proxy` | **not available** |
+| **Browse** | Vertical tabs, pinned pages, session restore, lazy restored tabs, window-size memory. |
+| **Search** | One field for addresses and words. Suggestions come from your tabs, history and bookmarks. |
+| **Privacy** | EasyList and EasyPrivacy enforced by WebKit before requests are made. No telemetry. |
+| **Reading** | Distraction-free articles, in-page find, bookmarks and a searchable local history. |
+| **Control** | Hide page elements persistently, private tabs, light/dark appearance, keyboard-first controls. |
+| **Extensions** | `.crx`, `.xpi` and unpacked folders: content scripts, styles and options pages within WebKit's limits. |
 
-An extension whose work is all in a background page is installed, listed, and
-marked *not running here* with the reason, rather than silently doing nothing.
+> **A real browser, with explicit limits.** No sync, cloud account, password manager, multiple windows or full WebExtensions API. DRM video is unavailable. Read [differences from the original](docs/DIFFERENCES.md) and [technical limits](docs/LIMITS.md).
 
-The ad and tracker blocker is not an extension and does not need one. It is
-EasyList and EasyPrivacy, the two lists uBlock Origin ships enabled, converted
-by `tools/build_shield.py` into the content blocker WebKit enforces in its
-network process. The network list fills the tool's cap of 14,000 rules; the
-hidden-element rule carries 2,626 selectors, 2,600 from the lists and 26
-written by hand for the cookie bars and interstitials the suite tests. It is
-not uBlock Origin itself: none of that extension's code runs here, so its
-element picker, its dynamic filtering syntax and its scriptlets are absent.
-What replaces the picker is the browser's own `Ctrl Shift H`, which hides an
-element on one site and keeps it hidden; what replaces its scriptlets is
-nothing. What it keeps is the part WebKit can enforce, which is the part that
-runs before a request is made. `tools/check_shield.py` compiles the generated
-lists with the engine's own parser and fails if a single rule is rejected,
-because a list that does not parse is a list that blocks nothing.
+## Why this architecture
 
-## Build it
+```text
+┌─────────────────────── Search ───────────────────────┐
+│ Rust application + GTK 3 interface                  │
+│ tabs · omnibox · panels · reader · local JSON state │
+└───────────────────────┬──────────────────────────────┘
+                        │ distribution libraries
+┌───────────────────────▼──────────────────────────────┐
+│ WebKitGTK 4.1                                       │
+│ web process · network process · content blocking    │
+└─────────────────────────────────────────────────────┘
+```
 
-Needs GTK 3 and WebKitGTK 4.1 (package `webkit2gtk-4.1` on Arch,
-`libwebkit2gtk-4.1-dev` on Debian and Ubuntu), Rust 1.75 or newer, and a
-running Wayland or X11 session.
+- **No second engine.** WebKitGTK comes from your distribution, not a bundled Chromium download.
+- **A tab starts on demand.** Restored background tabs do not create a web process until selected.
+- **Local by default.** Tabs, history, bookmarks and hidden elements are small JSON files in your own folders.
+- **One concern per module.** Browser behavior, rendering, UI, panels, extensions, storage and tests remain inspectable.
+
+### Languages
+
+Measured across `src/`, `tools/` and `assets/` in this checkout:
+
+| Language | Share | Role |
+|---|---:|---|
+| 🦀 **Rust** | **76.9%** | Browser, native UI, state, networking integration and tests. |
+| 🐍 **Python** | **19.6%** | Browser automation, stress tests, fixtures and visual evidence. |
+| 🐚 **Shell** | **2.6%** | Reproducible screenshot capture and developer workflows. |
+| 🟨 **JavaScript** | **1.0%** | Reading mode and page-side behavior. |
+
+## Project structure
+
+```text
+search-linux/
+├── src/                 Rust browser and GTK interface
+│   ├── app.rs          Tabs, actions and application state
+│   ├── web.rs          WebKit views, navigation and downloads
+│   ├── ui.rs           Native widgets and window chrome
+│   ├── panels.rs       History, settings, shortcuts and extensions
+│   ├── reader.rs       Reading-mode integration
+│   └── bench.rs        Automation socket used by the test suite
+├── assets/
+│   ├── reader.js       Page-side reading mode
+│   └── shield/         Compiled content-blocking rules
+├── tools/
+│   ├── stress.py       Browser stress, behavior and memory checks
+│   ├── shots.sh        Light/dark screenshot evidence
+│   ├── fixtures.py     Local hostile and ordinary test pages
+│   └── bench.py        Automation client
+├── docs/               Architecture, limits, screenshots and decisions
+├── reference/          Original-browser visual references
+└── council/            Verified review rounds and evidence
+```
+
+## Build and run
+
+### Requirements
+
+- Rust **1.75+**
+- GTK **3**
+- WebKitGTK **4.1**
+- A Wayland or X11 session
+
+Arch package: `webkit2gtk-4.1`. Debian/Ubuntu package: `libwebkit2gtk-4.1-dev`.
 
 ```sh
 cargo build --release
 ./target/release/search
 ```
 
-That is the whole build. There is no bundler, no node, no submodule. It builds
-with no warnings: `cargo build --release` should say nothing at all.
+No Node. No bundler. No submodule. The stripped release binary is about **2.8 MB**.
 
-### Install it
+<details>
+<summary><strong>Install a launcher and handle web links</strong></summary>
 
 ```sh
-cargo install --path . --root ~/.local     # puts `search` in ~/.local/bin
+cargo install --path . --root ~/.local
 mkdir -p ~/.local/share/applications
 cat > ~/.local/share/applications/search.desktop <<'EOF'
 [Desktop Entry]
@@ -156,99 +162,49 @@ EOF
 xdg-mime default search.desktop x-scheme-handler/https
 ```
 
-`~/.local/bin` is on `PATH` on most desktops; if it is not, add it. `xdg-mime`
-makes Search the browser links open in. There is no package, no AppImage and no
-Flatpak: one binary, one `.desktop` file, and GTK and WebKitGTK from your
-distribution.
+There is no AppImage, Flatpak or installer yet: one binary plus one desktop file.
 
-### What it costs next to what you have
+</details>
 
-One idle tab measured 210.5 MB proportional resident memory in the last run that passed every
-check, of which 91.7 MB was this browser's own; across runs the browser's own
-share has ranged from 49 to 119 MB. For scale, the same page in Firefox on this
-machine was 480 MB over five processes in a reading taken by hand from
-`ps_mem`. No script in this repository produces that figure, so treat it as one
-afternoon's comparison rather than a benchmark. That is the whole pitch, and it
-is why the engine is the one the desktop already has in memory rather than a
-second copy shipped in the binary.
-
-## Drive it, test it
+## Testing
 
 ```sh
-python3 tools/fixtures.py 8099 &     # pages that are hard on a browser
-cargo build --release
-SEARCH_BENCH=1 ./target/release/search &
-python3 tools/bench.py probe         # what the browser is showing
-python3 tools/bench.py open https://example.com
-python3 tools/bench.py text
-python3 tools/stress.py              # the whole stress suite
-python3 tools/extensions.py          # the extension loader, on built fixtures
-python3 tools/check_shield.py        # do the generated rules compile at all
-python3 tools/compare.py             # measure a screenshot against the original
+cargo test --release
+python3 tools/stress.py
+python3 tools/extensions.py
+python3 tools/check_shield.py
+tools/shots.sh council/latest
+SHOT_DARK=1 tools/shots.sh council/latest-dark
+python3 tools/report_figures.py --check
 ```
 
-`tools/stress.py` opens too many tabs, switches between them too fast, loads
-pages that never finish, pages that eat memory, pages that redirect in a loop,
-opens and closes every panel, hides things, uses find and reading mode, resizes
-the window, and watches the memory the whole time. It writes
-`build/stress-report.json` and exits non-zero if anything fails. The last run
-that passed every check was on a 4-core desktop with 7.5 GB of RAM, as `nproc`
-and `/proc/meminfo` report them, and the run prints how many checks it made.
+The stress suite drives real browser behavior: many tabs, hostile pages, redirects, stalled loads, downloads, privacy, reading mode, keyboard actions, panels, scrolling and memory pressure. It writes `build/stress-report.json` and exits non-zero on failure.
 
-The full list of places this build differs from the Mac original, and why, is
-in [docs/DIFFERENCES.md](docs/DIFFERENCES.md).
+Latest verified candidate: **123 Rust tests and 92/92 browser checks**. Screenshots above come from the same candidate's light and dark evidence runs.
 
-It has already earned its keep: it caught a panel that wedged the whole UI
-because the card asked for a preferred size inside an allocation pass, and a
-redirect chain that hung because the curtain was synced from inside a policy
-decision.
+## Memory, honestly
 
-`tools/bench.py` speaks to a running browser over a Unix socket, one command
-per line. It is the same idea as the Mac build's `./bench`.
+**The requested ~100 MB total-RAM target is not met.** The latest full-suite sample measured **210.5 MB total PSS** for one idle tab, including **91.7 MB anonymous PSS**. Total memory varies with WebKit, graphics initialization, page content and host state.
 
-## Keyboard
+The suite records both figures and includes `target_pss_mb: 100` plus `target_met`. It does not present anonymous memory as total memory. Settings → **Use less memory** reduces compositing cost on the next launch, but does not make the total target pass.
 
-| | |
-|---|---|
-| `Ctrl L` field · `Ctrl T` new tab · `Ctrl Shift N` private tab | `Ctrl Tab` / `Ctrl Page Down` next · `Ctrl Shift Tab` / `Ctrl Page Up` previous |
-| `Ctrl W` close · `Ctrl Shift T` reopen | `Alt ←` / `Alt →` back, forward · `Ctrl [ ]` the same |
-| `Ctrl 1` to `Ctrl 9` jump | `Ctrl R` reload · `Ctrl Shift R` reading mode · `F5` reload · `Ctrl F5` reload past the cache |
-| `Ctrl D` bookmark this page | `Ctrl F` find |
-| `Ctrl Y` history · `Ctrl Shift B` bookmarks · `Ctrl J` downloads | `Ctrl ,` settings |
-| `Ctrl Shift H` hide something · `Ctrl Shift U` what is hidden | `Ctrl Shift C` copy address |
-| `Ctrl +` `Ctrl -` `Ctrl 0` zoom | `Ctrl /` every shortcut, listed |
-| `F12` or `Ctrl Shift I` inspector · `Escape` closes what is open, else stops a loading page | `F11` full screen · `Ctrl U` view source |
+See [docs/LIMITS.md](docs/LIMITS.md) for the exact measurement, process model, multi-tab cost and known tradeoffs.
 
-## How it is put together
+## Keyboard essentials
 
-- **GTK 3** for the frame and the widgets, **WebKitGTK** for pages, **Rust**
-  everywhere else. One module per concern in `src/`.
-- `src/app.rs` is the browser: tabs, what is on screen, and every action a key,
-  a click or a page can ask for. `src/web.rs` makes a page and tells the
-  browser what the page is doing. `src/ui.rs` builds the widgets, `src/css.rs`
-  and `src/palette.rs` make them look like this, `src/omnibox.rs`,
-  `src/find.rs` and `src/panels.rs` are the things that come over the page.
-- A tab's page is made when you first look at the tab. A tab restored from last
-  session costs no process until you click it.
-- The shield is a compiled content blocker, built from EasyList and EasyPrivacy
-  (the two lists uBlock Origin ships enabled). None of that extension's code
-  runs here. Hidden things are a user style sheet set before the document
-  begins. Reading mode runs in the page, so it costs no second view and no
-  third process.
-- An extension contributes scripts to the content manager a page is built with,
-  so an extension costs no separate process either.
-- `src/bench.rs` is the socket tests drive the browser through;
-  `tools/shots.sh` takes a picture of every state without needing a compositor.
+| Action | Key | Action | Key |
+|---|---|---|---|
+| Address/search field | `Ctrl L` | New tab | `Ctrl T` |
+| Private tab | `Ctrl Shift N` | Close tab | `Ctrl W` |
+| Next / previous tab | `Ctrl Tab` / `Ctrl Shift Tab` | Reopen tab | `Ctrl Shift T` |
+| Reading mode | `Ctrl Shift R` | Find in page | `Ctrl F` |
+| Bookmark | `Ctrl D` | History | `Ctrl Y` |
+| Downloads | `Ctrl J` | Settings | `Ctrl ,` |
+| Hide an element | `Ctrl Shift H` | Restore hidden elements | `Ctrl Shift U` |
+| All shortcuts | `Ctrl /` | Close the current overlay | `Escape` |
 
-## Why this and not another browser
+## Origin and license
 
-If you have one window open all day with a handful of pages and you want the
-window to be a column of tabs and the page, this is the whole of it. It does
-not download an engine: it uses the one your desktop already has, so a release
-upgrade is a `cargo build`, and starting it is one process until a page loads.
-If you want a WebExtensions engine, sync or a second window, it will disappoint
-you on purpose (see [What it does not do](#what-it-does-not-do)).
+Search was created for macOS by [Office Commun](https://officecommun.com), at [driceroland/Search](https://github.com/driceroland/Search). This is an independent Linux implementation in Rust, using the same interface idea and WebKitGTK.
 
-## Licence
-
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Contribution workflow: [CONTRIBUTING.md](CONTRIBUTING.md). Release history: [CHANGELOG.md](CHANGELOG.md).

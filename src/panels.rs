@@ -54,6 +54,7 @@ pub struct Panels {
     pub title: gtk::Label,
     pub nav: gtk::Box,
     pub body: gtk::Box,
+    pub scroll: gtk::ScrolledWindow,
     pub open: Option<PanelKind>,
     /// The card width the body was last measured at. A resize changes the width
     /// a wrapping line needs, so the height has to be asked again.
@@ -96,6 +97,14 @@ impl Panels {
         card.add(&nav);
 
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroll.set_propagate_natural_height(true);
+        scroll.set_min_content_height(1);
+        scroll.set_max_content_height(640);
+        scroll.set_vexpand(false);
+        scroll.set_overlay_scrolling(false);
+        scroll.add(&body);
         // The scroller clips to its allocation; a box does not. Let the
         // viewport own scrolling and let this wrapper shrink with the card.
         body.set_hexpand(true);
@@ -105,7 +114,7 @@ impl Panels {
         body.set_vexpand(true);
         // The ScrolledWindow owns clipping. Giving every direct child the
         // entire body height blanks filter fields and leaves rows half-clipped.
-        card.add(&body);
+        card.add(&scroll);
 
         layer.add(&scrim);
         layer.add(&card);
@@ -121,6 +130,7 @@ impl Panels {
             title,
             nav,
             body,
+            scroll,
             open: None,
             fitted_width: std::cell::Cell::new(0),
         };
@@ -295,10 +305,16 @@ impl Panels {
             above += child.preferred_height().0;
         }
         above += 16; // the body's bottom margin
-        let wanted = self
-            .measure_content(inner)
-            .max(self.body.preferred_height_for_width(inner).1)
-            + above;
+        // Measure the content itself. Asking the scroller to propagate a
+        // natural height creates a feedback loop with its automatic scrollbar.
+        let wanted = self.measure_content(inner) + above;
+        // When it overflows, reserve the scrollbar width and measure the
+        // wrapped content once at that narrower width.
+        if wanted > 640 {
+            let inner_scrolled = (inner - 18).max(1);
+            self.fitted_width.set(card_width);
+            return (self.measure_content(inner_scrolled) + above).clamp(200, 640);
+        }
         self.fitted_width.set(card_width);
         wanted.clamp(200, 640)
     }
@@ -321,29 +337,22 @@ impl Panels {
     fn measure_content(&self, width: i32) -> i32 {
         let mut total = 0;
         for child in self.body.children() {
-            if let Ok(scroll) = child.clone().downcast::<gtk::ScrolledWindow>() {
-                if let Some(inner) = scroll.child() {
-                    let needed = inner.preferred_height_for_width(width).1;
-                    inner.set_size_request(-1, needed);
-                }
-            }
-            // The natural height, not the minimum: a scroller's minimum is its
-            // one-pixel floor plus its frame, which is how a 231px list was
-            // measured as 46px.
-            total += child.preferred_height_for_width(width).1;
+            // A panel body is the direct child of the one shared scroller.
+            // Measure that child at the actual content width and pin its
+            // natural height. Never feed the scroller's own propagated height
+            // back into this measurement: automatic scrollbar allocation
+            // changes the width, which would loop the height indefinitely.
+            let needed = child.preferred_height_for_width(width).1;
+            child.set_size_request(-1, needed);
+            total += needed;
         }
         total
     }
 
-    fn body_scroll(&self, content: &gtk::Box) -> gtk::ScrolledWindow {
-        let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroll.set_propagate_natural_height(true);
-        scroll.set_min_content_height(1);
-        scroll.set_max_content_height(640);
-        scroll.set_vexpand(false);
-        scroll.add(content);
-        scroll
+    fn body_scroll(&self, content: &gtk::Box) -> gtk::Box {
+        // One scroller owns every panel. Returning the content here avoids
+        // nesting a second GtkViewport, which breaks measurement and clipping.
+        content.clone()
     }
 
     fn filter_field(&self, placeholder: &str, on_type: impl Fn(&str) + 'static) -> gtk::Entry {
@@ -690,9 +699,9 @@ impl Panels {
         list.add(&field);
 
         let note = gtk::Label::new(Some(
-            "This engine has no WebExtensions API, so an extension runs the part of itself that is a content script: its scripts and its styles, on the sites its manifest names. Downloading a .crx from the Chrome Web Store or an .xpi from addons.mozilla.org and choosing it here installs what that part can do. An extension that lives entirely in a background page is installed and shown as not running rather than silently ignored.",
+            "Choose a .crx, .xpi, or an unpacked folder above. This engine supports content scripts and styles on the sites an extension requests, not the WebExtensions background-page API. Unsupported parts are shown as not running, never silently ignored.",
         ));
-        crate::ui::class(&note, "settingdesc");
+        crate::ui::class(&note, "settingdesc extensionnote");
         note.set_xalign(0.0);
         note.set_line_wrap(true);
         // No width of its own: the body's width bounds it, and measure_content
@@ -715,8 +724,8 @@ impl Panels {
         let appearance = gtk::Box::new(gtk::Orientation::Vertical, 6);
         appearance.set_margin_top(4);
         appearance.set_margin_bottom(14);
-        let label = gtk::Label::new(Some("Appearance"));
-        crate::ui::class(&label, "setting");
+        let label = gtk::Label::new(Some("APPEARANCE"));
+        crate::ui::class(&label, "group");
         label.set_xalign(0.0);
         appearance.add(&label);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 2);
@@ -785,7 +794,7 @@ impl Panels {
         list.add(&self.setting_switch(
             app,
             "Use less memory",
-            "Turns off the one graphics path the engine can do without. Across four runs of one idle tab, the browser's own memory went from 60-88 MB to a steadier 62-66 MB, and pages with many images paint a little slower. Applies the next time the browser opens.",
+            "Disables accelerated compositing on the next launch. This can reduce memory use, but image-heavy pages may paint more slowly.",
             prefs.low_memory,
             |app, on| {
                 app.prefs.borrow_mut().low_memory = on;
@@ -936,7 +945,21 @@ impl Panels {
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // The sheet is `keys::SHEET`: the same table the bench presses and the
         // tests check, so what is drawn here cannot advertise a dead key.
+        let mut section = "";
         for (_, key, what, ..) in crate::keys::SHEET {
+            let group = match *what {
+                "New tab" | "Private tab" | "Close tab" | "Reopen the last closed tab" | "Next tab" | "Previous tab" | "Jump to a tab" => "TABS",
+                "Back" | "Forward" | "Reload" | "Reload without the cache" | "Reading mode" | "Keep this page" | "Find in this page" | "Find the next match" | "Find the previous match" | "Copy the address" | "See the source" | "Full screen" | "Hide something" | "Show what you hid" => "PAGE",
+                "History" | "Downloads" | "Bookmarks" | "Settings" | "This list" | "The field" => "BROWSER",
+                _ => section,
+            };
+            if group != section {
+                section = group;
+                let head = gtk::Label::new(Some(section));
+                crate::ui::class(&head, "group");
+                head.set_xalign(0.0);
+                list.add(&head);
+            }
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
             row.set_margin_top(4);
             row.set_margin_bottom(4);

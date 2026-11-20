@@ -433,6 +433,13 @@ if not os.environ.get("SHOT_DARK") and (out / "05-panel-history.png").exists():
     manifest.append({"name": "pixel light scrim", "ok": ok, "note": str(veil)})
     print(("  ok   " if ok else "  FAIL ") + "pixel light scrim — " + str(veil))
 
+if (out / "05-panel-settings.png").exists():
+    thumb = pixels(out / "05-panel-settings.png", [(1199, 300), (1199, 767)])
+    dark = os.environ.get("SHOT_DARK")
+    ok = bool(thumb) and ((max(thumb[0]) < 230 and min(thumb[1]) > 225) if not dark else (40 <= sum(thumb[0]) / 3 <= 110 and sum(thumb[1]) / 3 < 35))
+    manifest.append({"name": "pixel panel scrollbar", "ok": ok, "note": str(thumb)})
+    print(("  ok   " if ok else "  FAIL ") + "pixel panel scrollbar — " + str(thumb))
+
 bad = [item for item in manifest if not item["ok"] and not item.get("skipped")]
 # though it is not a failed picture, so the run does not report success. A
 # round that stopped early is a failure too, whatever it managed to capture.

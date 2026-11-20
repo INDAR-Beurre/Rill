@@ -1812,11 +1812,19 @@ impl App {
             }
             return null;
         };
-        let current = -1;
-        if (selection && selection.rangeCount && selection.anchorNode && selection.anchorNode.nodeType === Node.TEXT_NODE) {
-            const i = nodes.indexOf(selection.anchorNode);
-            if (i >= 0) current = starts[i] + selection.anchorOffset;
-        }
+        let current = selection && selection.rangeCount ? (() => {
+            const anchor = selection.anchorNode;
+            if (!anchor) return -1;
+            const probe = document.createRange();
+            if (anchor.nodeType === Node.TEXT_NODE) probe.setStart(anchor, selection.anchorOffset);
+            else probe.setStart(anchor, Math.min(selection.anchorOffset, anchor.childNodes.length));
+            probe.collapse(true);
+            const point = probe.startContainer.nodeType === Node.TEXT_NODE
+                ? [probe.startContainer, probe.startOffset] : null;
+            if (!point) return -1;
+            const index = nodes.indexOf(point[0]);
+            return index >= 0 ? starts[index] + point[1] : -1;
+        })() : -1;
         const finder = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
         const hits = [];
         let found;
@@ -2803,7 +2811,7 @@ fn draw_shell(
     }
     let offset = widget.translate_coordinates(ancestor, 0, 0).unwrap_or((0, 0));
     paint_one(context, &widget, offset);
-    if layout_only(&widget) {
+    if layout_only(&widget) && !widget.is::<gtk::ScrolledWindow>() {
         if let Some(container) = widget.dynamic_cast_ref::<gtk::Container>() {
             for child in container.children() {
                 draw_shell(context, &child, ancestor, skip);
@@ -2928,16 +2936,15 @@ fn paint_one(context: &cairo::Context, widget: &gtk::Widget, offset: (i32, i32))
         widget.allocated_width() as f64,
         widget.allocated_height() as f64,
     );
-    if layout_only(widget) {
+    if layout_only(widget) && !widget.is::<gtk::ScrolledWindow>() {
         gtk::render_background(&style, context, 0.0, 0.0, width, height);
         gtk::render_frame(&style, context, 0.0, 0.0, width, height);
         let _status = context.restore();
         return;
     }
-    // A viewport's draw routine paints its complete child, including rows
-    // below its own allocation. ScrolledWindow remains layout-only so the
-    // viewport gets an explicit clip in the capture walk.
-    if widget.is::<gtk::Viewport>() {
+    // Let GTK draw the scroller once. Recursing after its draw would paint
+    // the viewport's children a second time in the wrong coordinate space.
+    if widget.is::<gtk::ScrolledWindow>() || widget.is::<gtk::Viewport>() {
         context.rectangle(0.0, 0.0, width, height);
         context.clip();
         let _ = widget.draw(context);
@@ -3034,6 +3041,14 @@ mod tests {
 
     fn engine(query: &str) -> String {
         crate::store::Prefs::default().search_url(query)
+    }
+
+    #[test]
+    fn reverse_find_uses_the_selection_range_not_a_raw_node_offset() {
+        let script = App::FIND_STEP_JS;
+        assert!(script.contains("document.createRange()"));
+        assert!(script.contains("probe.collapse(true)"));
+        assert!(!script.contains("current = starts[i] + selection.anchorOffset"));
     }
 
     #[test]

@@ -27,9 +27,9 @@ One idle tab, three processes: the frame, a page, a network.
 
 | what | measured | result in the report |
 |---|---|---|
-| one idle tab | 208 MB resident, 90 MB own | `idle one tab` |
-| 20 tabs | 466 MB resident, 332 MB own | `20 tabs open` |
-| per tab | +12.9 MB resident | `20 tabs open` |
+| one idle tab | 206 MB resident, 94 MB own | `idle one tab` |
+| 20 tabs | 609 MB resident, 481 MB own | `20 tabs open` |
+| per tab | +20.2 MB resident | `20 tabs open` |
 | the difference | the shared GTK and WebKit libraries, counted once per process | |
 
 Both numbers move. Across the runs of `tools/stress.py` on this machine the
@@ -42,8 +42,8 @@ range and the row above as that run's point in it.
 The measure is `Pss_Anon` summed over the process tree: anonymous memory, each
 shared page divided by the number of processes mapping it. It is the browser's
 own allocations and its pages' heaps. It is not the whole cost: the same run
-reads 208.2 MB of total proportional set size, of which 9.9 MB is shared file
-backing, and 308.8 MB of RSS. Both are printed in the report beside it.
+reads 205.6 MB of total proportional set size, of which 9.9 MB is shared file
+backing, and 314.2 MB of RSS. Both are printed in the report beside it.
 
 The `20 tabs` row is the check's own name: the suite opens twenty more tabs, so
 the window held 22 when it measured, which is what the check's detail line
@@ -110,10 +110,10 @@ playback are checked by hand.
 
 | case | measured | result in the report |
 |---|---|---|
-| a page that allocates without limit | 1033 MB resident at its peak, 1240 MB RSS, 964 MB own | `a memory spray is survived` |
-| once it settles | 249 MB resident | `the engine survives a spray and keeps working` |
-| tab switch | mean 1 ms, p95 2 ms, worst 18 ms over 300 switches| `tab switches stay quick` |
-| a panel opening | mean 21 ms, worst 178 ms over 80| `panels open and close` |
+| a page that allocates without limit | 1195 MB resident at its peak, 1847 MB RSS, 1039 MB own | `a memory spray is survived` |
+| once it settles | 421 MB resident | `the engine survives a spray and keeps working` |
+| tab switch | mean 1 ms, p95 2 ms, worst 15 ms over 300 switches| `tab switches stay quick` |
+| a panel opening | mean 20 ms, worst 89 ms over 80| `panels open and close` |
 | nothing grows while nothing happens | +0.0 MB of its own over an idle minute | the detail line of `nothing grows while nothing happens` |
 
 Every row but the last is a figure `python3 tools/report_figures.py` prints for

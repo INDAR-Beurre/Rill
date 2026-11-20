@@ -202,6 +202,19 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         "probe" => probe(app),
         "paneltext" => paneltext(app),
         "paneltree" => paneltree(app),
+        "panelscroll" => {
+            let amount: f64 = argument.parse().unwrap_or(0.0);
+            let panels = app.panels.borrow();
+            let adjustment = panels.scroll.vadjustment();
+            adjustment.set_value((adjustment.value() + amount).clamp(adjustment.lower(), adjustment.upper() - adjustment.page_size()));
+            ok(&format!(",\"value\":{},\"upper\":{},\"page\":{}", adjustment.value(), adjustment.upper(), adjustment.page_size()))
+        }
+        "panelgeometry" => {
+            settle(app);
+            let panels = app.panels.borrow();
+            let adjustment = panels.scroll.vadjustment();
+            ok(&format!(",\"card\":[{},{}],\"body\":[{},{}],\"scroll\":[{},{}],\"value\":{},\"upper\":{},\"page\":{}", panels.card.allocated_width(), panels.card.allocated_height(), panels.body.allocated_width(), panels.body.allocated_height(), panels.scroll.allocated_width(), panels.scroll.allocated_height(), adjustment.value(), adjustment.upper(), adjustment.page_size()))
+        }
         "debug" => debug(app),
         "settle" => settle(app),
         "tabs" => tabs(app),

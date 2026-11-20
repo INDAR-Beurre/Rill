@@ -108,9 +108,9 @@ impl Scale {
         // Points to CSS pixels at 96dpi, which is what GTK itself uses.
         let body = (points * 96.0 / 72.0).round() as i32;
         Scale {
-            caps: (body - 3).max(9),
-            small: (body - 1).max(10),
-            body: body.max(11),
+            caps: (body - 3).max(11),
+            small: (body - 1).max(13),
+            body: body.max(14),
             title: body + 2,
         }
     }
@@ -329,7 +329,8 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel row:hover {{ background-color: {hover}; }}
 .panel .ptitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
 .panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.keycap {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {chipbg}; border-radius: 5px; padding: 2px 6px; }}
+.keycap {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {wash}; border: 1px solid {divider}; border-radius: 5px; padding: 2px 6px; }}
+.extensionnote {{ padding: 10px 12px; background-color: {wash}; border-radius: 8px; }}
 .panel button.tab {{ background: none; background-image: none; box-shadow: none; border: none; padding: 5px 10px; border-radius: 6px; min-height: 32px; }}
 .panel button.tab label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.tab:checked {{ background-color: {chipbg}; }}
@@ -362,7 +363,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .dlbar label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 
 scrollbar {{ background: transparent; }}
-scrollbar slider {{ background-color: {scroll}; border-radius: 6px; min-width: 6px; min-height: 6px; }}
+scrollbar slider {{ background-color: {scroll}; border-radius: 6px; min-width: 8px; min-height: 8px; opacity: 0.85; }}
 scrollbar slider:hover {{ background-color: {scrollhover}; }}
 scrollbar trough {{ background: transparent; }}
 "#,

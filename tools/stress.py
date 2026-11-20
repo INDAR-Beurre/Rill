@@ -426,8 +426,7 @@ class Run:
             panel = bench.probe()
             sheet = bench.must("paneltext")
             rows = [line for line in (sheet.get("text") or "").split("\n") if line.strip()]
-            self.check(
-                "the Shortcuts panel lists keys that work",
+            self.check("the Shortcuts panel lists keys that work",
                 panel["panel"] == "Shortcuts"
                 and sheet.get("panel") == "Shortcuts"
                 and "Ctrl L" in rows
@@ -440,6 +439,16 @@ class Run:
                 f"F3 listed: {'F3' in rows}, Shift F3 listed: {'Shift F3' in rows}",
                 {"panel_rows": len(rows)},
             )
+            geometry = bench.must("panelgeometry")
+            self.check("the Shortcuts panel has a real scroll range",
+                       geometry["body"][0] > 500 and geometry["upper"] > geometry["page"], geometry)
+            reached = bench.must("panelscroll 10000")
+            bench.settle()
+            bottom = bench.must("panelscroll 0")
+            self.check("the Shortcuts panel reaches its last row",
+                       bottom["value"] > 0 and abs(bottom["value"] - (bottom["upper"] - bottom["page"])) <= 1,
+                       bottom)
+            bench.must("panelscroll -10000")
             bench.must("key closepanel")
             # Nothing this scenario opened is left for the next one to measure
             # an idle browser against, and the engine needs a moment to retire
@@ -1294,7 +1303,7 @@ class Run:
         if failed:
             print("\nfailures:")
             for result in failed:
-                print(f"  - {result['name']}: {result['detail'][:300]}")
+                print(f"  - {result['name']}: {str(result['detail'])[:300]}")
         print(f"report: {REPORT}")
         return 1 if failed else 0
 

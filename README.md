@@ -75,8 +75,8 @@
 An **x86_64 / AMD64** AppImage bundles Search, WebKitGTK 4.1, its process helpers, GStreamer plugins, fonts, and the GTK 3 runtime. No installation or root access required.
 
 ```sh
-chmod +x Search-1.0.1-x86_64.AppImage
-./Search-1.0.1-x86_64.AppImage
+chmod +x Search-1.0.2-x86_64.AppImage
+./Search-1.0.2-x86_64.AppImage
 ```
 
 You can also rebuild it directly from this repository:

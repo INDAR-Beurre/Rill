@@ -7,14 +7,14 @@ browser already on your system, and it does not use Chromium.
 ## Download and run
 
 ```sh
-chmod +x Search-1.0.1-x86_64.AppImage
-./Search-1.0.1-x86_64.AppImage
+chmod +x Search-1.0.2-x86_64.AppImage
+./Search-1.0.2-x86_64.AppImage
 ```
 
 Open a web address directly:
 
 ```sh
-./Search-1.0.1-x86_64.AppImage https://example.com
+./Search-1.0.2-x86_64.AppImage https://example.com
 ```
 
 Settings, tabs, history and bookmarks use the normal XDG user folders. Launching
@@ -23,7 +23,7 @@ the AppImage does not reset or overwrite your existing Search profile.
 For a desktop-menu entry, extract the image and install the supplied metadata:
 
 ```sh
-./Search-1.0.1-x86_64.AppImage --appimage-extract
+./Search-1.0.2-x86_64.AppImage --appimage-extract
 install -Dm644 squashfs-root/Search.desktop ~/.local/share/applications/Search.desktop
 install -Dm644 squashfs-root/search.png ~/.local/share/icons/hicolor/512x512/apps/search.png
 ```
@@ -52,14 +52,14 @@ tools/appimage.sh
 ```
 
 The script downloads the official AppImage tooling and patchelf when needed,
-builds the release, writes `build/Search-1.0.1-x86_64.AppImage`, and writes a
+builds the release, writes `build/Search-1.0.2-x86_64.AppImage`, and writes a
 SHA-256 sidecar. It only supports an x86_64 build host at present.
 
 ## Verify the exact packaged browser
 
 ```sh
-SEARCH_BINARY="$PWD/build/Search-1.0.1-x86_64.AppImage" python3 tools/stress.py
-sha256sum -c build/Search-1.0.1-x86_64.AppImage.sha256
+SEARCH_BINARY="$PWD/build/Search-1.0.2-x86_64.AppImage" python3 tools/stress.py
+sha256sum -c build/Search-1.0.2-x86_64.AppImage.sha256
 ```
 
 The latest build passed all 117 checks in that full suite, including actual

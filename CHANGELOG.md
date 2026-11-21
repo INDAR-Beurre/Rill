@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.2 (2026-11-21)
 
 ### Edge-to-edge chrome, VSync motion, real-site compatibility & security hardening
 

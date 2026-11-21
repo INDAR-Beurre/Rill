@@ -1,0 +1,441 @@
+// Suggestions from the search engine, under the address field's own rows.
+// Off unless turned on: what you type is sent to the engine as you type.
+// Never from a private tab, never for a Ctrl K switcher, never for a keyword
+// shortcut, and never for text that looks like an address, a file, an email
+// or a key. See the reference EngineSuggest.swift for the original rules.
+
+use crate::store::Prefs;
+use gtk::gio;
+use gtk::prelude::EntryExt;
+use gtk::gio::prelude::CancellableExt;
+use soup::prelude::SessionExt;
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::time::Duration;
+
+/// How long typing has to pause before a question goes out.
+const PAUSE: Duration = Duration::from_millis(120);
+/// An answer later than this is no use to someone typing.
+const PATIENCE: Duration = Duration::from_millis(800);
+/// At most this many rows from the engine.
+const MOST: usize = 6;
+/// Longer than this, it is a paragraph or a paste, not a search.
+const LONGEST: usize = 80;
+
+thread_local! {
+    // One session for every question: no cookie jar and no cache are added,
+    // so none is kept. Redirects are refused per message.
+    static SESSION: soup::Session = soup::Session::new();
+    static STATE: RefCell<State> = RefCell::new(State::default());
+}
+
+#[derive(Default)]
+struct State {
+    // Bumped on every new question, so a late answer for older text is dropped.
+    round: u64,
+    cancel: Option<gio::Cancellable>,
+    // The trimmed text the words are for, and whether a question is out or answered.
+    asked: String,
+    in_flight: bool,
+    answered: bool,
+    words: Vec<String>,
+}
+
+/// The engine's OpenSearch endpoint, with %s where the words go.
+pub fn endpoint(engine: &str) -> Option<&'static str> {
+    match engine {
+        "DuckDuckGo" => Some("https://duckduckgo.com/ac/?q=%s&type=list"),
+        "Google" => Some("https://suggestqueries.google.com/complete/search?client=firefox&q=%s"),
+        "Bing" => Some("https://www.bing.com/osjson.aspx?query=%s"),
+        "Brave" => Some("https://search.brave.com/api/suggest?q=%s"),
+        "Startpage" => Some("https://www.startpage.com/osuggestions?q=%s"),
+        _ => None,
+    }
+}
+
+/// The question for these words, or None when it is https only and not an engine.
+pub fn url_for(engine: &str, words: &str) -> Option<String> {
+    let template = endpoint(engine)?;
+    let url = template.replace("%s", &crate::store::urlencode(words.trim()));
+    url.starts_with("https://").then_some(url)
+}
+
+/// The question to send for this field's text, or None when nothing may be asked.
+pub fn url_if_asked(typed: &str, prefs: &Prefs, private: bool, switching: bool) -> Option<String> {
+    let text = typed.trim();
+    if !prefs.engine_suggestions || private || switching || !sendable(text) {
+        return None;
+    }
+    if crate::keyword::find(text, &prefs.keywords).is_some() {
+        return None;
+    }
+    url_for(&prefs.search_engine, text)
+}
+
+/// Whether these words may leave the machine at all. Only plain words do:
+/// nothing with a scheme, nothing shaped like a host, a path or an email,
+/// nothing long, and nothing that reads like a password or a key.
+pub fn sendable(typed: &str) -> bool {
+    let text = typed.trim();
+    if text.is_empty() || text.chars().count() > LONGEST || text.chars().any(|c| c == '\n' || c == '\r') {
+        return false;
+    }
+    if text.contains("://") || text.contains('\\') {
+        return false;
+    }
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let first = tokens[0];
+    // A path on this machine, or one of a project's files.
+    if first.starts_with(|c: char| c == '/' || c == '~') || first.starts_with("./") || first.starts_with("../") {
+        return false;
+    }
+    // A scheme of any kind: mailto:x, javascript:..., localhost:3000.
+    if let Some((scheme, rest)) = first.split_once(':') {
+        if !rest.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+        {
+            return false;
+        }
+    }
+    // A single token that is a host, a path or localhost.
+    if tokens.len() == 1 && (text.contains('.') || text.contains('/') || text.eq_ignore_ascii_case("localhost")) {
+        return false;
+    }
+    // Every word is checked, not only a lone one: "192.168.1.1 admin",
+    // "jira.corp.internal PROJ-123" and "alex@buildbox" name a machine or
+    // an account even when other words follow them.
+    for (index, token) in tokens.iter().enumerate() {
+        if token.contains('@') || token.contains('/') {
+            return false;
+        }
+        if host_like(token) {
+            return false;
+        }
+        // A label followed by a value, as in "password: hunter22" or
+        // "token: abc": what comes after it is not sent.
+        if token.ends_with(':') && index + 1 < tokens.len() {
+            return false;
+        }
+        if secret_like(token) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Suffixes that only name machines on a private network.
+const INTERNAL: &[&str] = &["local", "internal", "lan", "corp", "home", "intranet", "localdomain", "localhost"];
+
+/// A word shaped like a machine: an IP address, localhost, a name of three
+/// or more dotted labels, or a name ending in a private-network suffix.
+/// Two-label words such as "node.js" or "3.12" stay searchable.
+fn host_like(token: &str) -> bool {
+    let word = token.trim_matches(|c: char| ",;()[]\"'".contains(c));
+    // An IPv6 address is full of colons, so it is checked before a port is
+    // split off ("::1" would otherwise leave nothing to look at).
+    if word.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let bare = word.split_once(':').map_or(word, |(host, _)| host);
+    if bare.is_empty() {
+        return false;
+    }
+    if bare.parse::<std::net::IpAddr>().is_ok() || bare.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let labels: Vec<&str> = bare.trim_end_matches('.').split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) {
+        return false;
+    }
+    if !labels.iter().all(|l| l.chars().all(|c| c.is_alphanumeric() || c == '-')) {
+        return false;
+    }
+    let last = labels[labels.len() - 1].to_ascii_lowercase();
+    labels.len() >= 3 || INTERNAL.contains(&last.as_str())
+}
+
+/// A token that reads like a password, a key, a card or an account number.
+fn secret_like(token: &str) -> bool {
+    let length = token.chars().count();
+    let letters = token.chars().any(char::is_alphabetic);
+    let digits = token.chars().any(|c| c.is_ascii_digit());
+    // Eight or more characters mixing letters and digits reads like a
+    // password ("hunter22") more often than a word, so it is kept back.
+    if length >= 8 && letters && digits {
+        return true;
+    }
+    // A run of nine or more digits anywhere in the token.
+    if token.split(|c: char| !c.is_ascii_digit()).any(|run| run.len() >= 9) {
+        return true;
+    }
+    // Long and unbroken, in the alphabet keys are written in.
+    length >= 24 && token.chars().all(|c| c.is_ascii_alphanumeric() || "+/=_-".contains(c))
+}
+
+/// The words in an OpenSearch answer, ["what was asked", ["one", "two"]]:
+/// trimmed, each once (case-insensitively), none the same as what was typed,
+/// at most MOST.
+pub fn parse(bytes: &[u8], asked: &str) -> Vec<String> {
+    let Ok(serde_json::Value::Array(top)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(serde_json::Value::Array(words)) = top.get(1) else {
+        return Vec::new();
+    };
+    let typed = asked.trim().to_lowercase();
+    let mut seen = HashSet::from([typed]);
+    let mut out = Vec::new();
+    for word in words {
+        let Some(text) = word.as_str() else { continue };
+        let clean = text.trim();
+        if clean.is_empty()
+            || clean.chars().count() > 200
+            || clean.chars().any(|c| c == '\n' || c == '\r')
+            || !seen.insert(clean.to_lowercase())
+        {
+            continue;
+        }
+        out.push(clean.to_string());
+        if out.len() == MOST {
+            break;
+        }
+    }
+    out
+}
+
+/// The words the last answer gave for exactly this text, if one came back.
+pub fn rows_for(asked: &str) -> Vec<String> {
+    STATE.with(|s| {
+        let s = s.borrow();
+        if s.answered && s.asked == asked {
+            s.words.clone()
+        } else {
+            Vec::new()
+        }
+    })
+}
+
+/// Asks for `asked` (trimmed) after the pause. Asking again for the same text
+/// while it is in flight or answered does nothing; new text cancels the question before.
+pub fn ask(asked: &str, url: String) {
+    let round = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.asked == asked && (s.in_flight || s.answered) {
+            return None;
+        }
+        s.round += 1;
+        if let Some(cancel) = s.cancel.take() {
+            cancel.cancel();
+        }
+        s.asked = asked.to_string();
+        s.in_flight = true;
+        s.answered = false;
+        s.words.clear();
+        Some(s.round)
+    });
+    let Some(round) = round else { return };
+    let asked = asked.to_string();
+    glib::timeout_add_local_once(PAUSE, move || {
+        if !is_current(round) {
+            return;
+        }
+        let cancel = gio::Cancellable::new();
+        STATE.with(|s| s.borrow_mut().cancel = Some(cancel.clone()));
+        fetch(&url, cancel, move |bytes| {
+            let words = bytes.map(|b| parse(&b, &asked)).unwrap_or_default();
+            landed(round, &asked, words)
+        });
+    });
+}
+
+/// Nothing is wanted any more: the field emptied, went away, or holds text not to be sent.
+pub fn stop() {
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some(cancel) = s.cancel.take() {
+            cancel.cancel();
+        }
+        let round = s.round + 1;
+        *s = State { round, ..State::default() };
+    });
+}
+
+fn is_current(round: u64) -> bool {
+    STATE.with(|s| s.borrow().round == round)
+}
+
+fn landed(round: u64, asked: &str, words: Vec<String>) {
+    let current = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.round != round {
+            return false;
+        }
+        s.words = words;
+        s.in_flight = false;
+        s.answered = true;
+        s.cancel = None;
+        true
+    });
+    if !current {
+        return;
+    }
+    if let Some(app) = crate::app::current() {
+        let text = app.omni.entry.text();
+        if app.omni.visible.get() && text.trim() == asked {
+            app.refresh_offers(&text);
+        }
+    }
+}
+
+/// One GET, no redirects followed, cancelled after PATIENCE or when the text changes.
+/// `done` always runs once: None when there is no answer to use.
+fn fetch(url: &str, cancel: gio::Cancellable, done: impl FnOnce(Option<Vec<u8>>) + 'static) {
+    let Ok(msg) = soup::Message::new("GET", url) else {
+        done(None);
+        return;
+    };
+    msg.set_flags(soup::MessageFlags::NO_REDIRECT);
+    if let Some(headers) = msg.request_headers() {
+        headers.append("Accept", "application/json, text/javascript;q=0.9");
+    }
+    let late = cancel.clone();
+    glib::timeout_add_local_once(PATIENCE, move || late.cancel());
+    let check = msg.clone();
+    SESSION.with(|session| {
+        session.send_and_read_async(&msg, glib::Priority::DEFAULT, Some(&cancel), move |result| {
+            let bytes = match result {
+                Ok(bytes) if check.status_code() == 200 => Some(bytes.to_vec()),
+                _ => None,
+            };
+            done(bytes);
+        })
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_words_are_sent() {
+        assert!(sendable("coffee"));
+        assert!(sendable("rust gtk tutorial"));
+        // Two-label words and short versions stay searchable.
+        assert!(sendable("node.js tutorial"));
+        assert!(sendable("python 3.12 release"));
+        assert!(sendable("what is a colon:"));
+        assert!(sendable("mp3 player"));
+    }
+
+    // Critic 2, round 2 (F4): a machine, an account or a labelled value is
+    // never sent, even when other words come with it.
+    #[test]
+    fn hosts_accounts_and_labelled_values_are_never_sent_among_other_words() {
+        for typed in [
+            "192.168.1.1 admin",
+            "admin 10.0.0.1",
+            "::1 login",
+            "jira.corp.internal PROJ-123",
+            "build.example.org failing",
+            "nas.local backup",
+            "printer.lan setup",
+            "localhost admin",
+            "alex@buildbox",
+            "ssh alex@buildbox",
+            "password: hunter22",
+            "token: abc",
+            "hunter22",
+            "my hunter22 login",
+            "open src/main.rs",
+        ] {
+            assert!(!sendable(typed), "{typed:?} must not be sent");
+        }
+    }
+
+    #[test]
+    fn addresses_paths_and_secrets_are_never_sent() {
+        for typed in [
+            "", "   ", "https://example.com", "http://x", "localhost", "localhost:3000", "mailto:a@b.co",
+            "javascript:alert(1)", "example.com", "example.com/path", "a@b.com", "/etc/passwd", "~/notes",
+            "./main.rs", "../x", "C:\\Users", "line\nbreak", "abc123def456", "4111111111111111", "a1b2c3d4e5f6g7h8",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!sendable(typed), "{typed:?} must not be sent");
+        }
+        assert!(!sendable(&format!("{} {}", "word ".repeat(16), "tail")));
+        assert!(sendable(&format!("{}{}", "word ".repeat(15), "tail")));
+    }
+
+    #[test]
+    fn parse_trims_dedupes_drops_the_typed_text_and_caps_at_six() {
+        let body = br#"["cof", [" coffee ", "COFFEE", "cof", "coffee maker", "", "coffee beans", "x1", "x2", "x3"]]"#;
+        assert_eq!(
+            parse(body, "Cof"),
+            vec!["coffee", "coffee maker", "coffee beans", "x1", "x2", "x3"]
+        );
+    }
+
+    #[test]
+    fn parse_refuses_what_is_not_the_shape() {
+        assert!(parse(b"not json", "x").is_empty());
+        assert!(parse(br#"["x", "nope"]"#, "x").is_empty());
+    }
+
+    #[test]
+    fn url_for_is_https_only_and_escapes_the_words() {
+        assert_eq!(
+            url_for("DuckDuckGo", "a b&c").as_deref(),
+            Some("https://duckduckgo.com/ac/?q=a+b%26c&type=list")
+        );
+        assert_eq!(
+            url_for("Google", "rust").as_deref(),
+            Some("https://suggestqueries.google.com/complete/search?client=firefox&q=rust")
+        );
+        assert_eq!(url_for("Unknown", "rust"), None);
+        for engine in Prefs::engines() {
+            assert!(url_for(engine, "x").is_some_and(|u| u.starts_with("https://")), "{engine}");
+        }
+    }
+
+    // The privacy gates themselves: what decides whether anything leaves the
+    // machine at all. Off by default, and never from a private tab, the Ctrl K
+    // switcher or a keyword shortcut, even with the switch on.
+    #[test]
+    fn nothing_is_asked_when_off_private_switching_or_a_keyword() {
+        let mut prefs = Prefs::default();
+        assert!(!prefs.engine_suggestions, "suggestions must start off");
+        assert_eq!(url_if_asked("coffee", &prefs, false, false), None, "off means nothing is sent");
+
+        prefs.engine_suggestions = true;
+        assert!(url_if_asked("coffee", &prefs, false, false).is_some_and(|u| u.starts_with("https://")));
+        assert_eq!(url_if_asked("coffee", &prefs, true, false), None, "a private tab never asks");
+        assert_eq!(url_if_asked("coffee", &prefs, false, true), None, "the Ctrl K switcher never asks");
+        assert_eq!(url_if_asked("coffee", &prefs, true, true), None);
+        assert!(
+            crate::keyword::find("yt cats", &prefs.keywords).is_some(),
+            "the default yt keyword must exist for this check to mean anything"
+        );
+        assert_eq!(url_if_asked("yt cats", &prefs, false, false), None, "a keyword shortcut never asks");
+        assert_eq!(url_if_asked("example.com", &prefs, false, false), None, "an address never asks");
+        assert_eq!(url_if_asked("   ", &prefs, false, false), None);
+    }
+
+    // Makes one real request to DuckDuckGo to confirm the answer's shape.
+    // Run with: cargo test --release live_duckduckgo -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_duckduckgo_answers_in_the_documented_shape() {
+        let url = url_for("DuckDuckGo", "coffee").expect("an https question");
+        let msg = soup::Message::new("GET", &url).expect("a message");
+        msg.set_flags(soup::MessageFlags::NO_REDIRECT);
+        let session = soup::Session::new();
+        let bytes = session
+            .send_and_read(&msg, None::<&gio::Cancellable>)
+            .expect("an answer from DuckDuckGo");
+        assert_eq!(msg.status_code(), 200);
+        let words = parse(&bytes, "coffee");
+        eprintln!("DuckDuckGo said: {words:?}");
+        assert!(!words.is_empty());
+    }
+}

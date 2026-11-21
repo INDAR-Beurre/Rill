@@ -2,9 +2,6 @@
 // of appearance is a change of colours and nothing else.
 use crate::palette::{Palette, FONT, MONO};
 
-fn rgba(c: crate::palette::Rgb, a: f32) -> String {
-    format!("rgba({},{},{},{:.3})", c.0, c.1, c.2, a)
-}
 
 /// The quiet text colours, in one place.
 ///
@@ -127,7 +124,7 @@ pub fn build(p: &Palette, row_height: i32) -> String {
 
     format!(
         r#"
-window {{ background-color: {ground}; }}
+window {{ background-color: {ground}; color: {ink}; }}
 headerbar.nobar {{ background-color: {ground}; }}
 headerbar.nobar, headerbar {{ min-height: 0; padding: 0; margin: 0; border: none; background: none; box-shadow: none; }}
 headerbar.nobar button, headerbar button {{ min-height: 0; padding: 0; margin: 0; }}
@@ -137,20 +134,15 @@ headerbar.nobar > box {{ min-height: 0; padding: 0; margin: 0; border: none; }}
 .shell separator, paned separator {{ background-color: {divider}; background-image: none; min-width: 1px; min-height: 1px; border: none; }}
 .shell separator:hover, paned separator:hover {{ background-color: {hairline}; }}
 
-/* The band above the window, one strip on each side of the divider. It is
-   deliberately not called `frame`: that is GTK's own class for a GtkFrame, and
-   GTK puts one around every scrolled window, so naming it that painted the
-   whole tab column the band's grey. */
-.desk {{ background-color: {desk}; }}
 /* A paned separator with a narrow handle paints nothing at all, so the column
-   draws its own edge. No radius here: GTK rounds the widget's background but
-   not its border, so a rounded column gets a square line drawn through the
-   curve. The window's own top-left corner is cut by the capture instead. */
+   draws its own edge. */
 .side {{ background-color: {sidebg}; border-right: 1px solid {divider}; }}
+.colstrip {{ background-color: {hover}; border-right: 1px solid {divider}; }}
+.colstrip:hover {{ background-color: {wash}; border-right: 1px solid {accent}; }}
 
-.control {{ min-width: 22px; min-height: 22px; border-radius: 6px; background-color: transparent; }}
+.control {{ min-width: 22px; min-height: 22px; border-radius: 6px; background-color: transparent; color: {muted}; }}
 .control:hover {{ background-color: {hover}; }}
-.control.shut:hover {{ background-color: {danger}; }}
+.control.shut:hover {{ background-color: {danger}; color: #FFFFFF; }}
 .control.shut:hover label {{ color: #FFFFFF; }}
 .control:active {{ background-color: {hairline}; }}
 .control label {{ color: {muted}; }}
@@ -189,7 +181,14 @@ button.act {{
   padding: 5px 11px;
 }}
 button.act:hover {{ background-color: {hairline}; }}
+button.act:active, .blank button.act:active {{ background-color: {livehover}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.12); }}
 button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
+/* The one accent: the main button of a card, the focus ring and the picked row. */
+button.act.primary {{ background-color: {accent}; border-color: {accent}; }}
+.blank button.act.primary, .panel button.act.primary {{ background-color: {accent}; border-color: {accent}; }}
+button.act.primary:hover, .blank button.act.primary:hover, .panel button.act.primary:hover {{ background-color: {accenthover}; border-color: {accenthover}; }}
+button.act.primary:active, .blank button.act.primary:active, .panel button.act.primary:active {{ background-color: {accent}; border-color: {accent}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.18); }}
+button.act.primary label, .blank button.act.primary label, .panel button.act.primary label {{ color: {accentink}; font-weight: bold; }}
 .panel button.chosen, button.chosen {{ background-color: {ink}; border-color: {ink}; }}
 button.chosen label {{ color: {ground}; font-weight: bold; }}
 combobox button {{
@@ -202,14 +201,19 @@ combobox button {{
 combobox button:hover {{ background-color: {hairline}; }}
 combobox button label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 combobox arrow {{ color: {muted}; min-width: 10px; min-height: 10px; }}
-menu {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 4px; }}
+menu {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.16); }}
 menuitem {{ border-radius: 5px; padding: 4px 8px; }}
 menuitem:hover {{ background-color: {hover}; }}
 menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 entry {{ background-image: none; box-shadow: none; border: none; }}
-button.mark {{ background: none; background-image: none; border: none; box-shadow: none; padding: 4px; border-radius: 6px; min-width: 0; min-height: 0; }}
-button.mark:hover {{ background-color: {hover}; }}
-button.mark:focus-visible {{ outline: 2px solid {ink}; outline-offset: 1px; }}
+button.mark {{ background: none; background-image: none; border: none; box-shadow: none; padding: 4px; border-radius: 6px; min-width: 0; min-height: 0; color: {muted}; }}
+button.mark:hover {{ background-color: {hover}; color: {ink}; }}
+button.mark:focus {{ outline: 2px solid {accent}; outline-offset: 1px; }}
+/* GTK3 has no focus-visible pseudo-class, so the ring is :focus and it shows on a click too;
+   that is the only way to see where the keyboard is. */
+button.act:focus, .ptrow:focus, .panel button.tab:focus, switch:focus, .panel entry:focus,
+.row:focus, .suggest .sgrow:focus, combobox button:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
+.bmark:focus, .findbar entry:focus {{ outline: 2px solid {accent}; outline-offset: 1px; }}
 button.mark:active {{ background-color: {wash}; }}
 button.mark:disabled {{ opacity: 0.35; }}
 /* A control that cannot be pressed must not look pressable: "Show them" at a
@@ -221,28 +225,31 @@ button.mark:disabled {{ opacity: 0.35; }}
    equal weight the later `.panel button.act` rules would otherwise win. The
    drawn marks keep their own dimming from `button.mark:disabled`; nothing here
    touches opacity, so a disabled mark is still told apart from a live one. */
-.panel button.act:disabled {{ background-color: transparent; }}
-.panel button:disabled label, .panel button.act:disabled label {{ color: {disabledink}; }}
+button.act:disabled, .blank button.act:disabled, .panel button.act:disabled {{ background-color: transparent; border-color: {divider}; }}
+button:disabled label, button.act:disabled label, .blank button.act:disabled label, .panel button:disabled label, .panel button.act:disabled label {{ color: {disabledink}; }}
 
 row, flowbox {{ background-color: transparent; }}
 flowboxchild {{ background-color: transparent; padding: 0; }}
 
-.pin {{ border-radius: 9px; background-color: {tile}; }}
+.pin {{ border-radius: 9px; background-color: {tile}; transition: background-color 140ms ease, color 140ms ease, box-shadow 150ms ease; }}
 .pin.live {{ background-color: {pinlive}; }}
 .pinletter {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {pinfg}; }}
 .pin.live .pinletter {{ color: {pinlivefg}; }}
 .pin:hover {{ background-color: {sidehover}; }}
+.pin:active {{ background-color: {wash}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.12); }}
 
-.row {{ border-radius: 7px; background-color: transparent; min-height: {row_height}px; }}
-button.close, button.loupe {{ background: none; border: none; box-shadow: none; padding: 1px; min-width: 0; min-height: 0; opacity: 0; }}
+.row {{ border-radius: 7px; background-color: transparent; min-height: {row_height}px; color: {faint}; transition: background-color 140ms cubic-bezier(0.2, 0.8, 0.2, 1), color 140ms ease, box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }}
+button.close, button.loupe {{ background: none; border: none; box-shadow: none; padding: 1px; min-width: 0; min-height: 0; opacity: 0; color: {muted}; transition: opacity 150ms ease, background-color 120ms ease, color 120ms ease; }}
 .row:hover button.close, .pin:hover button.close {{ opacity: 1; }}
-button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
+button.close:hover {{ background-color: {hairline}; border-radius: 4px; color: {ink}; }}
 .row:hover {{ background-color: {hover}; }}
-.row.live {{ background-color: {wash}; }}
+.row.live {{ background-color: {wash}; box-shadow: inset 3px 0 0 {accent}; color: {muted}; }}
 /* The active row still answers the cursor, and its selector has to outweigh
    `.row.live` — at equal specificity the earlier rule won and hovering the
    row you are on did nothing. */
 .row:hover, .row.live:hover {{ background-color: {livehover}; }}
+.row:active {{ background-color: {wash}; }}
+.row.live:active {{ background-color: {hairline}; }}
 .rowtitle {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {rowfg}; }}
 /* On the label itself, not through a descendant selector. The row you are on
    is marked by its only-just-dark ink against the resting grey, not by weight:
@@ -251,30 +258,32 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .liveword {{ color: {liveink}; font-weight: normal; }}
 /* A tab that gave its memory back. Still readable — it is a tab you can click,
    not a disabled control — but plainly not the one that is running. */
-.row.asleep .rowtitle {{ color: {faint}; }}
-.row.asleep .tile {{ opacity: 0.55; }}
+.row.asleep .rowtitle {{ color: {faint}; opacity: 0.75; }}
+.row.asleep .tile, .row.asleep .favicon, .row.asleep .rowmark {{ opacity: 0.55; }}
 /* The active row's chip has to sit off the wash: #F1F1F1 on #EFEFEF is
    1.018:1, and the letter tile vanished into the row it belongs to. */
 .row.live .tile {{ background-color: {ground}; }}
 .row.asleep .tileletter {{ color: {faint}; }}
+.row.private {{ color: {muted}; }}
 .row.private .rowtitle {{ color: {muted}; }}
 .tile {{ border-radius: 4px; background-color: {tilebg}; }}
 .tileletter {{ font-family: {font}; font-size: {small}px; font-weight: bold; color: {tilefg}; }}
-.panel switch {{ background-color: {switchoff}; border: none; min-width: 34px; min-height: 20px; border-radius: 10px; }}
+.panel switch {{ background-color: {switchoff}; border: none; min-width: 34px; min-height: 20px; border-radius: 10px; transition: background-color 180ms ease, box-shadow 140ms ease; }}
 .panel switch:checked {{ background-color: {ink}; }}
-.panel switch slider {{ min-width: 16px; min-height: 16px; border-radius: 8px; margin: 2px; background-color: {knob}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.28); }}
+.panel switch slider {{ min-width: 16px; min-height: 16px; border-radius: 8px; margin: 2px; background-color: {knob}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.28); transition: background-color 180ms ease, margin 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease; }}
 .panel switch:checked slider {{ background-color: {fieldbg}; }}
 
-.newtab {{ border-radius: 7px; }}
-.newtab:hover {{ background-color: {hover}; }}
+.newtab {{ border-radius: 7px; color: {faint}; }}
+.newtab:hover {{ background-color: {hover}; color: {muted}; }}
 .newtablabel {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {faint}; }}
 .newtab:hover .newtablabel {{ color: {muted}; }}
 
 .helm {{ }}
 
 .card {{ background-color: {ground}; }}
+.progress {{ color: {accent}; background-color: transparent; }}
 .blank {{ background-color: {ground}; }}
-.fakefield {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 9px; }}
+.fakefield {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 9px; color: {muted}; }}
 .fakefield:hover {{ border-color: {faint}; }}
 .fakefieldtext {{ font-family: {font}; font-size: {title}px; color: {faint}; }}
 .blanktitle {{ font-family: {font}; font-size: {title}px; font-weight: bold; color: {muted}; letter-spacing: -0.01em; }}
@@ -285,25 +294,21 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .blank button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 
 
-.scrim {{ background-color: {scrim}; }}
-.omni {{ background-color: {fieldbg}; border-radius: 12px; border: 1px solid {fieldborder}; }}
-.omni.focused {{ border-color: {ink}; }}
+.omni {{ background-color: {fieldbg}; border-radius: 12px; border: 1px solid {fieldborder}; box-shadow: 0 12px 34px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.08); }}
+.omni.focused {{ border-color: {accent}; box-shadow: 0 14px 40px rgba(0,0,0,0.16), 0 0 0 1px {accent}; }}
 /* Focus is the field's own edge, so "type to replace" has a visible state
    without a ring GTK draws under the text. */
 .omni entry {{ background: none; background-image: none; border: none; box-shadow: none; padding: 0; }}
 .omni entry:focus {{ border: none; box-shadow: none; }}
 .omnitext {{ font-family: {font}; font-size: {title}px; color: {ink}; }}
 .omnisite {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.suggest {{ background-color: {fieldbg}; border-radius: 10px; border: 1px solid {fieldborder}; }}
-.suggest .sgrow {{ border-radius: 6px; }}
+.suggest {{ background-color: {fieldbg}; border-radius: 10px; border: 1px solid {fieldborder}; box-shadow: 0 12px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06); }}
+.suggest .sgrow {{ border-radius: 6px; min-height: 44px; color: {muted}; }}
 .suggest .sgrow:hover {{ background-color: {hover}; }}
-.suggest .sgrow.picked {{ background-color: {wash}; }}
+.suggest .sgrow.picked {{ background-color: {wash}; color: {ink}; box-shadow: inset 3px 0 0 {accent}; }}
 .suggest .sghead {{ font-family: {font}; font-size: {caps}px; font-weight: bold; color: {muted}; letter-spacing: 0.06em; }}
-.suggest .sgrow {{ min-height: 44px; }}
-.suggest .sgrow {{ border-left: 2px solid transparent; }}
-.suggest .sgrow.picked {{ border-left: 2px solid {ink}; border-top-left-radius: 0; border-bottom-left-radius: 0; }}
 /* The bookmarks bar: a row of kept pages, one chip each, quiet until hovered. */
-.bmarkbar {{ background-color: {ground}; border-bottom: 1px solid {divider}; padding-top: 6px; }}
+.bmarkbar {{ background-color: {ground}; border-bottom: 1px solid {divider}; padding-top: 3px; padding-bottom: 3px; }}
 .bmark {{ font-family: {font}; font-size: {small}px; color: {muted}; background-color: transparent;
           background-image: none; border: none; box-shadow: none; padding: 1px 8px;
           min-height: 20px; border-radius: 5px; }}
@@ -320,7 +325,7 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 /* GTK clips a child's box-shadow behind its parent, so the panel's shadow
    never reaches the page. Its edge has to be the fill itself: the panel is
    the wash in light and the field colour in dark, both a step off the page. */
-.panel {{ background-color: {panelbg}; border-radius: 12px; border: 1px solid {fieldborder}; box-shadow: 0 18px 48px rgba(0,0,0,0.16); }}
+.panel {{ background-color: {panelbg}; border-radius: 12px; border: 1px solid {panelborder}; box-shadow: 0 18px 48px rgba(0,0,0,0.16); }}
 .panel .head {{ font-family: {font}; font-size: {title}px; font-weight: bold; color: {ink}; }}
 .panel .sub {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel entry {{ background-color: {chipbg}; border-radius: 7px; border: 1px solid {fieldborder}; padding: 6px 10px; }}
@@ -331,20 +336,23 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .keycap {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {wash}; border: 1px solid {divider}; border-radius: 5px; padding: 2px 6px; }}
 .extensionnote {{ padding: 10px 12px; background-color: {wash}; border-radius: 8px; }}
-.panel button.tab {{ background: none; background-image: none; box-shadow: none; border: none; padding: 5px 10px; border-radius: 6px; min-height: 32px; }}
+.panel button.tab {{ background: none; background-image: none; box-shadow: none; border: 1px solid transparent; padding: 5px 10px; border-radius: 6px; min-height: 32px; }}
 .panel button.tab label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.panel button.tab:checked {{ background-color: {chipbg}; }}
+.panel button.tab:hover {{ background-color: {hover}; }}
+.panel button.tab:checked {{ background-color: {chipbg}; border-color: {panelborder}; }}
 .panel button.tab:checked label {{ color: {ink}; font-weight: bold; }}
 .panel button.act {{ background-color: {chipbg}; border-radius: 6px; padding: 5px 10px; min-height: 32px; }}
+.panel button.act:hover {{ background-color: {livehover}; }}
+.panel button.act:active {{ background-color: {hairline}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.14); }}
 .panel button.panelclose {{ min-width: 32px; min-height: 32px; }}
 .panel button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
-.panel button.act.quiet {{ background-color: transparent; }}
+.panel button.act.quiet {{ background-color: transparent; border-color: transparent; }}
 .panel button.act.quiet label {{ color: {faint}; }}
-.panel button.act.quiet:hover {{ background-color: {chipbg}; }}
+.panel button.act.quiet:hover {{ background-color: {chipbg}; border-color: {divider}; }}
 .panel button.act.danger label {{ color: {dangerink}; }}
 .panel button.act.danger {{ border-color: {dangerink}; }}
 .panel button.act.danger:hover label {{ color: {dangerink}; }}
-.panel button.act.chosen {{ background-color: {ink}; border: none; }}
+.panel button.act.chosen {{ background-color: {ink}; border: 1px solid transparent; }}
 .panel button.act.chosen label {{ color: {ground}; font-weight: bold; }}
 .panel switch {{ min-width: 44px; min-height: 28px; }}
 .setting {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
@@ -355,15 +363,31 @@ button.close:hover {{ background-color: {hairline}; border-radius: 4px; }}
 .panel scrolledwindow {{ background-color: transparent; }}
 .empty {{ font-family: {font}; font-size: {body}px; color: {faint}; }}
 
-.findbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; }}
+.findbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; box-shadow: 0 6px 20px rgba(0,0,0,0.12); }}
 .findbar entry {{ background: none; border: none; box-shadow: none; }}
 .findbar label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 
-.dlbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; }}
+.dlbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; box-shadow: 0 10px 28px rgba(0,0,0,0.14); }}
 .dlbar label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
+.dlbar entry {{ background-color: {chipbg}; border-radius: 7px; border: 1px solid {fieldborder}; padding: 6px 10px; font-family: {font}; font-size: {body}px; color: {ink}; }}
+.dlbar entry text {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
+.dlbar entry:focus {{ border-color: {accent}; outline: 2px solid {accent}; outline-offset: 2px; }}
+/* Inner room for the cards built by permissions::card (site card, permission
+   prompt, script dialogs) and the welcome card. A GtkBox lays out through its
+   CSS gadget, so set_border_width(12) left the first label at [1,1]; CSS
+   padding is what the gadget honours. Plain .dlbar (downloads bar, toast,
+   blocked card, Peek header, link status) keeps no padding. */
+.dlbar.prompt {{ padding: 12px; }}
+.statuspill {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; padding: 4px 10px; font-family: {font}; font-size: {small}px; color: {ink}; box-shadow: 0 4px 12px rgba(0,0,0,0.10); }}
+
+/* Smooth transitions across interactive chrome so state changes ease instead of snapping. */
+.rowtitle, .tile, .favicon, .rowmark {{ transition: color 140ms ease, opacity 160ms ease, background-color 140ms ease; }}
+.control, button, button.act, .panel button.tab, combobox button, button.mark, .bmark, .newtab, .colstrip {{ transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease, opacity 130ms ease, box-shadow 140ms ease; }}
+.suggest .sgrow, .panel .ptrow, .panel row, menuitem {{ transition: background-color 110ms ease, color 110ms ease, box-shadow 140ms ease; }}
+.omni, .panel entry, .dlbar entry, .fakefield {{ transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease; }}
 
 scrollbar {{ background: transparent; }}
-scrollbar slider {{ background-color: {scroll}; border-radius: 6px; min-width: 8px; min-height: 8px; opacity: 0.85; }}
+scrollbar slider {{ background-color: {scroll}; border-radius: 6px; min-width: 8px; min-height: 8px; opacity: 0.85; transition: background-color 150ms ease, opacity 150ms ease; }}
 scrollbar slider:hover {{ background-color: {scrollhover}; }}
 scrollbar trough {{ background: transparent; }}
 "#,
@@ -393,11 +417,7 @@ scrollbar trough {{ background: transparent; }}
         tilefg = quiet::pick(quiet::TILE_FG, p.is_dark()).hex(),
         sidebg = p.side_bg().hex(),
         sidehover = p.side_hover.hex(),
-        divider = if p.is_dark() { "#3C3C3C".to_string() } else { "#ECECEC".to_string() },
-        // The strip above the window. The original's runs #EDEDEC at the top
-        // to #E6E6E5 at the bottom; one flat value in the middle of that range
-        // is the same read at 23px tall.
-        desk = p.desk().hex(),
+        divider = if p.is_dark() { "#3C3C3C".to_string() } else { "#D2D2D0".to_string() },
         switchoff = quiet::pick(quiet::SWITCH_OFF, p.is_dark()).hex(),
         knob = if p.is_dark() { "#EDEDED".to_string() } else { "#FFFFFF".to_string() }, /* 3.77 / 3.85 on the track */
         // A page that failed has one sentence to read, and it used to be the
@@ -408,9 +428,12 @@ scrollbar trough {{ background: transparent; }}
         blankhint = quiet::pick(quiet::BLANK_HINT, p.is_dark()).hex(),
         muted = quiet::pick(quiet::MUTED, p.is_dark()).hex(),
         faint = quiet::pick(quiet::FAINT, p.is_dark()).hex(),
-        panelbg = if p.is_dark() { "#1A1A1A".to_string() } else { p.wash.hex() },
-        chipbg = if p.is_dark() { p.wash.hex() } else { "#FFFFFF".to_string() },
-        scrim = if p.is_dark() { rgba(crate::palette::Rgb(0x00, 0x00, 0x00), 0.86) } else { rgba(p.card, 0.88) },
+        panelbg = if p.is_dark() { "#202020".to_string() } else { "#FFFFFF".to_string() },
+        panelborder = if p.is_dark() { "rgba(255,255,255,0.16)".to_string() } else { quiet::pick(quiet::FIELD_BORDER, false).hex() },
+        accent = if p.is_dark() { "#FF7A55".to_string() } else { "#FF5B2E".to_string() },
+        accenthover = if p.is_dark() { "#FF8E6E".to_string() } else { "#EA5126".to_string() },
+        accentink = if p.is_dark() { "#1A1A1A".to_string() } else { "#0E0E0E".to_string() },
+        chipbg = if p.is_dark() { p.wash.hex() } else { "#F2F2F0".to_string() },
         fieldbg = if p.is_dark() { "#1A1A1A".to_string() } else { "#FFFFFF".to_string() },
         // The edge of the address field is the one boundary a reader has to
         // find without hunting: #B4B4B2 on white was 2.08:1, under the 3:1 a
@@ -480,10 +503,11 @@ mod tests {
     #[test]
     fn quiet_text_can_be_read_on_every_ground_it_sits_on() {
         for (name, p, dark) in [("light", light(), false), ("dark", dark(), true)] {
-            let panel = if dark { Rgb(0x1A, 0x1A, 0x1A) } else { p.wash };
+            let panel = if dark { Rgb(0x20, 0x20, 0x20) } else { Rgb(0xFF, 0xFF, 0xFF) };
+            let chip = if dark { p.wash } else { Rgb(0xF2, 0xF2, 0xF0) };
             let field = if dark { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
             let tile = if dark { p.side_tile } else { Rgb(0xF1, 0xF1, 0xF1) };
-            let cases: [(&str, Rgb, Rgb); 14] = [
+            let cases: [(&str, Rgb, Rgb); 16] = [
                 ("pin letter on the sidebar", quiet::pick(quiet::PIN_FG, dark), p.side_bg()),
                 ("pin letter on a tile", quiet::pick(quiet::PIN_FG, dark), tile),
                 ("live pin letter", quiet::pick(quiet::PIN_LIVE_FG, dark), p.side_pin_live),
@@ -491,8 +515,10 @@ mod tests {
                 ("row title on a hover", quiet::pick(quiet::ROW_FG, dark), p.side_hover),
                 ("tile letter", quiet::pick(quiet::TILE_FG, dark), tile),
                 ("muted on the panel", quiet::pick(quiet::MUTED, dark), panel),
+                ("muted on a panel chip", quiet::pick(quiet::MUTED, dark), chip),
                 ("muted on the page", quiet::pick(quiet::MUTED, dark), p.card),
                 ("faint on the panel", quiet::pick(quiet::FAINT, dark), panel),
+                ("faint on a panel chip", quiet::pick(quiet::FAINT, dark), chip),
                 ("faint on a hover", quiet::pick(quiet::FAINT, dark), p.hover),
                 ("empty line on the page", quiet::pick(quiet::EMPTY_FG, dark), p.card),
                 ("empty line on the panel", quiet::pick(quiet::EMPTY_FG, dark), panel),
@@ -517,13 +543,33 @@ mod tests {
     fn a_focused_mark_draws_an_ink_ring() {
         for p in [light(), dark()] {
             let sheet = super::build(&p, 30);
-            let ink = p.ink.hex();
+            // The ring is the accent now, one colour for every focus.
+            let accent = if p.is_dark() { Rgb(0xFF, 0x7A, 0x55) } else { Rgb(0xFF, 0x5B, 0x2E) };
             // The findbar sits on `fieldbg`, not the page ground.
             let ground = if p.is_dark() { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
-            let rule = format!("button.mark:focus-visible {{ outline: 2px solid {ink};");
-            assert!(sheet.contains(&rule), "no ink focus ring on the marks ({ink})");
-            let ratio = contrast(p.ink, ground);
-            assert!(ratio >= 3.0, "{ink} ring is {ratio:.2}:1, a boundary wants 3");
+            // GTK3 has no :focus-visible and drops the whole rule, so the ring
+            // was never drawn. :focus is what GTK3 understands.
+            assert!(!sheet.contains(":focus-visible"), "GTK3 ignores :focus-visible");
+            let value = if p.is_dark() { "#FF7A55" } else { "#FF5B2E" };
+            let rule = format!("button.mark:focus {{ outline: 2px solid {value};");
+            assert!(sheet.contains(&rule), "no accent focus ring on the marks ({value})");
+            let ratio = contrast(accent, ground);
+            assert!(ratio >= 3.0, "{} ring is {ratio:.2}:1, a boundary wants 3", accent.hex());
+        }
+    }
+
+    /// One accent, two values: #FF5B2E light and #FF7A55 dark. The primary
+    /// buttons and the active marker use it, and the stylesheet must carry it.
+    #[test]
+    fn one_accent_colour_reaches_the_primary_buttons() {
+        for (p, value) in [(light(), "#FF5B2E"), (dark(), "#FF7A55")] {
+            let sheet = super::build(&p, 30);
+            assert!(sheet.contains(value), "the stylesheet lacks the accent {value}");
+            assert!(
+                sheet.contains(&format!("button.act.primary {{ background-color: {value}")),
+                "primary buttons do not take the accent {value}"
+            );
+            assert!(sheet.contains(&format!("box-shadow: inset 3px 0 0 {value}")), "the active row has no accent marker");
         }
     }
 
@@ -534,11 +580,68 @@ mod tests {
     fn the_field_can_be_found_and_a_switch_can_be_seen() {
         for (name, p, dark) in [("light", light(), false), ("dark", dark(), true)] {
             let field = if dark { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
-            let panel = if dark { Rgb(0x1A, 0x1A, 0x1A) } else { p.wash };
+            let panel = if dark { Rgb(0x20, 0x20, 0x20) } else { Rgb(0xFF, 0xFF, 0xFF) };
+            let chip = if dark { p.wash } else { Rgb(0xF2, 0xF2, 0xF0) };
             let edge = contrast(quiet::pick(quiet::FIELD_BORDER, dark), field);
             assert!(edge >= 3.0, "{name}: the field's edge is {edge:.2}:1, wants 3");
+            let chip_edge = contrast(quiet::pick(quiet::FIELD_BORDER, dark), chip);
+            assert!(chip_edge >= 3.0, "{name}: a chip/entry edge is {chip_edge:.2}:1, wants 3");
             let track = contrast(quiet::pick(quiet::SWITCH_OFF, dark), panel);
             assert!(track >= 3.0, "{name}: an off switch is {track:.2}:1, wants 3");
+        }
+    }
+
+    #[test]
+    fn chrome_surfaces_and_focus_rules_are_present() {
+        let light_css = super::build(&light(), 30);
+        let dark_css = super::build(&dark(), 30);
+        for sheet in [&light_css, &dark_css] {
+            assert!(sheet.contains(".dlbar entry {"));
+            assert!(sheet.contains(".dlbar entry:focus {"));
+            assert!(sheet.contains(".colstrip {"));
+            assert!(sheet.contains(".colstrip:hover {"));
+            assert!(sheet.contains(".statuspill { padding: 4px 10px;") || sheet.contains(".statuspill {"));
+            assert!(sheet.contains(".panel button.act.chosen { background-color:"));
+            assert!(sheet.contains("border: 1px solid transparent;"));
+            assert!(sheet.contains("button.act:disabled,"));
+            assert!(sheet.contains("combobox button:focus"));
+            assert!(sheet.contains(".bmark:focus, .findbar entry:focus"));
+            assert!(sheet.contains(".bmarkbar {"));
+            assert!(sheet.contains("padding-top: 3px; padding-bottom: 3px;"));
+            assert!(sheet.contains(".control.shut:hover {"));
+            assert!(sheet.contains("color: #FFFFFF;"));
+            assert!(sheet.contains(".row.asleep .rowtitle"));
+        }
+        assert!(light_css.contains("#d2d2d0") || light_css.contains("#D2D2D0"));
+        assert!(light_css.contains("#F2F2F0"));
+        assert!(dark_css.contains("rgba(255,255,255,0.16)"));
+    }
+
+    #[test]
+    fn interactive_transitions_and_elevation_rules_are_emitted() {
+        for (p, accent) in [(light(), "#FF5B2E"), (dark(), "#FF7A55")] {
+            let sheet = super::build(&p, 30);
+            for rule in [
+                "transition: background-color 140ms cubic-bezier(0.2, 0.8, 0.2, 1), color 140ms ease, box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1);",
+                "transition: color 140ms ease, opacity 160ms ease, background-color 140ms ease;",
+                "transition: opacity 150ms ease, background-color 120ms ease, color 120ms ease;",
+                "transition: background-color 140ms ease, color 140ms ease, box-shadow 150ms ease;",
+                "transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease, opacity 130ms ease, box-shadow 140ms ease;",
+                "transition: background-color 180ms ease, box-shadow 140ms ease;",
+                "transition: background-color 180ms ease, margin 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease;",
+                "transition: background-color 110ms ease, color 110ms ease, box-shadow 140ms ease;",
+                "transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;",
+                "transition: background-color 150ms ease, opacity 150ms ease;",
+                "button.act:active",
+                ".panel button.act:active",
+                "button.act.primary:active",
+                ".pin:active",
+                ".row:active",
+            ] {
+                assert!(sheet.contains(rule), "missing expected css rule: {rule}");
+            }
+            assert!(sheet.contains(&format!(".progress {{ color: {accent};")));
+            assert!(sheet.contains(&format!(".omni.focused {{ border-color: {accent};")));
         }
     }
 

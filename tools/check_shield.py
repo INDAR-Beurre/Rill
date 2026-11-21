@@ -11,6 +11,7 @@ the browser uses:
 """
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,36 +50,39 @@ def main():
         print("nothing to check: run tools/build_shield.py first")
         return 1
     work = pathlib.Path(tempfile.mkdtemp(prefix="shield-check-"))
-    pairs = [[f"check-{index}", str(path)] for index, path in enumerate(LISTS)]
-    script = work / "probe.py"
-    script.write_text(PROBE)
     try:
-        result = subprocess.run(
-            [sys.executable, str(script), json.dumps(pairs), str(work / "store")],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except subprocess.TimeoutExpired:
-        print("the engine did not finish compiling in five minutes")
-        return 1
-    if result.returncode != 0:
-        print(result.stderr.strip()[-2000:])
-        print("is python3-gobject with WebKit2 4.1 installed?")
-        return 1
-    answer = json.loads(result.stdout.strip().splitlines()[-1])
-    for name, why in answer["failed"]:
-        index = int(name.split("-")[-1])
-        rules = len(json.loads(LISTS[index].read_text()))
-        print(f"  FAIL {LISTS[index].name}: {rules} rules lost: {why}")
-    for name in answer["ok"]:
-        index = int(name.split("-")[-1])
-        rules = len(json.loads(LISTS[index].read_text()))
-        print(f"  ok   {LISTS[index].name}: {rules} rules compile")
-    total = sum(len(json.loads(path.read_text())) for index, path in enumerate(LISTS)
-                if f"check-{index}" in answer["ok"])
-    print(f"{total} rules the engine accepts, {len(answer['failed'])} lists rejected")
-    return 1 if answer["failed"] else 0
+        pairs = [[f"check-{index}", str(path)] for index, path in enumerate(LISTS)]
+        script = work / "probe.py"
+        script.write_text(PROBE)
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), json.dumps(pairs), str(work / "store")],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            print("the engine did not finish compiling in five minutes")
+            return 1
+        if result.returncode != 0:
+            print(result.stderr.strip()[-2000:])
+            print("is python3-gobject with WebKit2 4.1 installed?")
+            return 1
+        answer = json.loads(result.stdout.strip().splitlines()[-1])
+        for name, why in answer["failed"]:
+            index = int(name.split("-")[-1])
+            rules = len(json.loads(LISTS[index].read_text()))
+            print(f"  FAIL {LISTS[index].name}: {rules} rules lost: {why}")
+        for name in answer["ok"]:
+            index = int(name.split("-")[-1])
+            rules = len(json.loads(LISTS[index].read_text()))
+            print(f"  ok   {LISTS[index].name}: {rules} rules compile")
+        total = sum(len(json.loads(path.read_text())) for index, path in enumerate(LISTS)
+                    if f"check-{index}" in answer["ok"])
+        print(f"{total} rules the engine accepts, {len(answer['failed'])} lists rejected")
+        return 1 if answer["failed"] else 0
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":

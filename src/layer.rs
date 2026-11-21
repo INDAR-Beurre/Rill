@@ -31,9 +31,4 @@ impl Layer {
         self.root.set_no_show_all(false);
         self.root.show_all();
     }
-
-    pub fn hide(&self) {
-        self.root.hide();
-        self.root.set_no_show_all(true);
-    }
 }

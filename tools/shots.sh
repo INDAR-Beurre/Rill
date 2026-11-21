@@ -37,6 +37,9 @@ export SEARCH_BENCH_SOCKET="$SOCKET"
 APP=""
 FIXTURES=""
 SHOTS=""
+CFG_DIR=""
+DATA_DIR=""
+LOG_DIR=""
 # Setsid forks to make the new session leader, so `$!` is a wrapper that exits at
 # once and the browser is not its child any more. The launched shell writes the
 # pid it is about to exec over, and that one is both the process to signal and
@@ -104,7 +107,18 @@ cleanup() {
     done
     kill -0 "$FIXTURES" 2>/dev/null && tree_kill "$FIXTURES" KILL
   fi
+  if [[ "$status" -ne 0 && -n "$LOG_DIR" ]]; then
+    for log in "$LOG_DIR/fixtures.log" "$LOG_DIR/shots.log"; do
+      if [[ -s "$log" ]]; then
+        echo "--- $(basename "$log") (tail) ---" >&2
+        tail -n 30 "$log" >&2 || true
+      fi
+    done
+  fi
   rm -f "$PIDFILE"
+  for path in "$CFG_DIR" "$DATA_DIR" "$LOG_DIR" "$SOCKET"; do
+    [[ -n "$path" ]] && rm -rf "$path"
+  done
   exit "$status"
 }
 
@@ -115,6 +129,8 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
+LOG_DIR="$(mktemp -d)"
+
 # Fixtures, unless one is already answering.
 if ! python3 - "$PORT" <<'PY'
 import socket, sys
@@ -124,7 +140,7 @@ except OSError:
     sys.exit(1)
 PY
 then
-  python3 "$ROOT/tools/fixtures.py" "$PORT" >/tmp/search-fixtures.log 2>&1 &
+  python3 "$ROOT/tools/fixtures.py" "$PORT" >"$LOG_DIR/fixtures.log" 2>&1 &
   # Only a server this script started is ever killed; one that was already
   # answering is someone else's and stays up.
   FIXTURES=$!
@@ -132,8 +148,10 @@ then
 fi
 
 # A browser of our own, with a fresh profile so states are reproducible.
-export XDG_CONFIG_HOME="$(mktemp -d)"
-export XDG_DATA_HOME="$(mktemp -d)"
+CFG_DIR="$(mktemp -d)"
+DATA_DIR="$(mktemp -d)"
+export XDG_CONFIG_HOME="$CFG_DIR"
+export XDG_DATA_HOME="$DATA_DIR"
 unset DISPLAY
 export GDK_BACKEND=wayland
 export SEARCH_BENCH=1
@@ -149,10 +167,10 @@ rm -f "$SOCKET"
 LAUNCH='echo $$ > "$1"; shift; exec "$@"'
 if command -v setsid >/dev/null 2>&1; then
   setsid sh -c "$LAUNCH" sh "$PIDFILE" \
-    "$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >/tmp/search-shots.log 2>&1 &
+    "$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >"$LOG_DIR/shots.log" 2>&1 &
 else
   sh -c "$LAUNCH" sh "$PIDFILE" \
-    "$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >/tmp/search-shots.log 2>&1 &
+    "$BIN" --fresh --appearance "$APPEARANCE" --size "$SIZE" >"$LOG_DIR/shots.log" 2>&1 &
 fi
 APP=$!
 # The recorded pid, when the launch got far enough to record one. Until then the
@@ -229,7 +247,7 @@ def shot(name, note=""):
     # settle() closes the very panel or field the shot is evidence for. They
     # still need GTK's queued allocation pass to run, or the layer is drawn at
     # the size it had before it was raised.
-    if name.startswith(("04", "05", "06", "07")):
+    if name.startswith(("04", "05", "06", "07", "16", "17")):
         bench.must("settle")
     else:
         settle()
@@ -303,8 +321,25 @@ try:
     bench.must("ping")
 
     # 1. the quiet default: one page, tabs down the side
-    open_page("/office")
+    # A --fresh start already has one blank tab. bench `open` always adds a
+    # new tab (src/bench.rs "open" calls app.new_tab), so opening the studio
+    # page with it left the startup tab above it, and the picture captioned
+    # "one tab" showed two. Load the page into the tab the browser started
+    # with, as a person typing an address into a new window would.
+    for attempt in range(2):
+        bench.go(f"http://127.0.0.1:{port}/office")
+        try:
+            bench.wait_loaded(timeout=20)
+            break
+        except Exception as error:  # a slow fixture should not end the round
+            if attempt:
+                raise SystemExit(f"could not load /office: {error}")
+            print(f"    (retrying /office: {error})")
+            time.sleep(0.5)
     time.sleep(0.6)
+    if len(bench.probe().get("tabs", [])) != 1:
+        raise SystemExit("01-default must show exactly one tab: "
+                         + json.dumps(bench.probe().get("tabs"))[:300])
     shot("01-default", "one tab, the studio page")
 
     # 2. five tabs, four of them pinned
@@ -398,6 +433,36 @@ try:
     open_page("/missing")
     time.sleep(0.6)
     shot("09-missing", "a 404")
+
+    # 16. site card over a loaded page
+    bench.must("closeall")
+    time.sleep(0.4)
+    open_page("/office")
+    settle()
+    time.sleep(0.4)
+    bench.must("key sitecard")
+    bench.must("settle")
+    time.sleep(0.3)
+    shot("16-sitecard", "site card")
+    bench.must("escape")
+    settle()
+
+    # 17. peek card over the loaded page
+    bench.must(f"peek http://127.0.0.1:{port}/long")
+    time.sleep(1.0)
+    bench.must("settle")
+    shot("17-peek", "peek card")
+    bench.must("escape")
+    settle()
+
+    # 18. folded tab column
+    bench.must("key foldcolumn")
+    bench.must("settle")
+    time.sleep(0.3)
+    shot("18-folded-column", "folded tab column")
+    bench.must("key foldcolumn")
+    bench.must("settle")
+    settle()
 except (BenchError, SystemExit, OSError) as error:
     # A shot that fails still leaves a manifest: a round with no index at all
     # reads as a round nobody ran.
@@ -423,22 +488,62 @@ def pixels(path, points):
     return [[int(float(v)) for v in re.findall(r"[\d.]+", part)[:3]] for part in result.stdout.split("srgb")[1:]]
 
 if (out / "01-default.png").exists():
-    corner = pixels(out / "01-default.png", [(0, 26), (0, 18)])
-    ok = bool(corner) and max(abs(a-b) for a,b in zip(corner[0], corner[1])) <= 2
+    dark = bool(os.environ.get("SHOT_DARK"))
+    corner = pixels(out / "01-default.png", [(4, 4), (100, 4)])
+    if dark:
+        ok = bool(corner) and all(max(c) <= 25 for c in corner)
+    else:
+        ok = bool(corner) and all(min(c) >= 245 for c in corner)
     manifest.append({"name": "pixel dark corner", "ok": ok, "note": str(corner)})
     print(("  ok   " if ok else "  FAIL ") + "pixel dark corner — " + str(corner))
 if not os.environ.get("SHOT_DARK") and (out / "05-panel-history.png").exists():
-    veil = pixels(out / "05-panel-history.png", [(500, 500), (220, 5), (232, 5)])
-    ok = bool(veil) and 120 <= sum(veil[0]) / 3 <= 220 and max(abs(a-b) for a,b in zip(veil[1], veil[2])) <= 2
+    veil = pixels(out / "05-panel-history.png", [(500, 500), (100, 200)])
+    ok = bool(veil) and 120 <= sum(veil[0]) / 3 <= 220 and min(veil[1]) >= 245
     manifest.append({"name": "pixel light scrim", "ok": ok, "note": str(veil)})
     print(("  ok   " if ok else "  FAIL ") + "pixel light scrim — " + str(veil))
 
+# One pixel column of a shot, top to bottom, as (r, g, b) tuples.
+def column(path, x):
+    result = subprocess.run(
+        ["magick", str(path), "-crop", f"1x10000+{x}+0", "+repage", "-depth", "8", "rgb:-"],
+        capture_output=True)
+    if result.returncode:
+        return []
+    raw = result.stdout
+    return [tuple(raw[i:i + 3]) for i in range(0, len(raw) - 2, 3)]
+
 if (out / "05-panel-settings.png").exists():
-    thumb = pixels(out / "05-panel-settings.png", [(1199, 300), (1199, 767)])
+    # The card's height is not fixed: a scrolling panel is shortened so it ends
+    # on a whole row (snap_to_row), so its bottom edge moves with the content.
+    # The old gate read a fixed (1199, 767), which landed on the backdrop once
+    # Settings ended at y≈756 (round 40). Find the card's real bottom edge
+    # instead: the first row below the thumb where the scrollbar column matches
+    # the backdrop beside the card (x=400, same row). Then read the track a
+    # little above that edge, inside the card.
+    path = out / "05-panel-settings.png"
     dark = os.environ.get("SHOT_DARK")
+    track_col, side_col = column(path, 1199), column(path, 400)
+    rows = min(len(track_col), len(side_col))
+    # The card casts a soft shadow, so the light backdrop directly under it
+    # gets lighter slowly, from 126 at y=741 to 133 by y=847 (round 41). Only
+    # a tolerance of 3 waited out the shadow, and the check then picked y=786
+    # and read the backdrop at 774. The card itself is white (255) or #202020
+    # (32) and its border is 160-186, so they are far outside 12. Shadow and
+    # backdrop are within 12. With 12, the edge lands on the card's real
+    # bottom: y=741 in both light and dark.
+    # Dark is the opposite case: the card is #202020 (32) and the backdrop is
+    # 22, only 10 apart, so a tolerance of 12 matched the card itself and
+    # stopped at its top, y=428 (round 42). The dark shadow is within 1 of the
+    # backdrop, so 3 is enough there and finds y=741 (round 41).
+    tolerance = 3 if dark else 12
+    bottom = next((y for y in range(301, rows)
+                   if max(abs(a - b) for a, b in zip(track_col[y], side_col[y])) <= tolerance), None)
+    probe_y = bottom - 12 if bottom and bottom - 12 > 300 else None
+    thumb = pixels(path, [(1199, 300), (1199, probe_y)]) if probe_y else []
     ok = bool(thumb) and ((max(thumb[0]) < 230 and min(thumb[1]) > 225) if not dark else (40 <= sum(thumb[0]) / 3 <= 110 and sum(thumb[1]) / 3 < 35))
-    manifest.append({"name": "pixel panel scrollbar", "ok": ok, "note": str(thumb)})
-    print(("  ok   " if ok else "  FAIL ") + "pixel panel scrollbar — " + str(thumb))
+    note = f"{thumb} (card bottom y={bottom}, track read at y={probe_y})"
+    manifest.append({"name": "pixel panel scrollbar", "ok": ok, "note": note})
+    print(("  ok   " if ok else "  FAIL ") + "pixel panel scrollbar — " + note)
 
 bad = [item for item in manifest if not item["ok"] and not item.get("skipped")]
 # though it is not a failed picture, so the run does not report success. A

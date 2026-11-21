@@ -19,6 +19,20 @@ pub struct FindBar {
     pub entry: gtk::Entry,
     pub count: gtk::Label,
     pub visible: bool,
+    last_pos: std::cell::Cell<(i32, i32)>,
+    attached: std::cell::RefCell<Option<(glib::WeakRef<webkit2gtk::FindController>, glib::SignalHandlerId)>>,
+}
+
+/// Position and width of the find bar inside the page viewport (`[column + 12, width - 12]`),
+/// sitting `PAGE_TOP` below `band`.
+fn bar_plan(width: i32, band: i32, column: i32) -> (i32, i32, i32) {
+    let avail = (width - column - 24).max(1);
+    let bar_width = BAR_WIDTH.min(avail);
+    let min_x = column + 12;
+    let max_x = (width - bar_width - 12).max(min_x);
+    let x = (width - bar_width - PAGE_INSET).clamp(min_x, max_x);
+    let y = band.max(0) + PAGE_TOP;
+    (x, y, bar_width)
 }
 
 impl FindBar {
@@ -32,6 +46,7 @@ impl FindBar {
 
         let entry = gtk::Entry::new();
         entry.set_placeholder_text(Some("Find"));
+        entry.set_width_chars(1);
         entry.set_hexpand(true);
         entry.set_margin_start(8);
         entry.set_has_frame(false);
@@ -39,7 +54,7 @@ impl FindBar {
         // A placeholder is drawn hint text, not an accessible name, so the
         // field is unnamed to a screen reader without this.
         if let Some(access) = entry.accessible() {
-            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Find in the page");
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Find in page");
         }
         crate::ui::pack(&bar, &entry, true);
 
@@ -75,7 +90,7 @@ impl FindBar {
         crate::ui::pack(&bar, &down, false);
         let close = crate::icons::button(crate::icons::Icon::Close, 12, palette.muted, "door");
         close.set_valign(gtk::Align::Center);
-        label(&close, "Close find", "Close find (Escape)");
+        label(&close, "Close find bar", "Close find (Escape)");
         crate::ui::pack(&bar, &close, false);
 
         layer.add(&bar);
@@ -112,31 +127,76 @@ impl FindBar {
             });
         }
 
-        FindBar { holder, layer, bar, entry, count, visible: false }
+        FindBar {
+            holder,
+            layer,
+            bar,
+            entry,
+            count,
+            visible: false,
+            last_pos: std::cell::Cell::new((0, 0)),
+            attached: std::cell::RefCell::new(None),
+        }
     }
 
-    /// The bar sits at the page's top right, over the page rather than in it.
-    pub fn layout(&self, width: i32) {
-        let x = (width - BAR_WIDTH - PAGE_INSET).max(12);
-        self.layer.place(&self.bar, x, PAGE_TOP, BAR_WIDTH, 34);
+    /// Place the bar inside the page viewport below `band` and right of `column`.
+    pub fn layout_in(&self, width: i32, band: i32, column: i32) {
+        let (x, y, bar_width) = bar_plan(width, band, column);
+        self.last_pos.set((x, y));
+        self.bar.set_size_request(bar_width, 34);
+        self.layer.place(&self.bar, x, y, bar_width, 34);
     }
 
     pub fn show(&mut self, ui: &crate::ui::Ui) {
+        crate::motion::cancel(&self.bar);
+        crate::motion::cancel(&self.layer.root);
+        self.bar.set_opacity(1.0);
+        self.layer.root.set_opacity(1.0);
         self.visible = true;
         self.layer.show();
-        self.layout(ui.window.allocated_width());
+        let column = if ui.side.is_visible() && ui.side.is_child_visible() {
+            ui.side.allocated_width()
+        } else {
+            0
+        };
+        let width = ui.overlay.allocated_width().max(ui.window.allocated_width());
+        self.layout_in(width, 0, column);
+        if width > 1 {
+            let (x, y, _) = bar_plan(width, 0, column);
+            crate::motion::slide_in_fixed(&self.layer.root, &self.bar, x, y, -18, 150);
+        }
     }
 
     pub fn hide(&mut self, _ui: &crate::ui::Ui) {
+        let was_visible = self.visible;
         self.visible = false;
-        self.layer.hide();
+        self.detach();
         if let Some(app) = crate::app::current() {
             if let Some(view) = app.view(app.active_id()) {
                 if let Some(controller) = view.find_controller() {
-                    controller.search("", 0, 0);
+                    controller.search_finish();
                 }
             }
         }
+        if !was_visible {
+            return;
+        }
+        crate::motion::cancel(&self.bar);
+        crate::motion::cancel(&self.layer.root);
+        let (x, y) = self.last_pos.get();
+        let root = self.layer.root.clone();
+        let bar = self.bar.clone();
+        crate::motion::slide_out_fixed(&self.layer.root, &self.bar, x, y, -14, 100, move || {
+            let still_hidden = !crate::app::current()
+                .map(|app| app.find.try_borrow().map(|f| f.visible).unwrap_or(false))
+                .unwrap_or(false);
+            if still_hidden {
+                root.hide();
+                root.set_no_show_all(true);
+                root.set_opacity(1.0);
+                bar.set_opacity(1.0);
+            }
+        });
     }
 
     pub fn focus(&self) {
@@ -144,12 +204,23 @@ impl FindBar {
         self.entry.select_region(0, -1);
     }
 
+    /// Disconnect the previously attached FindController handler and clear its highlights.
+    pub fn detach(&self) {
+        if let Some((weak, handler_id)) = self.attached.borrow_mut().take() {
+            if let Some(controller) = weak.upgrade() {
+                controller.search_finish();
+                controller.disconnect(handler_id);
+            }
+        }
+    }
+
     pub fn attach(&self, view: &WebView) {
+        self.detach();
         let count = self.count.clone();
         let Some(controller) = view.find_controller() else { return };
         // The count comes from counted-matches, not from found-text: the latter
         // reports the text it found, so its number is meaningless as a total.
-        controller.connect_counted_matches(move |_, matches| {
+        let handler_id = controller.connect_counted_matches(move |_, matches| {
             // The engine reports -1 (as u32) until it has counted: printing
             // 4294967295 matches is worse than printing nothing.
             count.set_text(&if matches > 1_000_000 {
@@ -162,6 +233,22 @@ impl FindBar {
                 }
             });
         });
+        *self.attached.borrow_mut() = Some((controller.downgrade(), handler_id));
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_sits_below_desk_band_and_stays_inside_page() {
+        assert_eq!(bar_plan(1500, 23, 232), (1500 - BAR_WIDTH - PAGE_INSET, 23 + PAGE_TOP, BAR_WIDTH));
+        // Narrow window clamps bar width and keeps x >= column + 12.
+        let (x, y, w) = bar_plan(420, 23, 232);
+        assert_eq!(y, 37);
+        assert_eq!(x, 244);
+        assert_eq!(w, 420 - 232 - 24);
+        assert!(x + w <= 420 - 12);
+    }
 }

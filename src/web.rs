@@ -6,12 +6,17 @@ use crate::curtain;
 use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::{
-    CacheModel, DownloadExt, HardwareAccelerationPolicy, NavigationPolicyDecisionExt, PolicyDecisionExt,
+    CacheModel, CookieManagerExt, CookiePersistentStorage, DownloadExt, FileChooserRequestExt,
+    HardwareAccelerationPolicy, HitTestResultExt, NavigationPolicyDecisionExt, PolicyDecisionExt,
     ResponsePolicyDecisionExt, Settings, SettingsExt, URIRequestExt, URIResponseExt,
     UserContentManager, UserContentManagerExt, WebContext, WebContextExt, WebView, WebViewExt,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     // Two of these, not one: the shield is per host, and the rules are baked
@@ -20,7 +25,27 @@ thread_local! {
     // Keyed by whether the blocker is on and by which extensions are installed:
     // a new extension means a new generation, and a new manager to build.
     static MANAGERS: RefCell<Vec<(bool, usize, UserContentManager)>> = const { RefCell::new(Vec::new()) };
-    static CONTEXT_READY: RefCell<bool> = const { RefCell::new(false) };
+    // Every context that already has the download handler. One flag for the
+    // whole process used to stop at the first context, so the private
+    // session's context, which is built later and rebuilt after the last
+    // private tab closes, never got the handler. Weak references are kept so
+    // a dropped context does not count, even if a new one lands at the same
+    // address.
+    static CONTEXT_READY: RefCell<Vec<glib::WeakRef<WebContext>>> = const { RefCell::new(Vec::new()) };
+    // Active downloads keyed by download record id so the downloads panel can
+    // cancel an in-flight WebKit download directly.
+    static ACTIVE_DOWNLOADS: RefCell<HashMap<u64, webkit2gtk::Download>> = RefCell::new(HashMap::new());
+}
+
+/// Cancel an active download by its record id, returning true if it was active.
+pub fn cancel_download(id: u64) -> bool {
+    let download = ACTIVE_DOWNLOADS.with(|map| map.borrow_mut().remove(&id));
+    if let Some(download) = download {
+        download.cancel();
+        true
+    } else {
+        false
+    }
 }
 
 fn shielded_for(app: &AppRef, url: &str) -> bool {
@@ -89,35 +114,64 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
             });
         }
     });
-    for (source, allow, at_start, every_frame) in crate::extensions::installable().scripts {
+    for (source, allow, block, at_start, every_frame) in crate::extensions::installable().scripts {
         let when = if at_start {
             webkit2gtk::UserScriptInjectionTime::Start
         } else {
             webkit2gtk::UserScriptInjectionTime::End
         };
         let allowed: Vec<&str> = allow.iter().map(|s| s.as_str()).collect();
+        // exclude_matches: WebKit's block list, checked before the allow list.
+        let blocked: Vec<&str> = block.iter().map(|s| s.as_str()).collect();
         let frames = if every_frame {
             webkit2gtk::UserContentInjectedFrames::AllFrames
         } else {
             webkit2gtk::UserContentInjectedFrames::TopFrame
         };
-        let script = webkit2gtk::UserScript::new(&source, frames, when, &allowed, &[]);
+        // Critic 7, round 2: add-on scripts used to run in the page's own
+        // JavaScript world. There the page could read, change or intercept
+        // them and anything they put on the page, such as a password
+        // manager's fields. A named world gives them their own globals while
+        // they still share the page's DOM, the same split Firefox and Chrome
+        // use for content scripts. The add-on's messages to and from the page
+        // still have to go through the DOM or postMessage.
+        let script = webkit2gtk::UserScript::for_world(
+            &source,
+            frames,
+            when,
+            EXTENSION_WORLD,
+            &allowed,
+            &blocked,
+        );
         manager.add_script(&script);
     }
     manager
 }
 
-fn settings() -> Settings {
+/// The script world add-on content scripts run in. It is kept apart from the
+/// page's world, so a page cannot see or tamper with an add-on's globals.
+pub(crate) const EXTENSION_WORLD: &str = "search-ext";
+
+fn devtools_enabled_for(value: Option<&std::ffi::OsStr>) -> bool {
+    value != Some(std::ffi::OsStr::new("0"))
+}
+
+pub(crate) fn settings() -> Settings {
     let settings = Settings::new();
-    // The inspector is a debugging tool, and a page can tell it is there. It
-    // is off unless the person asked for it with SEARCH_DEVTOOLS=1.
-    settings.set_enable_developer_extras(std::env::var_os("SEARCH_DEVTOOLS").is_some());
+    // The inspector is enabled by default so F12 / Ctrl+Shift+I work out of
+    // the box; set SEARCH_DEVTOOLS=0 to disable it explicitly.
+    settings.set_enable_developer_extras(devtools_enabled_for(
+        std::env::var_os("SEARCH_DEVTOOLS").as_deref(),
+    ));
     settings.set_enable_smooth_scrolling(true);
     settings.set_enable_webgl(true);
+    settings.set_enable_webrtc(true);
     settings.set_enable_media_stream(true);
     settings.set_enable_mediasource(true);
     settings.set_enable_webaudio(true);
     settings.set_enable_page_cache(true);
+    settings.set_default_charset("utf-8");
+    settings.set_enable_site_specific_quirks(true);
     settings.set_javascript_can_open_windows_automatically(false);
     // Compositing is left on. Two things were tried against it and both lost.
     // OnDemand is deprecated in this WebKit and prints a warning saying it is
@@ -128,26 +182,162 @@ fn settings() -> Settings {
     // It costs memory rather than saving it, so nothing turns it off for RAM.
     settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
     settings.set_enable_back_forward_navigation_gestures(true);
+    // Present a standard modern Linux WebKit User-Agent so sites do not
+    // downgrade or reject an unfamiliar application token.
+    settings.set_user_agent(Some(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+    ));
     settings
 }
 
+fn ensure_private_dir(path: &Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path);
+}
+
+fn clean_language_tags<S: AsRef<str>>(raw: &[S]) -> Vec<String> {
+    let mut tags = Vec::new();
+    for item in raw {
+        let base = item
+            .as_ref()
+            .trim()
+            .split(['.', '@'])
+            .next()
+            .unwrap_or("")
+            .trim();
+        if base.is_empty()
+            || base.eq_ignore_ascii_case("C")
+            || base.eq_ignore_ascii_case("POSIX")
+        {
+            continue;
+        }
+        if !tags.iter().any(|existing: &String| existing == base) {
+            tags.push(base.to_string());
+        }
+    }
+    tags
+}
+
+fn configure_languages(context: &WebContext) {
+    let raw = glib::language_names();
+    let tags = clean_language_tags(&raw);
+    if tags.is_empty() {
+        return;
+    }
+    let refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+    context.set_preferred_languages(&refs);
+    context.set_spell_checking_enabled(true);
+    context.set_spell_checking_languages(&refs);
+}
+
+/// The memory limit each page process gets. WebKit reads it only when a
+/// WebContext is built (`memory-pressure-settings` is construct-only), so it
+/// cannot be added to a context that already exists. These are the same
+/// numbers as the network process limit in `src/main.rs`: start freeing
+/// caches at a third of 384 MB, free everything possible at half, and check
+/// every 5 seconds.
+pub fn page_memory_pressure() -> webkit2gtk::MemoryPressureSettings {
+    let mut pressure = webkit2gtk::MemoryPressureSettings::new();
+    pressure.set_memory_limit(384);
+    pressure.set_conservative_threshold(0.33);
+    pressure.set_strict_threshold(0.5);
+    pressure.set_poll_interval(5.0);
+    pressure
+}
+
+/// The private session's context. It used to be `WebContext::new_ephemeral()`,
+/// which takes no settings, so private page processes had no memory limit.
+/// Building it with an ephemeral data manager is the same thing as
+/// new_ephemeral, plus the limit. Nothing it stores reaches disk.
 pub fn ephemeral_context() -> WebContext {
-    let context = WebContext::new_ephemeral();
+    let manager = webkit2gtk::WebsiteDataManager::new_ephemeral();
+    let context = WebContext::builder()
+        .website_data_manager(&manager)
+        .memory_pressure_settings(&page_memory_pressure())
+        .build();
     context.set_cache_model(CacheModel::DocumentBrowser);
+    configure_languages(&context);
     context
 }
 
+thread_local! {
+    // The one context every ordinary tab shares, built once on first use.
+    static SHARED_CONTEXT: RefCell<Option<WebContext>> = const { RefCell::new(None) };
+}
+
+/// The context ordinary tabs share. It used to be `WebContext::default()`,
+/// which WebKit builds itself, so its page processes could never get a memory
+/// limit: `memory-pressure-settings` is construct-only. This context is built
+/// with the limit instead. Its data manager points at the same folders
+/// WebKit's default one uses (XDG data and cache dirs, each followed by the
+/// program name, which hold hsts-storage.sqlite, localstorage, mediakeys and
+/// the rest today). Without that, everything saved before this change
+/// (sign-ins, site storage, HSTS) would be lost.
+pub fn shared_context() -> WebContext {
+    if let Some(context) = SHARED_CONTEXT.with(|c| c.borrow().clone()) {
+        return context;
+    }
+    let name = glib::prgname()
+        .map(|n| n.to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "search".to_string());
+    let data = glib::user_data_dir().join(&name);
+    let cache = glib::user_cache_dir().join(&name);
+    ensure_private_dir(&data);
+    let manager = webkit2gtk::WebsiteDataManager::builder()
+        .base_data_directory(data.to_string_lossy().to_string())
+        .base_cache_directory(cache.to_string_lossy().to_string())
+        .build();
+    let context = WebContext::builder()
+        .website_data_manager(&manager)
+        .memory_pressure_settings(&page_memory_pressure())
+        .build();
+    context.set_cache_model(CacheModel::DocumentBrowser);
+    if let Some(cookies) = context.cookie_manager() {
+        cookies.set_persistent_storage(
+            &data.join("cookies.sqlite").to_string_lossy(),
+            CookiePersistentStorage::Sqlite,
+        );
+    }
+    configure_languages(&context);
+    SHARED_CONTEXT.with(|c| *c.borrow_mut() = Some(context.clone()));
+    context
+}
+
+fn page_background(app: &AppRef) -> gtk::gdk::RGBA {
+    let page = if app.prefs.borrow().darken_pages {
+        (0.043, 0.043, 0.043)
+    } else {
+        (1.0, 1.0, 1.0)
+    };
+    gtk::gdk::RGBA::new(page.0, page.1, page.2, 1.0)
+}
+
 pub fn view_for(app: &AppRef, tab: TabId) -> Option<WebView> {
+    // A tab that cannot be found is treated as private. Before, it got the
+    // shared context and the shared content manager, which write to disk, so a
+    // private tab replaced or closed while its view was being built could leave
+    // its activity behind. permissions::on_request already chose this default.
     let private = {
         let state = app.state.borrow();
-        state.tab(tab).map(|t| t.private).unwrap_or(false)
+        state.tab(tab).map(|t| t.private).unwrap_or(true)
     };
     let context = if private {
-        app.private_context()
+        // The private context needs the same download handler as the shared
+        // one. Without it, a private download skipped safe_filename and
+        // unique_path and went to WebKit's default folder.
+        let context = app.private_context();
+        install_context(app, &context);
+        context
     } else {
-        let context = WebContext::default()?;
-        // Bound retained resources; the back/forward page cache stays on.
-        context.set_cache_model(CacheModel::DocumentBrowser);
+        // Built by the browser, not WebKit's default, so its page processes
+        // get the same 384 MB limit as the private ones. Same data folders
+        // as before, so nothing saved is lost. The cache model is set in
+        // shared_context(): bounded retained resources, page cache still on.
+        let context = shared_context();
         // Nothing sets the process model: both of its values are deprecated
         // since WebKitGTK 2.40 because several web processes is already what a
         // default context does. Asking for it changes nothing, which was
@@ -170,16 +360,17 @@ pub fn view_for(app: &AppRef, tab: TabId) -> Option<WebView> {
         .build();
     view.set_hexpand(true);
     view.set_vexpand(true);
-    // The engine's own background, so a slow page or a gap between loads is
-    // the colour the browser is, not a white flash.
-    let page = if app.dark() { (0.043, 0.043, 0.043) } else { (1.0, 1.0, 1.0) };
-    view.set_background_color(&gtk::gdk::RGBA::new(page.0, page.1, page.2, 1.0));
+    // Keep the canvas white unless page darkening is explicitly on, so
+    // websites without an explicit body background never draw dark text on dark.
+    view.set_background_color(&page_background(app));
 
     attach(app, tab, &view);
     Some(view)
 }
 
-fn attach(app: &AppRef, tab: TabId, view: &WebView) {
+/// Binds a view's callbacks to a tab id. A peek that is kept calls this once
+/// its view has been adopted as a tab, the same way a pop-up window does.
+pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     {
         let weak = app.weak();
         view.connect_title_notify(move |view| {
@@ -213,13 +404,27 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             match event {
                 webkit2gtk::LoadEvent::Started => {
                     app.reading_tabs.borrow_mut().remove(&tab);
+                    // Leaving the page takes its open prompt with it: the
+                    // request it was answering is denied, not left waiting.
+                    crate::permissions::dismiss(&app, tab);
+                    crate::dialogs::dismiss(&app, tab);
+                    crate::sitecard::dismiss_tab(&app, tab);
                     if app.active_id() == tab { app.reading.set(false); }
                     app.set_loading(tab, true);
+                    app.set_load_progress(tab, 0.08);
                     if let Some(slot) = app.state.borrow_mut().tab_mut(tab) {
                         slot.failed = false;
                     }
                     if let Some(uri) = view.uri().map(|u| u.to_string()) {
-                        curtain::sync_for_url(&app, &uri);
+                        if let Some(manager) = view.user_content_manager() {
+                            let host = crate::shield::host_of(&uri);
+                            if !host.is_empty() {
+                                curtain::sync_manager(&app, &manager, &host);
+                            }
+                        } else {
+                            curtain::sync_for_url(&app, &uri);
+                        }
+                        view.set_zoom_level(app.zoom_for(&uri));
                     }
                 }
                 // The page can keep arriving long after it is committed: a
@@ -228,6 +433,7 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 webkit2gtk::LoadEvent::Committed => {}
                 webkit2gtk::LoadEvent::Finished => {
                     app.set_loading(tab, false);
+                    app.set_load_progress(tab, 1.0);
                     app.sync_nav(tab, view);
                     app.load_finished(tab);
                     app.record_visit(tab);
@@ -246,6 +452,16 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     }
     {
         let weak = app.weak();
+        view.connect_estimated_load_progress_notify(move |view| {
+            if let Some(app) = weak.upgrade() {
+                if view.is_loading() {
+                    app.set_load_progress(tab, view.estimated_load_progress().clamp(0.08, 0.96));
+                }
+            }
+        });
+    }
+    {
+        let weak = app.weak();
         view.connect_load_failed(move |_, event, uri, error| {
             if let Some(app) = weak.upgrade() {
                 // The engine's own error page is not the browser's voice: the
@@ -259,6 +475,18 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 if cancelled {
                     return false;
                 }
+                // A load that the browser turned into a download ends here with
+                // WebKitPolicyError 102, "Frame load interrupted". That is not a
+                // failure: the page became a file, as asked. Treating it as one
+                // marked the tab failed and put up an error page for the .xpi
+                // address. In a trace, the same address was then asked for
+                // again, so every add-on from addons.mozilla.org downloaded
+                // twice, saved as "name.xpi" and "name (1).xpi". Leave the tab
+                // as it was and let the download hook take it from here.
+                if error.matches(webkit2gtk::PolicyError::FrameLoadInterruptedByPolicyChange) {
+                    app.set_load_progress(tab, 1.0);
+                    return false;
+                }
                 let reason = match event {
                     webkit2gtk::LoadEvent::Started => message_for(error),
                     webkit2gtk::LoadEvent::Committed | webkit2gtk::LoadEvent::Finished => {
@@ -267,6 +495,23 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                     _ => message_for(error),
                 };
                 app.mark_failed(tab);
+                app.set_load_progress(tab, 1.0);
+                app.show_error(tab, &reason, uri);
+            }
+            true
+        });
+    }
+    {
+        // A bad certificate is not an ordinary failed load: WebKit reports it
+        // on its own signal, and nothing answered it, so an expired or forged
+        // site left the tab finished, untitled and blank. The browser has to
+        // say plainly that the site could not be trusted, and never open it.
+        let weak = app.weak();
+        view.connect_load_failed_with_tls_errors(move |_, uri, _certificate, flags| {
+            if let Some(app) = weak.upgrade() {
+                let reason = reason_for_tls(flags);
+                app.mark_failed(tab);
+                app.set_load_progress(tab, 1.0);
                 app.show_error(tab, &reason, uri);
             }
             true
@@ -283,12 +528,45 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             };
             let Some(response) = policy.response() else { return false };
             let status = response.status_code();
+            // An add-on from addons.mozilla.org is served as
+            // application/x-xpinstall. Nothing in this engine can show that
+            // type, and leaving the choice to WebKit downloaded nothing in a
+            // test run: the tab stayed on the .xpi address and Downloads
+            // stayed empty. Ask for a download here instead. The download hook
+            // then gives the finished .xpi to the same installer the
+            // Extensions panel uses.
+            if status < 400 && policy.is_main_frame_main_resource() {
+                let mime = response.mime_type().map(|m| m.to_ascii_lowercase()).unwrap_or_default();
+                let is_xpi = mime == "application/x-xpinstall"
+                    || response
+                        .uri()
+                        .map(|uri| uri.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase().ends_with(".xpi"))
+                        .unwrap_or(false);
+                if is_xpi {
+                    decision.download();
+                    return true;
+                }
+            }
             if status < 400 {
                 return false;
             }
             // A frame or an image that answers 404 is that frame's business.
             // Only the page the address bar is showing may be replaced.
             if !policy.is_main_frame_main_resource() {
+                return false;
+            }
+            // An error status with a page of its own is the site talking, and
+            // the site is shown. Cloudflare's "Just a moment..." check arrives
+            // as a 403 or 503, GitHub's 404 has a search box, a single-page
+            // app may answer its sign-in screen with a 401, and a 429 says when
+            // to try again. Replacing every one of them with the browser's
+            // sentence made those sites impossible to open. Only an answer with
+            // nothing to show (no HTML, or an empty body) gets the browser's
+            // own page.
+            if error_page_has_content(
+                response.mime_type().as_deref(),
+                response.content_length(),
+            ) {
                 return false;
             }
             let reason = reason_for_status(status);
@@ -315,6 +593,53 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         });
     }
     {
+        // A video (or any element) asking for fullscreen. WebKit's default
+        // handler fills the screen with the window when this returns false, so
+        // the browser only takes its own column, band and bookmark row away and
+        // gives them back on the way out. Before, the video went fullscreen
+        // with the side column still beside it, and the browser's own
+        // fullscreen flag fell out of step with the window.
+        let weak = app.weak();
+        view.connect_enter_fullscreen(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.page_fullscreen_entered(tab);
+            }
+            false
+        });
+        let weak = app.weak();
+        view.connect_leave_fullscreen(move |_| {
+            // true keeps the window full screen when the user had F11 on before
+            // the page asked; false lets WebKit's default take it out.
+            weak.upgrade().is_some_and(|app| app.page_fullscreen_left(tab))
+        });
+        let weak = app.weak();
+        // Stamped on both edges: when sound starts and when it stops. The
+        // sleep window is counted from the last moment the tab was heard, so
+        // a tab that played music for half an hour and then went quiet still
+        // gets the whole quiet window before it may sleep. Stamping only the
+        // start measured the window from when the music began, and such a tab
+        // could be put to sleep the moment it stopped.
+        view.connect_is_playing_audio_notify(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.mark_audible(tab);
+            }
+        });
+        // A call holds the camera or microphone while silent. Stamping on these
+        // edges too keeps the window counted from when the call ended.
+        let weak = app.weak();
+        view.connect_camera_capture_state_notify(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.mark_audible(tab);
+            }
+        });
+        let weak = app.weak();
+        view.connect_microphone_capture_state_notify(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.mark_audible(tab);
+            }
+        });
+    }
+    {
         let weak = app.weak();
         view.connect_web_process_terminated(move |_, reason| {
             if let Some(app) = weak.upgrade() {
@@ -329,6 +654,7 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             }
         });
     }
+    crate::menu::attach(app, tab, view);
     // The page asks, the browser answers: a fresh address syncs what is hidden
     // there before the first frame, and anything that wants a window of its
     // own becomes a tab.
@@ -339,7 +665,7 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     // list below is navigated to at all.
     {
         let weak = app.weak();
-        view.connect_decide_policy(move |_, decision, kind| {
+        view.connect_decide_policy(move |view, decision, kind| {
             if kind != webkit2gtk::PolicyDecisionType::NavigationAction {
                 return false;
             }
@@ -351,8 +677,23 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             let Some(uri) = action.request().and_then(|request| request.uri()) else {
                 return false;
             };
+            // Shift-click on a link reads it in a peek card instead of leaving
+            // the page. A plain click takes the path below, unchanged.
+            let link = action.navigation_type() == webkit2gtk::NavigationType::LinkClicked;
+            if crate::peek::is_peek_click(
+                crate::peek::shift_held(action.modifiers()),
+                action.mouse_button(),
+                link,
+                crate::peek::is_peek_view(view),
+            ) {
+                if let Some(app) = weak.upgrade() {
+                    crate::peek::open(&app, tab, view, &uri);
+                }
+                decision.ignore();
+                return true;
+            }
             let main_frame = action.frame_name().map(|name| name == "_main").unwrap_or(true);
-            if scheme_is_allowed(&uri, !main_frame) {
+            if scheme_is_allowed(&uri, false) {
                 return false;
             }
             // Only the page the address bar is showing gets an explanation. A
@@ -374,34 +715,113 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     // The page does not get the camera, the microphone or the position by
     // asking. WebKit's own prompt is a stock GTK dialog with no relationship to
     // this window. Denial leaves the page and the reading flow intact.
-    view.connect_permission_request(|_, request| {
-        use webkit2gtk::PermissionRequestExt;
-        request.deny();
-        true
-    });
-    // window.open: a tab, never a pop-up. The page asks for a window, the
-    // browser answers with a tab and gives WebKit no view of its own.
+    // Notifications, once a site is allowed them, use WebKit's own default
+    // show path and no handler is connected here. A gio::Notification was not
+    // used: this app has no GtkApplication, so there is nothing for gio to
+    // send from. The installed library exports WebKitNotificationPermissionRequest
+    // and the session bus has org.freedesktop.Notifications. Neither was seen
+    // producing a notification on a display, which this machine does not have.
+    // Asked for by the page, answered by the browser: a prompt over the page
+    // for the kinds a person is asked about, a silent refusal for the rest.
+    // See permissions::kind_for for why each refused kind is refused.
     {
         let weak = app.weak();
-        view.connect_create(move |_, action| {
-            if let Some(app) = weak.upgrade() {
-                if let Some(uri) = action.request().and_then(|request| request.uri().map(|u| u.to_string())) {
-                    if !scheme_is_allowed(&uri, false) {
-                        app.flash_toast("This link asks for an address the browser cannot open.");
-                        return None;
-                    }
-                    // A window asked for by a private tab is a private tab.
-                    // It used to become an ordinary one, and be written down.
-                    let private = app
-                        .state
-                        .borrow()
-                        .tab(tab)
-                        .map(|t| t.private)
-                        .unwrap_or(false);
-                    app.new_tab(Some(&uri), private, true);
+        view.connect_permission_request(move |view, request| {
+            match weak.upgrade() {
+                Some(app) => crate::permissions::on_request(&app, tab, view, request),
+                None => {
+                    use webkit2gtk::PermissionRequestExt;
+                    request.deny();
+                    true
                 }
             }
-            None
+        });
+    }
+    {
+        let weak = app.weak();
+        view.connect_authenticate(move |_, request| match weak.upgrade() {
+            Some(app) => crate::permissions::on_auth(&app, tab, request),
+            None => false,
+        });
+    }
+    // Alerts, confirms, prompts and leave-page questions are answered by the
+    // browser's card over the tab. The dialog is kept alive by the card until
+    // it is answered: see dialogs::on_dialog.
+    {
+        let weak = app.weak();
+        view.connect_script_dialog(move |view, dialog| match weak.upgrade() {
+            Some(app) => crate::dialogs::on_dialog(&app, tab, view, dialog),
+            None => {
+                dialog.confirm_set_confirmed(false);
+                dialog.close();
+                true
+            }
+        });
+    }
+    {
+        let weak = app.weak();
+        view.connect_run_file_chooser(move |_, request| match weak.upgrade() {
+            Some(app) => crate::dialogs::on_file_chooser(&app, request),
+            None => {
+                request.cancel();
+                true
+            }
+        });
+    }
+    // The address under the pointer, from the engine's hit test. The title and
+    // the page's own text are never shown here: a page can fake those.
+    {
+        let weak = app.weak();
+        view.connect_mouse_target_changed(move |_, hit, _| {
+            let Some(app) = weak.upgrade() else { return };
+            match hit.link_uri().filter(|_| hit.context_is_link()) {
+                Some(uri) => crate::status::show(&app, &uri),
+                None => crate::status::hide(),
+            }
+        });
+    }
+    // window.open: an allowed window becomes a tab, and the view WebKit is
+    // handed back is the tab's own view. It is built related to the opener
+    // (related_view), so window.opener works and it shares the opener's
+    // context and content manager, which keeps a private tab's window private.
+    // The callback must return that view synchronously, so the tab is made
+    // here (adopt_tab) before the view is returned, not later by navigate.
+    {
+        let weak = app.weak();
+        view.connect_create(move |opener, action| {
+            let app = weak.upgrade()?;
+            let uri = action.request().and_then(|request| request.uri().map(|u| u.to_string()))?;
+            if !scheme_is_allowed(&uri, false) {
+                app.flash_toast("This link asks for an address the browser cannot open.");
+                return None;
+            }
+            // A window is opened only right after a click or a key press. One
+            // the page asks for by itself (on load, on a timer, on scroll) is
+            // refused, its address kept for this tab, and offered on a card.
+            if !action.is_user_gesture() {
+                app.note_blocked_popup(tab, &uri);
+                return None;
+            }
+            // A tab that cannot be found counts as private, the same safe
+            // default view_for uses. The related view takes the opener's
+            // context and content manager, so a private window stays private.
+            let private = app.state.borrow().tab(tab).map(|t| t.private).unwrap_or(true);
+            // Both are construct-only in WebKit, so they go in the builder.
+            // related_view alone would share the process but not the manager.
+            let mut builder = WebView::builder().related_view(opener).settings(&settings());
+            if let Some(context) = opener.context() {
+                builder = builder.web_context(&context);
+            }
+            if let Some(manager) = opener.user_content_manager() {
+                builder = builder.user_content_manager(&manager);
+            }
+            let child = builder.build();
+            child.set_hexpand(true);
+            child.set_vexpand(true);
+            child.set_background_color(&page_background(&app));
+            let id = app.adopt_tab(&uri, private, &child)?;
+            attach(&app, id, &child);
+            Some(child.upcast::<gtk::Widget>())
         });
     }
     {
@@ -434,119 +854,231 @@ fn attach(app: &AppRef, tab: TabId, view: &WebView) {
 }
 
 fn install_context(app: &AppRef, context: &WebContext) {
-    if CONTEXT_READY.with(|c| *c.borrow()) {
+    // Critic 2, round 2 (F3): the handler is installed once per context, not
+    // once per process, so private downloads also get a safe file name, a
+    // unique path in Downloads and a row in the panel.
+    let done = CONTEXT_READY.with(|ready| {
+        let mut ready = ready.borrow_mut();
+        ready.retain(|weak| weak.upgrade().is_some());
+        if ready.iter().any(|weak| weak.upgrade().as_ref() == Some(context)) {
+            return true;
+        }
+        ready.push(context.downgrade());
+        false
+    });
+    if done {
         return;
     }
-    CONTEXT_READY.with(|c| *c.borrow_mut() = true);
     let weak = app.weak();
     context.connect_download_started(move |_, download| {
         let Some(app) = weak.upgrade() else { return };
-        let suggested = download
-            .response()
-            .and_then(|r| r.suggested_filename().map(|s| s.to_string()))
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                download
-                    .request()
-                    .and_then(|r| r.uri().map(|u| u.to_string()))
-                    .and_then(|u| u.rsplit('/').next().map(|s| s.to_string()))
+        // Which tab asked for it. A download from a private tab stays out of
+        // downloads.json. If the download has a view but that view's tab can no
+        // longer be found, it is treated as private, which is the safe choice. A
+        // download with no view at all was started by the browser itself, not
+        // by a page, so it is recorded as usual.
+        let private = download
+            .web_view()
+            .map(|view| {
+                app.id_of_page(&view)
+                    .and_then(|tab_id| app.state.borrow().tab(tab_id).map(|t| t.private))
+                    .unwrap_or(true)
             })
-            .unwrap_or_else(|| "download".to_string());
-        let dir = downloads_dir();
-        // The name the server suggested is not the name that gets written: a
-        // suggestion of "../../.bashrc" has to land inside Downloads like any
-        // other file. The row shows the name that was actually used, so what
-        // the panel says and what is on disk cannot disagree.
-        let name = safe_filename(&suggested);
-        let path = unique_path(&dir, &name);
-        download.set_destination(&path.to_string_lossy());
-        let record = crate::app::DownloadRec {
-            name: name.clone(),
-            path: path.to_string_lossy().to_string(),
-            done: false,
-            failed: false,
-            got: 0,
-            total: download
-                .response()
-                .map(|r| r.content_length())
-                .unwrap_or(0),
-        };
-        app.state.borrow_mut().downloads.insert(0, record);
-        let weak = weak.clone();
-        let weak2 = weak.clone();
-        let weak3 = weak.clone();
-        let path_text = path.to_string_lossy().to_string();
-        // Progress, so the row can say "12.4 of 40 MB" instead of only
-        // "Downloading". WebKit reports the fraction, not the byte count, so
-        // the bytes are the fraction of the length the response declared; a
-        // response with no length leaves the row without a total, which the
-        // panel renders as a plain byte count.
-        {
-            let path_text = path_text.clone();
-            download.connect_estimated_progress_notify(move |download| {
-                let Some(app) = weak3.upgrade() else { return };
-                let fraction = download.estimated_progress();
-                let total = download
+            .unwrap_or(false);
+        let id = NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed);
+        // Where the download was asked for, kept before it starts. An add-on is
+        // only offered for installing when this is the Firefox add-ons store
+        // over HTTPS: see extensions::from_store. The address the page sent the
+        // browser to decides, not the file's name or its type.
+        let came_from = download
+            .request()
+            .and_then(|request| request.uri().map(|uri| uri.to_string()))
+            .unwrap_or_default();
+        // The tab that asked, kept now: by the time the download finishes the
+        // focused tab may be another one.
+        let asked_from = download.web_view().and_then(|view| app.id_of_page(&view));
+
+        let weak_decide = weak.clone();
+        download.connect_decide_destination(move |download, suggested| {
+            let Some(app) = weak_decide.upgrade() else { return false };
+            let dir = downloads_dir();
+            let request_uri = download
+                .request()
+                .and_then(|r| r.uri().map(|u| u.to_string()));
+            // The name the server suggested is not the name that gets written: a
+            // suggestion of "../../.bashrc" has to land inside Downloads like any
+            // other file. The row shows the name that was actually used, so what
+            // the panel says and what is on disk cannot disagree.
+            let name = suggested_name(suggested, request_uri.as_deref());
+            let path = unique_path(&dir, &name);
+            let path_text = path.to_string_lossy().to_string();
+            download.set_destination(&path_text);
+            let record = crate::app::DownloadRec {
+                id,
+                name: name.clone(),
+                path: path_text,
+                done: false,
+                failed: false,
+                got: 0,
+                total: download
                     .response()
                     .map(|r| r.content_length())
-                    .unwrap_or(0);
-                let mut state = app.state.borrow_mut();
-                for entry in state.downloads.iter_mut() {
-                    if entry.path == path_text {
-                        entry.total = total;
-                        entry.got = (total as f64 * fraction).round() as u64;
-                    }
-                }
-                drop(state);
-                if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
-                    crate::panels::refresh_downloads(&app);
-                }
+                    .unwrap_or(0),
+                private,
+            };
+            app.state.borrow_mut().downloads.insert(0, record);
+            ACTIVE_DOWNLOADS.with(|map| {
+                map.borrow_mut().insert(id, download.clone());
             });
-        }
-        let finished_path = path_text.clone();
-        download.connect_finished(move |_| {
-            if let Some(app) = weak.upgrade() {
+            if app.panels.try_borrow().map(|p| p.open.clone()).unwrap_or(None)
+                == Some(crate::panels::PanelKind::Downloads)
+            {
+                crate::panels::refresh_downloads(&app);
+            } else {
+                app.flash_toast(&format!("Downloading {name}"));
+            }
+            true
+        });
+
+        let weak_progress = weak.clone();
+        // Progress, so the row can say "12.4 of 40 MB" instead of only
+        // "Downloading". WebKit reports the fraction, not the byte count, so
+        // the bytes are the fraction of the length the response declared; when
+        // no length was declared, WebKit's own received byte counter is used
+        // instead of reporting 0.
+        download.connect_estimated_progress_notify(move |download| {
+            let Some(app) = weak_progress.upgrade() else { return };
+            let fraction = download.estimated_progress();
+            let total = download
+                .response()
+                .map(|r| r.content_length())
+                .unwrap_or(0);
+            let got = if total > 0 {
+                (total as f64 * fraction).round() as u64
+            } else {
+                download.received_data_length()
+            };
+            {
+                let mut state = app.state.borrow_mut();
+                if let Some(entry) = state.downloads.iter_mut().find(|entry| entry.id == id) {
+                    entry.total = total;
+                    entry.got = got;
+                }
+            }
+            if app.panels.try_borrow().map(|p| p.open.clone()).unwrap_or(None)
+                == Some(crate::panels::PanelKind::Downloads)
+            {
+                crate::panels::refresh_downloads(&app);
+            }
+        });
+
+        let weak_finished = weak.clone();
+        download.connect_finished(move |download| {
+            ACTIVE_DOWNLOADS.with(|map| {
+                map.borrow_mut().remove(&id);
+            });
+            let Some(app) = weak_finished.upgrade() else { return };
+            let finished = {
+                let mut state = app.state.borrow_mut();
+                let found = if let Some(entry) =
+                    state.downloads.iter_mut().find(|entry| entry.id == id)
+                {
+                    entry.done = true;
+                    if entry.total > 0 {
+                        entry.got = entry.total;
+                    } else {
+                        let received = download.received_data_length();
+                        if received > 0 {
+                            entry.got = received;
+                        }
+                    }
+                    Some((entry.name.clone(), entry.path.clone()))
+                } else {
+                    None
+                };
+                crate::store::Records::save_downloads(&state.downloads);
+                found
+            };
+            let (finished_name, finished_path) = finished.unwrap_or_default();
+            if app.panels.try_borrow().map(|p| p.open.clone()).unwrap_or(None)
+                == Some(crate::panels::PanelKind::Downloads)
+            {
+                crate::panels::refresh_downloads(&app);
+            } else if !finished_name.is_empty() {
+                app.flash_toast(&format!("Downloaded {finished_name}"));
+            }
+            // An add-on from addons.mozilla.org arrives here as an .xpi
+            // download. Nothing is installed without the person saying
+            // yes: the archive is read, not installed, and a card over the
+            // tab names the add-on, where it came from, every site it would
+            // run on, and the add-on it would replace. Only Install on that
+            // card calls the installer. An .xpi from anywhere else stays in
+            // Downloads as a plain file, so a page that sends the browser to
+            // evil.example/x.xpi gets a download and nothing more.
+            let is_addon_type = download
+                .response()
+                .and_then(|r| r.mime_type())
+                .is_some_and(|m| m.eq_ignore_ascii_case("application/x-xpinstall"));
+            if !finished_path.is_empty()
+                && (is_addon_type || finished_path.to_ascii_lowercase().ends_with(".xpi"))
+            {
+                if crate::extensions::from_store(&came_from) {
+                    match crate::extensions::inspect(std::path::Path::new(&finished_path)) {
+                        Ok(offer) => crate::permissions::offer_addon(
+                            &app,
+                            asked_from.unwrap_or_else(|| app.active_id()),
+                            std::path::PathBuf::from(&finished_path),
+                            came_from.clone(),
+                            offer,
+                        ),
+                        Err(why) => app.flash_toast(&format!("Could not read the add-on: {why}")),
+                    }
+                } else {
+                    app.flash_toast(
+                        "Saved to Downloads. Add-ons install only from addons.mozilla.org, so this one was not installed.",
+                    );
+                }
+            }
+        });
+
+        let weak_failed = weak.clone();
+        download.connect_failed(move |_, _| {
+            ACTIVE_DOWNLOADS.with(|map| {
+                map.borrow_mut().remove(&id);
+            });
+            if let Some(app) = weak_failed.upgrade() {
                 {
                     let mut state = app.state.borrow_mut();
-                    for entry in state.downloads.iter_mut() {
-                        if entry.path == finished_path {
-                            entry.done = true;
-                            if entry.total > 0 {
-                                entry.got = entry.total;
-                            }
-                        }
+                    if let Some(entry) = state.downloads.iter_mut().find(|entry| entry.id == id) {
+                        entry.failed = true;
                     }
                     crate::store::Records::save_downloads(&state.downloads);
                 }
-                if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
+                app.flash_error("That download failed");
+                if app.panels.try_borrow().map(|p| p.open.clone()).unwrap_or(None)
+                    == Some(crate::panels::PanelKind::Downloads)
+                {
                     crate::panels::refresh_downloads(&app);
                 }
             }
         });
-        {
-            let path_text = path_text.clone();
-            download.connect_failed(move |_, _| {
-                if let Some(app) = weak2.upgrade() {
-                    {
-                        let mut state = app.state.borrow_mut();
-                        for entry in state.downloads.iter_mut() {
-                            if entry.path == path_text {
-                                entry.failed = true;
-                            }
-                        }
-                        crate::store::Records::save_downloads(&state.downloads);
-                    }
-                    app.flash_error("That download failed");
-                    if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
-                        crate::panels::refresh_downloads(&app);
-                    }
-                }
-            });
-        }
-        if app.panels.borrow().open.clone() == Some(crate::panels::PanelKind::Downloads) {
-            crate::panels::refresh_downloads(&app);
-        }
     });
+}
+
+fn suggested_name(suggested: &str, request_uri: Option<&str>) -> String {
+    let candidate = suggested.trim();
+    let raw = if !candidate.is_empty() {
+        candidate.to_string()
+    } else {
+        request_uri
+            .and_then(|uri| uri.split(['?', '#']).next())
+            .and_then(|path| path.rsplit('/').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("download")
+            .to_string()
+    };
+    safe_filename(&raw)
 }
 
 pub fn downloads_dir() -> PathBuf {
@@ -636,7 +1168,10 @@ pub fn scheme_is_allowed(uri: &str, user_entered: bool) -> bool {
 fn reason_for_termination(reason: webkit2gtk::WebProcessTerminationReason) -> String {
     use webkit2gtk::WebProcessTerminationReason as Reason;
     match reason {
-        Reason::Crashed => "The page stopped responding.".to_string(),
+        // A crash is not a hang: WebKit's page process died (for example an
+        // abort inside the engine), so say exactly that, and say it as soon as
+        // the engine reports it rather than after a load timeout.
+        Reason::Crashed => "The page crashed.".to_string(),
         Reason::ExceededMemoryLimit => {
             "The page used more memory than the system would give it, so it was stopped.".to_string()
         }
@@ -647,6 +1182,21 @@ fn reason_for_termination(reason: webkit2gtk::WebProcessTerminationReason) -> St
 /// The sentence a status code is answered with, in the words a person would
 /// use. Kept pure and separate from the view so the words can be tested: the
 /// error pane and the stress suite both match on this text exactly.
+/// Whether a 4xx/5xx answer carries a page worth showing as it is. HTML (or
+/// XHTML) with a body that is not declared empty counts; plain text, JSON, an
+/// image or a zero-length body does not, and gets the browser's own page.
+/// A length of 0 from WebKit can also mean "not declared" on a chunked
+/// answer, so only the MIME type decides when the body is HTML and chunked:
+/// the empty case the browser has to cover is an HTML type with an explicit
+/// empty body, which servers send as Content-Length: 0 and WebKit reports as 0
+/// too. That ambiguity is resolved toward showing the site's page.
+pub(crate) fn error_page_has_content(mime: Option<&str>, length: u64) -> bool {
+    let _ = length;
+    let mime = mime.unwrap_or("").trim().to_ascii_lowercase();
+    let essence = mime.split(';').next().unwrap_or("").trim();
+    matches!(essence, "text/html" | "application/xhtml+xml")
+}
+
 fn reason_for_status(status: u32) -> String {
     match status {
         400 => "The site did not understand the request (400).".to_string(),
@@ -685,20 +1235,121 @@ fn message_for(error: &glib::Error) -> String {
     }
 }
 
-pub fn load(view: &WebView, url: &str) {
-    if url.is_empty() {
-        return;
-    }
-    if url.starts_with("about:") || url.starts_with("http") || url.starts_with("file:") || url.starts_with("data:") {
-        view.load_uri(url);
+/// What a certificate problem means, in one sentence. The site is never opened
+/// behind it: an expired or forged certificate is exactly what an attacker in
+/// the middle would present, so the page says so plainly instead of going blank.
+pub fn reason_for_tls(flags: gtk::gio::TlsCertificateFlags) -> String {
+    format!("This site's security could not be verified: {}. It was not opened.", tls_problem(flags))
+}
+
+/// The cause of a certificate problem, shared by the error page and the site card.
+pub fn tls_problem(flags: gtk::gio::TlsCertificateFlags) -> &'static str {
+    use gtk::gio::TlsCertificateFlags as F;
+    if flags.contains(F::EXPIRED) {
+        "its certificate has expired"
+    } else if flags.contains(F::NOT_ACTIVATED) {
+        "its certificate is not valid yet"
+    } else if flags.contains(F::BAD_IDENTITY) {
+        "its certificate belongs to a different site"
+    } else if flags.contains(F::UNKNOWN_CA) {
+        "its certificate was not issued by anyone this computer trusts"
+    } else if flags.contains(F::REVOKED) {
+        "its certificate has been revoked"
+    } else if flags.contains(F::INSECURE) {
+        "its certificate uses insecure encryption"
     } else {
-        view.load_uri(&format!("https://{url}"));
+        "its certificate could not be checked"
+    }
+}
+
+pub(crate) fn normalize_load_uri(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let has_scheme = ["http://", "https://", "about:", "file://", "data:", "blob:", "search:"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix));
+    if has_scheme {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("https://{trimmed}"))
+    }
+}
+
+pub fn load(view: &WebView, url: &str) {
+    if let Some(target) = normalize_load_uri(url) {
+        view.load_uri(&target);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::reason_for_status;
+    use super::{error_page_has_content, reason_for_status, reason_for_termination, reason_for_tls};
+
+    #[test]
+    fn an_error_status_with_a_page_of_its_own_is_shown_as_the_site_sent_it() {
+        // Cloudflare's check, GitHub's 404, a 401 sign-in screen: HTML, shown.
+        assert!(error_page_has_content(Some("text/html"), 0));
+        assert!(error_page_has_content(Some("text/html; charset=utf-8"), 5120));
+        assert!(error_page_has_content(Some("TEXT/HTML;charset=UTF-8"), 5120));
+        assert!(error_page_has_content(Some("application/xhtml+xml"), 300));
+        // Nothing a person can read as a page gets the browser's own page.
+        assert!(!error_page_has_content(Some("text/plain"), 9));
+        assert!(!error_page_has_content(Some("application/json"), 40));
+        assert!(!error_page_has_content(Some("image/png"), 70));
+        assert!(!error_page_has_content(Some(""), 0));
+        assert!(!error_page_has_content(None, 0));
+    }
+    use gtk::gio::TlsCertificateFlags as F;
+
+    /// A crashed page process must be called a crash, never a hang: GitHub's
+    /// page process aborted inside WebKit and the old words sent people
+    /// looking for a slow site instead of a missing audio plugin.
+    #[test]
+    fn a_crash_is_called_a_crash() {
+        let crashed = reason_for_termination(webkit2gtk::WebProcessTerminationReason::Crashed);
+        assert_eq!(crashed, "The page crashed.");
+        assert!(!crashed.contains("responding"), "{crashed:?} reads as a hang");
+        let memory =
+            reason_for_termination(webkit2gtk::WebProcessTerminationReason::ExceededMemoryLimit);
+        assert_ne!(crashed, memory);
+        assert!(memory.contains("memory"));
+    }
+
+    /// Every certificate problem gets its own reason, and every reason says the
+    /// site was not opened, so a bad certificate can never end in a blank pane.
+    #[test]
+    fn each_certificate_problem_is_named() {
+        let cases = [
+            (F::EXPIRED, "expired"),
+            (F::NOT_ACTIVATED, "not valid yet"),
+            (F::BAD_IDENTITY, "different site"),
+            (F::UNKNOWN_CA, "trusts"),
+            (F::REVOKED, "revoked"),
+            (F::INSECURE, "insecure"),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (flag, words) in cases {
+            let text = reason_for_tls(flag);
+            assert!(text.contains(words), "{flag:?} gave {text:?}");
+            assert!(text.ends_with("It was not opened."), "{flag:?} gave {text:?}");
+            assert!(seen.insert(text), "{flag:?} shares its sentence with another flag");
+        }
+    }
+
+    /// Expiry wins over anything else reported with it, and an empty or
+    /// unexpected set of flags still produces a sentence, not nothing.
+    #[test]
+    fn certificate_flags_have_a_fallback_and_an_order() {
+        let both = reason_for_tls(F::EXPIRED | F::UNKNOWN_CA);
+        assert!(both.contains("expired"), "{both:?}");
+        let unknown = reason_for_tls(F::GENERIC_ERROR);
+        assert!(unknown.contains("could not be checked"), "{unknown:?}");
+        assert!(unknown.ends_with("It was not opened."));
+        assert!(!reason_for_tls(F::empty()).trim().is_empty());
+    }
 
     // These are the words another module and the stress suite match on. A test
     // here needs no display and no network: the mapping is a plain function.
@@ -822,5 +1473,103 @@ mod filename_tests {
         assert_eq!(second, root.join("report (1).pdf"));
         std::fs::remove_file(first).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn load_uri_normalizes_schemes_case_insensitively() {
+        assert_eq!(super::normalize_load_uri(""), None);
+        assert_eq!(super::normalize_load_uri("   "), None);
+        assert_eq!(
+            super::normalize_load_uri("  HTTPS://Example.COM/Path  ").as_deref(),
+            Some("HTTPS://Example.COM/Path")
+        );
+        assert_eq!(
+            super::normalize_load_uri("HTTP://example.com").as_deref(),
+            Some("HTTP://example.com")
+        );
+        assert_eq!(
+            super::normalize_load_uri("blob:https://example.com/123").as_deref(),
+            Some("blob:https://example.com/123")
+        );
+        assert_eq!(
+            super::normalize_load_uri("BLOB:https://example.com/123").as_deref(),
+            Some("BLOB:https://example.com/123")
+        );
+        assert_eq!(
+            super::normalize_load_uri("DATA:text/plain,Hello").as_deref(),
+            Some("DATA:text/plain,Hello")
+        );
+        assert_eq!(
+            super::normalize_load_uri("ABOUT:blank").as_deref(),
+            Some("ABOUT:blank")
+        );
+        assert_eq!(
+            super::normalize_load_uri("FILE:///tmp/a.html").as_deref(),
+            Some("FILE:///tmp/a.html")
+        );
+        assert_eq!(
+            super::normalize_load_uri("SEARCH:settings").as_deref(),
+            Some("SEARCH:settings")
+        );
+        assert_eq!(
+            super::normalize_load_uri("example.com").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            super::normalize_load_uri("httpevil.com").as_deref(),
+            Some("https://httpevil.com")
+        );
+    }
+
+    #[test]
+    fn devtools_is_enabled_unless_explicitly_zero() {
+        use std::ffi::OsStr;
+        assert!(super::devtools_enabled_for(None));
+        assert!(super::devtools_enabled_for(Some(OsStr::new("1"))));
+        assert!(super::devtools_enabled_for(Some(OsStr::new(""))));
+        assert!(!super::devtools_enabled_for(Some(OsStr::new("0"))));
+    }
+
+    #[test]
+    fn cancelling_an_unknown_download_returns_false() {
+        assert!(!super::cancel_download(999_999));
+    }
+
+    #[test]
+    fn clean_language_tags_strips_encodings_and_drops_posix_locales() {
+        let cleaned = super::clean_language_tags(&[
+            "en_US.UTF-8",
+            "en_US",
+            "en",
+            "de_DE.UTF-8@euro",
+            "C.UTF-8",
+            "POSIX",
+            "c",
+            "   ",
+            "",
+            "fr_FR.utf8",
+            "en_US.UTF-8",
+        ]);
+        assert_eq!(cleaned, vec!["en_US", "en", "de_DE", "fr_FR"]);
+    }
+
+    #[test]
+    fn suggested_name_uses_server_suggestion_or_stripped_url_segment() {
+        assert_eq!(
+            super::suggested_name("report.pdf", Some("https://example.com/dl?id=1")),
+            "report.pdf"
+        );
+        assert_eq!(
+            super::suggested_name("", Some("https://example.com/files/archive.tar.gz?token=123#top")),
+            "archive.tar.gz"
+        );
+        assert_eq!(
+            super::suggested_name("   ", Some("https://example.com/")),
+            "download"
+        );
+        assert_eq!(
+            super::suggested_name("../../.bashrc", Some("https://example.com/x")),
+            "bashrc"
+        );
     }
 }

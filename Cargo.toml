@@ -20,6 +20,8 @@ gdk = "0.18"
 cairo-rs = { version = "0.18", features = ["png"] }
 javascriptcore-rs = "1.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+soup3 = "0.5"
+rusqlite = { version = "0.43", default-features = false }  # system libsqlite3, reads imported browser history
 
 [profile.release]
 opt-level = 2

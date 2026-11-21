@@ -65,7 +65,11 @@ def fetch(name, url, cached):
         if not path.exists():
             sys.exit(f"{path} is not there; run without --cached once")
         return path.read_text(errors="replace")
-    with urllib.request.urlopen(url, timeout=60) as answer:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as answer:
         return answer.read().decode("utf-8", "replace")
 
 
@@ -113,6 +117,37 @@ def path_regex(path):
     return "".join(out)
 
 
+RESOURCE_TYPES = {
+    "script": "script",
+    "image": "image",
+    "stylesheet": "style-sheet",
+    "font": "font",
+    "object": "media",
+    "xmlhttprequest": "fetch",
+    "xhr": "fetch",
+    "subdocument": "raw",
+    "media": "media",
+}
+
+SUPPORTED_OPTIONS = set(RESOURCE_TYPES) | {
+    "third-party",
+    "3p",
+    "1p",
+    "domain",
+    "match-case",
+    "important",
+}
+
+
+def valid_domain(name):
+    name = name.strip().lower().strip(".")
+    if not name or len(name) > 150 or "." not in name:
+        return None
+    if not re.fullmatch(r"[a-z0-9.-]+", name):
+        return None
+    return name
+
+
 def network_rule(line):
     """One Adblock network rule as a WebKit rule, or None."""
     if line.startswith("@@"):
@@ -127,19 +162,43 @@ def network_rule(line):
                 continue
             negated = part.startswith("~")
             name, _, value = part.lstrip("~").partition("=")
+            name = name.lower()
+            # Never strip an option WebKit cannot enforce: dropping `$ping`,
+            # `$popup`, `$csp`, `$redirect`, `$badfilter` or `~script` would
+            # widen a narrow rule into a whole-domain block.
+            if name not in SUPPORTED_OPTIONS:
+                return None
+            if negated and name not in ("third-party", "3p"):
+                return None
             options[name] = (not negated, value)
 
     trigger = {}
     if body.startswith("||"):
         rest = body[2:]
-        host, _, path = rest.partition("^")
-        host = host.split("/")[0]
-        if not host or "*" in host or len(host) > 150:
+        match = re.search(r"[\^/?*]", rest)
+        if match:
+            raw_host = rest[:match.start()]
+            sep = rest[match.start()]
+            path = rest[match.start() + 1:]
+        else:
+            raw_host, sep, path = rest, "", ""
+        host = valid_domain(raw_host)
+        if not host:
             return None
-        trigger["url-filter"] = host_regex(host)
-        if path:
-            # The host pattern ends in `[:/]`; a path already implies that slash.
+        if sep == "*":
+            trigger["url-filter"] = host_regex(host) + ".*" + path_regex(path)
+        elif sep == "?":
+            trigger["url-filter"] = host_regex(host) + ".*\\?" + path_regex(path)
+        elif sep == "/":
             trigger["url-filter"] = host_regex(host) + path_regex(path)
+        elif sep == "^":
+            # host_regex already ends in `[:/]`; trim one leading slash so we
+            # do not require `//` when a list writes `||host^/path`.
+            if path.startswith("/"):
+                path = path[1:]
+            trigger["url-filter"] = host_regex(host) + path_regex(path)
+        else:
+            trigger["url-filter"] = host_regex(host)
     elif body.startswith("|"):
         trigger["url-filter"] = "^" + path_regex(body[1:])
     elif "/" in body or "*" in body:
@@ -156,34 +215,57 @@ def network_rule(line):
         return None
     if not no_disjunction(trigger["url-filter"]):
         return None
+    # WebKit content blockers accept ASCII url-filter patterns only.
+    if not trigger["url-filter"].isascii():
+        return None
 
     kinds = []
-    for name, code in (
-        ("script", "script"),
-        ("image", "image"),
-        ("stylesheet", "style-sheet"),
-        ("font", "font"),
-        ("object", "media"),
-        ("xmlhttprequest", "fetch"),
-        ("subdocument", "raw"),
-        ("media", "media"),
-    ):
+    for name, code in RESOURCE_TYPES.items():
         positive, _ = options.get(name, (False, ""))
-        if positive:
+        if positive and code not in kinds:
             kinds.append(code)
     if kinds:
         trigger["resource-type"] = kinds
 
-    if options.get("third-party", (False, ""))[0]:
+    if options.get("third-party", (False, ""))[0] or options.get("3p", (False, ""))[0]:
         trigger["load-type"] = ["third-party"]
-    elif "third-party" in options and not options["third-party"][0]:
+    elif (
+        ("third-party" in options and not options["third-party"][0])
+        or ("3p" in options and not options["3p"][0])
+        or options.get("1p", (False, ""))[0]
+    ):
         trigger["load-type"] = ["first-party"]
 
+    if options.get("match-case", (False, ""))[0]:
+        trigger["url-filter-is-case-sensitive"] = True
+
     positive, value = options.get("domain", (False, ""))
-    if positive and value:
-        domains = [d for d in value.split("|") if d and not d.startswith("~")]
-        if domains:
-            trigger["if-domain"] = [f"*{d}" for d in domains[:40]]
+    if "domain" in options:
+        if not positive or not value:
+            return None
+        pos_domains, neg_domains = [], []
+        for raw in value.split("|"):
+            raw = raw.strip()
+            if not raw:
+                continue
+            is_neg = raw.startswith("~")
+            dom = valid_domain(raw[1:] if is_neg else raw)
+            if not dom:
+                return None
+            (neg_domains if is_neg else pos_domains).append(f"*{dom}")
+        if pos_domains and neg_domains:
+            # WebKit forbids both if-domain and unless-domain on one trigger.
+            return None
+        if pos_domains:
+            if len(pos_domains) > 40:
+                return None
+            trigger["if-domain"] = pos_domains
+        elif neg_domains:
+            if len(neg_domains) > 40:
+                return None
+            trigger["unless-domain"] = neg_domains
+        else:
+            return None
 
     # A rule with no host, path separator or resource type is a bare word that
     # matches everywhere: too broad to trust, and the lists do not mean it.
@@ -193,14 +275,14 @@ def network_rule(line):
 
 
 def cosmetic_rule(line):
-    """One `##selector` or `example.com##selector` rule as a WebKit rule."""
+    """One global `##selector` or domain-scoped `example.com##selector` rule."""
     if "#@#" in line or "#?#" in line or "#$#" in line:
         return None
     if "##" not in line:
         return None
     left, _, selector = line.partition("##")
     selector = selector.strip()
-    if not selector or len(selector) > 400:
+    if not selector or len(selector) > 400 or not selector.isascii():
         return None
     # Procedural selectors (:has-text, :xpath, :style) are uBlock's own syntax
     # and mean nothing to a browser engine.
@@ -208,21 +290,23 @@ def cosmetic_rule(line):
         return None
     if "{" in selector or "}" in selector:
         return None
+    if not left:
+        return ((), selector)
     domains = []
-    if left:
-        for part in left.split(","):
-            part = part.strip()
-            if not part or part.startswith("~"):
-                continue
-            if "*" in part or "?" in part:
-                continue
-            domains.append(part)
-    if not domains:
-        return {"trigger": {"url-filter": ".*"}, "action": {"type": "css-display-none", "selector": selector}}
-    return {
-        "trigger": {"url-filter": ".*", "if-domain": [f"*{d}" for d in domains[:40]]},
-        "action": {"type": "css-display-none", "selector": selector},
-    }
+    for part in left.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # Never turn a negated or wildcard domain rule into a global hide rule.
+        if part.startswith("~") or "*" in part or "?" in part:
+            return None
+        dom = valid_domain(part)
+        if not dom:
+            return None
+        domains.append(f"*{dom}")
+    if not domains or len(domains) > 40:
+        return None
+    return (tuple(sorted(set(domains))), selector)
 
 
 def main():
@@ -233,8 +317,10 @@ def main():
     # Both lists are read line by line in step, so neither can be crowded out
     # by the other: EasyPrivacy is the one that blocks trackers, and it is
     # shorter, so draining EasyList first silently dropped all of it.
-    network, cosmetic = [], []
+    network, global_cosmetic = [], []
+    scoped_cosmetic = {}
     seen_network, seen_cosmetic = set(), set()
+    scoped_count = 0
     counts = {name: 0 for name in LISTS}
     readers = [(name, fetch(name, url, args.cached).splitlines()) for name, url in LISTS.items()]
     longest = max(len(lines) for _, lines in readers)
@@ -248,15 +334,29 @@ def main():
             if line.startswith("#") and "##" not in line:
                 continue
             if "##" in line or "#@#" in line or "#?#" in line:
-                rule = cosmetic_rule(line)
-                if rule is None or len(cosmetic) >= MAX_COSMETIC:
+                parsed = cosmetic_rule(line)
+                if parsed is None:
                     continue
-                key = json.dumps(rule, sort_keys=True)
-                if key in seen_cosmetic:
-                    continue
-                seen_cosmetic.add(key)
-                cosmetic.append(rule)
-                counts[name] += 1
+                domains, selector = parsed
+                if not domains:
+                    if len(global_cosmetic) >= MAX_COSMETIC:
+                        continue
+                    key = ("", selector)
+                    if key in seen_cosmetic:
+                        continue
+                    seen_cosmetic.add(key)
+                    global_cosmetic.append(selector)
+                    counts[name] += 1
+                else:
+                    if scoped_count >= MAX_COSMETIC:
+                        continue
+                    key = (domains, selector)
+                    if key in seen_cosmetic:
+                        continue
+                    seen_cosmetic.add(key)
+                    scoped_cosmetic.setdefault(domains, []).append(selector)
+                    scoped_count += 1
+                    counts[name] += 1
                 continue
             rule = network_rule(line)
             if rule is None or len(network) >= MAX_NETWORK:
@@ -268,15 +368,25 @@ def main():
             network.append(rule)
             counts[name] += 1
 
-    # Selector lists are capped, so they go out in chunks.
+    # Selector lists are capped, so they go out in chunks. Only genuinely global
+    # cosmetic rules go into the global list; site-specific rules keep their
+    # `if-domain` trigger so they can never hide unrelated elements elsewhere.
     selectors, total = [ALWAYS_HIDDEN], len(ALWAYS_HIDDEN)
-    for rule in cosmetic:
-        piece = rule["action"]["selector"]
+    for piece in global_cosmetic:
         if total + len(piece) > SELECTOR_BUDGET:
             break
         total += len(piece) + 2
         selectors.append(piece)
     chunks = [selectors[i : i + 4000] for i in range(0, len(selectors), 4000)]
+
+    site_rules = []
+    for domains, group in scoped_cosmetic.items():
+        site_rules.append(
+            {
+                "trigger": {"url-filter": ".*", "if-domain": list(domains)},
+                "action": {"type": "css-display-none", "selector": ", ".join(group)},
+            }
+        )
 
     OUT.mkdir(parents=True, exist_ok=True)
     for old in OUT.glob("*.json"):
@@ -297,6 +407,9 @@ def main():
         name = f"hide-{index}.json"
         names.append(name)
         sizes[f"hide-{index}"] = write(name, [rule])
+    if site_rules:
+        names.append("hide-sites.json")
+        sizes["hide-sites"] = write("hide-sites.json", site_rules)
 
     # The browser embeds these, so it needs the list of names at compile time.
     # Generated rather than hand-written, so a new hide list cannot be missed.

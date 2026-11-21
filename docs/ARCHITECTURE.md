@@ -1,44 +1,67 @@
 # How Search is put together
 
-A browser is a small surface with a lot underneath. This is the map.
+A browser is a small surface with a lot underneath. This is the map (34 files in `src/`):
 
 ```
-main.rs        flags, the environment, the window, and the loop
-app.rs         the browser: tabs, the active tab, and every action
-web.rs         one WebKit view per tab, and what its signals mean
-ui.rs          the widgets: the column, the rows, the pins, the lights
-css.rs         one stylesheet, built from the palette
-palette.rs     every colour, as a light/dark pair
-omnibox.rs     the field over the page
-find.rs        the find bar
-panels.rs      bookmarks, history, downloads, settings, shortcuts, extensions
-reader.rs      reading mode (assets/reader.js does the work)
-curtain.rs     hidden elements, per site, before first paint
-shield.rs      the content blocker, compiled once from the generated lists
-extensions.rs  content scripts and CSS, limited to the sites they ask for
-keys.rs        every shortcut: what a key means, and what it does
-js.rs          running a script in a page, and hearing back
-store.rs       prefs and the small JSON files
-files.rs       reading and writing those files
-bench.rs       the socket tests drive the browser through
-layer.rs       where the things over the page stand
-icons.rs       the marks the UI draws for itself
-gtkx.rs        signal returns
+main.rs           flags, the environment, the window, and the loop
+app.rs            the browser: tabs, the active tab, and every action
+web.rs            WebKitGTK 4.1 setup, persistent SQLite cookies vs ephemeral private sessions, locale Accept-Language & spellcheck, WebRTC, downloads, error pages
+ui.rs             edge-to-edge GTK3 window without a top deskband: left tab column + GtkPaned + page stack overlay with 3px accent progress bar and 90ms crossfade
+motion.rs         VSync `add_tick_callback` frame-clock motion engine for fades, slides, pops, toasts, and paned sidebar fold (disabled under `SEARCH_BENCH` or `gtk-enable-animations=false`)
+css.rs            one stylesheet, built from the palette
+palette.rs        every colour, as a light/dark pair
+omnibox.rs        the field over the page
+find.rs           the find bar
+panels.rs         bookmarks, history, downloads, settings, shortcuts, extensions
+peek.rs           Shift+click floating preview card with its own WebView, Keep/Close controls, and compositor-independent snapshot capture
+sitecard.rs       site identity, TLS status, per-host zoom, saved permissions, active add-ons, and site-data clearing card
+reader.rs         reading mode (assets/reader.js does the work)
+curtain.rs        hidden elements, per site, before first paint, with element picking in the isolated `"search-curtain"` WebKit script world
+shield.rs         the content blocker, compiled once from the generated lists
+extensions.rs     content scripts and CSS, limited to the sites they ask for
+keys.rs           every shortcut: what a key means, and what it does
+fuzzy.rs          typo-tolerant matching for the address field
+keyword.rs        keyword shortcuts (`yt cats`), and their templates
+menu.rs           the right-click menu: edits WebKit's own, keeps what it has
+permissions.rs    site permission & HTTP auth prompts (camera, mic, geolocation, notifications, clipboard, add-on install), `permissions.json`
+dialogs.rs        alert, confirm, prompt and file-chooser cards over a tab
+status.rs         the link address line at the bottom left of the page
+suggest.rs        search-engine suggestions, off unless turned on
+import.rs         bookmarks and history from Firefox, Chromium, Chrome, Brave
+welcome.rs        the first-run card
+js.rs             running a script in a page, and hearing back
+store.rs          prefs and the small JSON files
+files.rs          reading and writing those files
+bench.rs          the socket tests drive the browser through
+layer.rs          where the things over the page stand
+icons.rs          the marks the UI draws for itself
+gtkx.rs           signal returns
 shield_assets.rs  the generated filter lists, included at build time
 ```
 
 `src/shield_assets.rs` is generated, not written: `tools/build_shield.py` turns
 EasyList and EasyPrivacy into the content blocker's JSON and emits a `FILTERS`
-constant of `include_str!`. Regenerate it, do not edit it. The output is a
-network list at the tool's cap of 14,000 rules, and one hide-element rule
-carrying 2,626 selectors: the 26 hand-written cookie-bar and interstitial
-selectors, then 2,600 taken from the lists, which is the cosmetic cap.
+constant of `include_str!`. Regenerate it, do not edit it. `assets/shield/` now
+ships 3 lists:
+- `network.json`: the network list at the tool's cap of 14,000 rules
+- `hide-0.json`: global cosmetic rules (one hide-element rule carrying 2,626
+  selectors: the 26 hand-written cookie-bar and interstitial selectors plus
+  2,600 global selectors taken from the lists)
+- `hide-sites.json`: 1,774 domain-scoped cosmetic rules carrying `if-domain`
+  triggers so site-specific hiding rules cannot hide unrelated elements on
+  other domains
 
 `shield.rs` compiles each list once and hands the result to the engine's own
 filter store, keyed by the hash of the list's bytes. A later launch loads the
 compiled filter back instead of recompiling 14,000 rules: the key changes when
 the list changes, so a new EasyList pull cannot be answered with last month's
 rules.
+
+`src/curtain.rs` hides per-site user-picked elements via a `UserStyleSheet`
+before first paint and runs element picking in the isolated `"search-curtain"`
+WebKit script world (`CURTAIN_WORLD`), keeping `searchHide` message handling
+separate from page scripts so untrusted page JS cannot invoke `searchHide` or
+tamper with picker state.
 
 ## One tab
 
@@ -49,8 +72,11 @@ the first time the tab is selected, added to a `GtkStack` under the name
 file therefore costs no web process until it is looked at, which is most of why
 opening with twenty tabs is still instant.
 
-The view reports itself through signals that `web::attach` wires: title, uri,
-load state, navigation state, a page asking for a window, a page asking to
+`web.rs` handles WebKitGTK 4.1 setup, persistent SQLite cookies for normal
+sessions vs ephemeral private sessions, locale `Accept-Language` and spellcheck
+configuration, WebRTC settings, download tracking and cancellation, and error
+pages. Each view reports itself through signals that `web::attach` wires: title,
+uri, load state, navigation state, a page asking for a window, a page asking to
 close. Each one calls a method on the browser, never the other way around.
 
 The window's own geometry lives in the preferences with the rest:
@@ -85,53 +111,70 @@ a sheet added that way is accepted and has no effect at either
 
 ## The frame
 
-`ui::build` makes one `GtkPaned`: the column on the left, the page on the right,
-with the column's edge as the handle, so a width can be dragged. The column is a
-vertical box of fixed pieces: the lights' band, the pins' grid, the rows in a
-scrolled window, and the foot.
+`ui::build` builds an edge-to-edge GTK3 window without a top deskband around a
+single `GtkPaned`: the tab column on the left, the page card on the right, with
+the column's edge as the handle so its width can be dragged. The column is a
+vertical box of fixed pieces: the top handle band (with window lights and
+back/forward/reload helm), the pins' grid, the rows in a scrolled window, and
+the footer menu (or a 10px strip when folded). On the right, the page card
+packs the bookmarks bar above a `GtkOverlay` containing the `GtkStack` (with a
+90ms crossfade between tabs, disabled under `SEARCH_BENCH`) and a 3px accent
+page-load progress bar overlaid at the top edge of the viewport.
 
 Rows are rebuilt when the set of tabs changes, not on every title change: the
 browser keeps the row's widgets on the tab and updates the label in place.
 
-The bookmarks bar is a row of chips in the page's column, above the stack and
-below the band. It is hidden when nothing is kept and shown again when
-something is, and Settings has a switch for it; both live in
+The bookmarks bar is a row of chips in the page's column, above the page stack
+overlay and below the column's top band. It is hidden when nothing is kept and
+shown again when something is, and Settings has a switch for it; both live in
 `app::render_bmarks`, which is why a bookmark taken with `Ctrl D` appears
 without rebuilding the column.
 
-Nothing in `ui.rs` knows what a tab is. `app.rs` is not the mirror image of
-that: it is 2,531 lines and it does touch GTK, deliberately, in one place.
-`app::capture` and the `draw_at`, `opacity_of` and `draw_into` helpers under it
-walk the real widget tree with cairo, because a screenshot of a window with no
-compositor has to draw the widgets that were actually built, at the offsets they
-were actually given. That is the exception, and it is the only one: the rest of
-`app.rs` reaches the widgets through the handles `ui::build` returned, and the
-only other classes it names are the GDK event types its click handlers
-downcast. Grep `fn capture` to see the shape of it.
+`motion.rs` drives UI transitions with a VSync `add_tick_callback` frame-clock
+motion engine for fades, slides, pops, toasts, and paned sidebar fold; it is
+disabled automatically under `SEARCH_BENCH` or `gtk-enable-animations=false`.
 
-Measured with `wc -l src/*.rs` at this commit, 11,195 lines in `src`: `app.rs`
-2,531, `extensions.rs` 1,685, `panels.rs` 929, `shield.rs` 717, `omnibox.rs`
-696, `bench.rs` 681, `ui.rs` 582, `keys.rs` 549, `web.rs` 544, `store.rs` 484,
-`curtain.rs` 351, `palette.rs` 280, `files.rs` 276, `css.rs` 242, `main.rs`
-218, `icons.rs` 179, `find.rs` 149, `layer.rs` 39, `reader.rs` 27, `js.rs` 17,
-`gtkx.rs` 11, `shield_assets.rs` 8. The numbers move with every commit; the
-command does not.
+Nothing in `ui.rs` knows what a tab is. `app.rs` is 4,700 lines and touches GTK
+deliberately in `app::capture` (and the `draw_at`, `opacity_of` and `draw_into`
+helpers under it), walking the real widget tree with cairo because a screenshot
+of a window with no compositor has to draw the widgets that were actually built,
+at the offsets they were actually given. Grep `fn capture` to see the shape of it.
+
+Measured with `wc -l src/*.rs` across the 34 files, 22,972 lines in `src`:
+`app.rs` 4,700, `extensions.rs` 2,376, `panels.rs` 1,710, `web.rs` 1,575,
+`omnibox.rs` 1,001, `bench.rs` 930, `import.rs` 918, `ui.rs` 849, `shield.rs`
+776, `keys.rs` 740, `permissions.rs` 718, `css.rs` 672, `store.rs` 604,
+`sitecard.rs` 574, `suggest.rs` 441, `peek.rs` 418, `curtain.rs` 407,
+`motion.rs` 400, `dialogs.rs` 382, `files.rs` 374, `palette.rs` 327,
+`keyword.rs` 309, `main.rs` 291, `find.rs` 254, `menu.rs` 223, `reader.rs` 214,
+`icons.rs` 212, `welcome.rs` 195, `fuzzy.rs` 177, `status.rs` 134, `layer.rs`
+34, `js.rs` 17, `gtkx.rs` 11, `shield_assets.rs` 9. The numbers move with every
+commit; the command does not.
 
 ## Things over the page
 
 `layer::Layer` is a `GtkFixed` that knows how to place a child for a window of a
-given size. The field, the find bar and the panels each own one, are added to the
-root overlay, and are laid out when the window changes size. This is why the
-scrim covers the window and the field lands in the middle, and why the same
-layout is reproducible in a screenshot without a compositor.
+given size. The omnibox, the find bar, and the panels each own one, are added to
+the root overlay, and are laid out when the window changes size. Alongside them
+are the floating cards and prompts:
+- `peek.rs`: Shift+click floating preview card with its own `WebView`, Keep/Close
+  controls, and compositor-independent snapshot capture.
+- `sitecard.rs`: Site identity, TLS status, per-host zoom, saved permissions,
+  active add-ons, and site-data clearing card.
+- `permissions.rs`: Site permission & HTTP auth prompts including camera, mic,
+  geolocation, notifications, clipboard, and add-on install.
+
+This overlay structure is why the scrim covers the window and the field lands in
+the middle, and why the same layout is reproducible in a screenshot without a
+compositor.
 
 ## Looking without a compositor
 
 `app::capture` draws the frame into a cairo surface, asks WebKit for a snapshot
-of the visible page, lays that into the page's rectangle, and then draws the
-over-page layers on top. `tools/shots.sh` drives a browser through every state
-and calls it, which is how the council's screenshot evidence is made on a
-machine whose screen is locked.
+of the visible page (and any visible `peek.rs` preview WebView), lays that into
+the page's rectangle, and then draws the over-page layers on top. `tools/shots.sh`
+drives a browser through every state and calls it, which is how screenshot
+evidence is made on a machine without a live compositor.
 
 ## Memory
 
@@ -147,18 +190,25 @@ of shared backing and 253.3 MB RSS. The gap between own and resident is the
 shared GTK and WebKit libraries, which the desktop has in memory anyway; the
 shared backing is named separately so the flattering number cannot hide it.
 
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` and `MALLOC_ARENA_MAX=2` are always set,
-before GTK starts: measured over four runs each, they took one idle tab from
-87-104 MB of the browser's own memory down to 60-88 MB, and nothing about the
-page got worse. They also moved the resident figure a long way: the same idle
-tab that measured 212.8 MB resident before them measured 159.0 MB after. `SEARCH_LOW_MEMORY=1` adds `WEBKIT_DISABLE_COMPOSITING_MODE=1`,
-which brought the same four runs to 62-66 MB and is the steadiest of the three
-settings; it is left to the user because it is also the one that changes how a
-page animates. Settings → *Use less memory* sets that flag in the preferences,
-and like the variable it has to be read before the engine starts, so it applies
-at the next launch. Tabs also let go of
-their page after half an hour (Settings → *Let tabs sleep*), which returns the
-page's memory to the system.
+Before GTK starts, `src/main.rs` always sets `MALLOC_ARENA_MAX=2` and disables
+the Wayland DMA-BUF renderer by default with `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+(opt-in via `SEARCH_ENABLE_DMABUF=1` or `WEBKIT_DISABLE_DMABUF_RENDERER=0`) while
+keeping GPU compositing enabled unless `low_memory` is active. Earlier runs
+measuring `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `MALLOC_ARENA_MAX=2` took one
+idle tab from 87-104 MB of the browser's own memory down to 60-88 MB and moved
+resident memory from 212.8 MB to 159.0 MB. `SEARCH_LOW_MEMORY=1` (or Settings →
+*Use less memory*) forces DMA-BUF off and adds `WEBKIT_DISABLE_COMPOSITING_MODE=1`,
+which brought the same four runs to 62-66 MB and is left opt-in because
+disabling compositing changes how pages animate; both are read before the engine
+starts, so preference changes apply on the next launch. Tabs also let go of
+their page after ten minutes without being looked at (Settings → *Let tabs
+sleep*), which returns the page's memory to the system.
+A tab that is playing sound is never put to sleep. The network process gets a
+384 MB memory limit (`WebsiteDataManager::set_memory_pressure_settings` in
+`src/main.rs`, set before the first context exists): it frees caches at a third
+of that and everything it can at half, checking every 5 seconds. Page processes
+get the same limit from `web::page_memory_pressure()`, through the contexts
+`shared_context()` and `ephemeral_context()` build.
 
 The run that produced 49.4 MB own and 159.0 MB resident is the one quoted on
 `docs/LIMITS.md`; `python3 tools/report_figures.py` prints its figures from

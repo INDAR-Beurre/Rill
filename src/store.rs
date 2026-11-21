@@ -32,6 +32,10 @@ impl Look {
 pub struct Prefs {
     pub appearance: Look,
     pub sidebar: bool,
+    /// Ctrl S folds the tab column to a thin strip. Kept across launches; a
+    /// page going full screen hides the column without changing this.
+    #[serde(default)]
+    pub column_folded: bool,
     pub side_width: f64,
     pub roomy_tabs: bool,
     pub shield: bool,
@@ -72,6 +76,19 @@ pub struct Prefs {
     /// and 88.1 MB. The cost is a slower first paint on pages with many images.
     #[serde(default)]
     pub low_memory: bool,
+    /// Keyword shortcuts for the address field: "yt cats" goes straight to
+    /// YouTube's search. A file from before this field existed gets the
+    /// starting set, the same as a fresh profile. See src/keyword.rs.
+    #[serde(default = "crate::keyword::defaults")]
+    pub keywords: Vec<crate::keyword::Keyword>,
+    /// Suggestions from the search engine under the address field. Off by
+    /// default: what you type is sent to the engine as you type. See src/suggest.rs.
+    #[serde(default)]
+    pub engine_suggestions: bool,
+    /// Set once the welcome card has been shown and started with, so it is
+    /// not shown on every launch. See src/welcome.rs.
+    #[serde(default)]
+    pub welcomed: bool,
     /// Filled in by the browser at launch: whether the desktop is dark.
     #[serde(skip)]
     pub desktop_dark: bool,
@@ -92,12 +109,17 @@ impl Default for Prefs {
         Prefs {
             appearance: Look::System,
             sidebar: true,
+            column_folded: false,
             side_width: 232.0,
             roomy_tabs: false,
             shield: true,
             curtain: true,
             memory_saver: true,
-            sleep_minutes: 30,
+            // Ten minutes, not thirty. A tab left alone for ten minutes is
+            // rarely the next one used, and a sleeping tab gives back
+            // about 30 MB of its own memory (123.3 -> 90.8 MB measured). A tab
+            // playing sound is never put to sleep, so music and calls are safe.
+            sleep_minutes: 10,
             restore_session: true,
             search_engine: "DuckDuckGo".into(),
             show_bookmarks_bar: false,
@@ -105,6 +127,9 @@ impl Default for Prefs {
             window_maximised: false,
             darken_pages: false,
             low_memory: false,
+            keywords: crate::keyword::defaults(),
+            engine_suggestions: false,
+            welcomed: false,
             desktop_dark: false,
             skip_restore: false,
         }
@@ -218,7 +243,14 @@ impl Records {
     /// A visit is kept once per address, newest first, and the list is capped
     /// so it stays a file you could read.
     pub fn record_visit(history: &mut Vec<HistoryEntry>, url: &str, title: &str) {
-        if url.is_empty() || url.starts_with("about:") || url.starts_with("search:") {
+        let lower = url.trim().to_ascii_lowercase();
+        if lower.is_empty()
+            || lower.starts_with("about:")
+            || lower.starts_with("search:")
+            || lower.starts_with("data:")
+            || lower.starts_with("blob:")
+            || lower.starts_with("file:")
+        {
             return;
         }
         history.retain(|e| e.url != url);
@@ -262,14 +294,25 @@ impl Records {
 
     pub fn save_downloads(downloads: &[crate::app::DownloadRec]) {
         // Only what finished or failed is worth keeping: a half-written file
-        // from a session that ended is not a download anyone can open.
+        // from a session that ended is not a download anyone can open. A
+        // download from a private tab is never kept, like its history.
         let settled: Vec<crate::app::DownloadRec> = downloads
             .iter()
-            .filter(|entry| entry.done || entry.failed)
+            .filter(|entry| (entry.done || entry.failed) && !entry.private)
             .take(200)
             .cloned()
             .collect();
         files::write_json(&Self::file("downloads.json"), &settled);
+    }
+
+    /// Site decisions, one per host and kind. Saved only for a non-private tab,
+    /// which the caller checks before it calls this.
+    pub fn load_permissions() -> Vec<crate::permissions::Grant> {
+        files::read_json(&Self::file("permissions.json")).unwrap_or_default()
+    }
+
+    pub fn save_permissions(grants: &[crate::permissions::Grant]) {
+        files::write_json(&Self::file("permissions.json"), &grants.to_vec());
     }
 
     pub fn load_hidden() -> BTreeMap<String, Vec<String>> {
@@ -373,6 +416,27 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_and_local_schemes_are_not_history() {
+        let mut history = Vec::new();
+        for skipped in [
+            "data:text/html,<h1>secret</h1>",
+            "DATA:text/plain;base64,SGVsbG8=",
+            "blob:https://example.com/1234-5678",
+            "BLOB:https://example.com/abcd",
+            "file:///run/user/1000/search-source-1.html",
+            "FILE:///etc/passwd",
+            "search:settings",
+            "about:blank",
+        ] {
+            Records::record_visit(&mut history, skipped, "Title");
+        }
+        assert!(history.is_empty(), "expected no entries, got: {history:?}");
+
+        Records::record_visit(&mut history, "https://example.com/", "Example");
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
     fn a_date_is_said_the_way_a_person_says_it() {
         let now = 1_000_000;
         assert_eq!(ago(now, now), "just now");
@@ -418,6 +482,7 @@ mod tests {
         let prefs = Prefs {
             appearance: Look::Dark,
             sidebar: false,
+            column_folded: true,
             side_width: 301.0,
             roomy_tabs: true,
             shield: false,
@@ -431,8 +496,11 @@ mod tests {
             window_maximised: true,
             darken_pages: true,
             low_memory: true,
+            keywords: vec![crate::keyword::Keyword::new("rs", "https://docs.rs/releases/search?query=%s")],
+            engine_suggestions: true,
             // Neither of these is written: one is answered at launch, the
             // other belongs to this run alone.
+            welcomed: true,
             desktop_dark: true,
             skip_restore: true,
         };
@@ -445,6 +513,7 @@ mod tests {
         assert!(back.low_memory);
         assert!(back.show_bookmarks_bar);
         assert_eq!(back.side_width, 301.0);
+        assert!(back.column_folded);
         assert_eq!(back.sleep_minutes, 90);
         assert_eq!(back.search_engine, "Startpage");
         assert!(back.roomy_tabs && back.darken_pages);

@@ -5,7 +5,9 @@ set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD="$ROOT/build"
 APPDIR="$BUILD/AppDir"
-OUT="$BUILD/Search-1.0.1-x86_64.AppImage"
+VERSION=$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' || true)
+VERSION=${VERSION:-1.0.1}
+OUT="$BUILD/Search-${VERSION}-x86_64.AppImage"
 TOOL="${APPIMAGETOOL:-$BUILD/tools/appimagetool-x86_64.AppImage}"
 HOOK="$BUILD/tools/libapprun_hooks-x86_64.so"
 [[ $(uname -m) == x86_64 ]] || { echo 'This script builds x86_64 only.' >&2; exit 2; }
@@ -54,6 +56,24 @@ cp -a /usr/lib/gdk-pixbuf-2.0 "$APPDIR/usr/lib/"
 cp -a /usr/lib/gio "$APPDIR/usr/lib/"
 cp -a /usr/lib/gtk-3.0 "$APPDIR/usr/lib/"
 cp -a /usr/lib/gstreamer-1.0 "$APPDIR/usr/lib/"
+# WebKit's page process aborts when a page touches audio and GStreamer has no
+# autoaudiosink (gst-plugins-good's autodetect plugin); GitHub crashed this way
+# about 1 s into loading. scaletempo (audiofx) is needed for playback-rate
+# changes. Both must ship in the AppImage, because the host may not have them.
+# Take them from the host if it has them, otherwise from GST_EXTRA_PLUGIN_DIR
+# (a gst-plugins-good build matching the host GStreamer), and refuse to build
+# without them.
+GST_EXTRA_PLUGIN_DIR="${GST_EXTRA_PLUGIN_DIR:-$HOME/.cache/search-gst-autodetect/root/usr/lib/gstreamer-1.0}"
+for plugin in libgstautodetect.so libgstaudiofx.so; do
+  if [[ -f "$APPDIR/usr/lib/gstreamer-1.0/$plugin" ]]; then
+    continue
+  elif [[ -f "$GST_EXTRA_PLUGIN_DIR/$plugin" ]]; then
+    cp -L "$GST_EXTRA_PLUGIN_DIR/$plugin" "$APPDIR/usr/lib/gstreamer-1.0/$plugin"
+  else
+    echo "Missing GStreamer plugin $plugin: install gst-plugins-good or set GST_EXTRA_PLUGIN_DIR." >&2
+    exit 3
+  fi
+done
 cp -a /usr/share/glib-2.0 "$APPDIR/usr/share/"
 cp -a /usr/share/gtk-3.0 "$APPDIR/usr/share/"
 cp -a /usr/share/mime "$APPDIR/usr/share/"

@@ -121,6 +121,7 @@ fn run(line: &str) -> String {
             // callback: the main loop has to stay free for that to arrive.
             "text" => page_text(&app, &sender),
             "js" => page_eval(&app, &argument, &sender),
+            "peekjs" => peek_eval(&app, &argument, &sender),
             _ => {
                 let answer = dispatch(&app, &command, &argument);
                 let _ = immediate.send(answer);
@@ -235,6 +236,27 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             let ui = &app.ui;
             ok(&format!(",\"page\":[{},{}],\"holder\":[{},{}],\"stackSize\":[{},{}],\"reason\":\"{}\",\"address\":\"{}\",\"visible\":{},\"mapped\":{},\"stack\":\"{}\"", ui.errorpage.allocated_width(), ui.errorpage.allocated_height(), ui.error_holder.allocated_width(), ui.error_holder.allocated_height(), ui.stack.allocated_width(), ui.stack.allocated_height(), json_escape(&ui.error_reason.text()), json_escape(&ui.error_address.text()), ui.errorpage.get_visible(), ui.errorpage.is_mapped(), ui.stack.visible_child_name().unwrap_or_default()))
         }
+        "fullscreen" => {
+            // Proves page_fullscreen without a screenshot. The bench capture
+            // draws the shell itself, so a shot can still show the column
+            // after it was hidden; this reads the widgets' own state instead.
+            // "on"/"off" drive the same path a page's video takes; no argument
+            // only reports.
+            match argument.trim() {
+                "on" => app.page_fullscreen(true),
+                "off" => app.page_fullscreen(false),
+                _ => {}
+            }
+            settle(app);
+            ok(&format!(
+                ",\"sideShown\":{},\"bookmarksShown\":{},\"sideWidth\":{},\"windowFullscreen\":{},\"flag\":{}",
+                app.ui.side.is_child_visible(),
+                app.ui.bmarkbar.is_child_visible(),
+                app.ui.side.allocated_width(),
+                app.window_is_fullscreen(),
+                app.fullscreen.get()
+            ))
+        }
         "debug" => debug(app),
         "settle" => settle(app),
         "tabs" => tabs(app),
@@ -303,18 +325,105 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             app.navigate_active(argument);
             ok("")
         }
+        "peek" => {
+            // Peek opens when you Shift-click a link, and the socket cannot
+            // send a pointer click. This verb calls the same peek::open that
+            // the click handler in web.rs calls. The active tab's view is the
+            // opener, so the card gets the same context, content manager and
+            // private flag as a real Shift-click. A screenshot run can show
+            // the card without a display or a pointer.
+            if argument.is_empty() {
+                return fail("peek needs an address");
+            }
+            let tab = app.active_id();
+            match app.view(tab) {
+                Some(opener) => {
+                    crate::peek::open(app, tab, &opener, argument);
+                    ok("")
+                }
+                None => fail("peek needs an open page to peek from"),
+            }
+        }
         "key" => key(app, argument),
         "activate" => {
             app.ui.window.present();
             ok("")
         }
+        "hide" => match crate::curtain::pick_selector(app, argument) {
+            Ok(()) => ok(""),
+            Err(reason) => fail(reason),
+        },
         "escape" => {
+            // Everything a person can take down with Escape comes down here,
+            // the Peek card and the site card included. Without them a test
+            // that opens one card and then another kept the first on screen,
+            // and the screenshots after it showed the wrong thing: round 43's
+            // Peek shot still had the site card behind it, and Settings sat
+            // under the Peek card. (`key escape` is not a shortcut name and
+            // fails with "unknown key: escape"; this verb is the way in.)
             app.close_omni();
             if app.find.borrow().visible {
                 app.toggle_find();
             }
+            crate::peek::clear(app);
+            crate::sitecard::dismiss(app);
+            crate::welcome::dismiss(app);
             app.close_panels();
             ok("")
+        }
+        "cards" => {
+            // Where each floating card sits over the page, and where its first
+            // children sit inside it. Round 43's site card kept its text against
+            // the border after set_border_width(12), and the Peek page ran off
+            // the card's right edge. These numbers separate a layout bug (the
+            // label really is at x=0 inside the card) from a capture bug (the
+            // label is at x=12 and the screenshot draws it elsewhere).
+            settle(app);
+            let shell = app.ui.shell.clone().upcast::<gtk::Widget>();
+            let mut out: Vec<String> = Vec::new();
+            for child in app.ui.overlay.children() {
+                if child == shell || !child.is_visible() {
+                    continue;
+                }
+                let (x, y) = child.translate_coordinates(&app.ui.overlay, 0, 0).unwrap_or((-1, -1));
+                let border = child
+                    .dynamic_cast_ref::<gtk::Container>()
+                    .map(|container| container.border_width())
+                    .unwrap_or(0);
+                let inner: Vec<String> = child
+                    .dynamic_cast_ref::<gtk::Container>()
+                    .map(|container| {
+                        container
+                            .children()
+                            .iter()
+                            .take(4)
+                            .map(|kid| {
+                                let (kx, ky) = kid.translate_coordinates(&child, 0, 0).unwrap_or((-1, -1));
+                                format!(
+                                    "{{\"type\":\"{}\",\"name\":\"{}\",\"at\":[{kx},{ky}],\"size\":[{},{}]}}",
+                                    kid.type_().name(),
+                                    json_escape(&kid.widget_name()),
+                                    kid.allocated_width(),
+                                    kid.allocated_height()
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                out.push(format!(
+                    "{{\"type\":\"{}\",\"name\":\"{}\",\"at\":[{x},{y}],\"size\":[{},{}],\"border\":{border},\"margins\":[{},{},{},{}],\"children\":[{}]}}",
+                    child.type_().name(),
+                    json_escape(&child.widget_name()),
+                    child.allocated_width(),
+                    child.allocated_height(),
+                    child.margin_start(),
+                    child.margin_end(),
+                    child.margin_top(),
+                    child.margin_bottom(),
+                    inner.join(",")
+                ));
+            }
+            ok(&format!(",\"overlay\":[{},{}],\"cards\":[{}]", app.ui.overlay.allocated_width(), app.ui.overlay.allocated_height(), out.join(",")))
         }
         "omni" => {
             app.open_omni(true);
@@ -742,9 +851,14 @@ fn page_text(app: &AppRef, sender: &mpsc::Sender<String>) {
         let _ = sender.send(ok(",\"text\":{\"text\":\"\"}"));
         return;
     };
+    // innerText is what a person can read: it leaves out <style> and <script>
+    // source, which textContent includes (example.org's first 80 characters
+    // were CSS). The old 400-character cut also meant a strict content check
+    // could never find a heading further down a real page, so every real site
+    // failed it. Return the readable text, capped at a size the socket handles.
     let js = r#"(() => {
-        const body = (document.body && document.body.textContent) || '';
-        return JSON.stringify({ title: document.title || '', url: location.href, length: body.length, text: body.slice(0, 400) });
+        const body = (document.body && (document.body.innerText || document.body.textContent)) || '';
+        return JSON.stringify({ title: document.title || '', url: location.href, length: body.length, text: body.slice(0, 20000) });
     })();"#;
     let sender = sender.clone();
     crate::js::run(&view, js, move |result| {
@@ -757,22 +871,58 @@ fn page_text(app: &AppRef, sender: &mpsc::Sender<String>) {
     });
 }
 
+/// The page view inside an open Peek card, if there is one. `js` only reaches
+/// the active tab's view, and round 43's Peek shots cut the page off on the
+/// right although the `cards` verb measured the view at 1011px inside a
+/// 1013px card. Running a probe in the Peek page itself tells whether the page
+/// really lays out wider than its view (a page or layout bug) or fits and is
+/// only drawn cut off by `capture()` (a screenshot bug).
+fn peek_view(app: &AppRef) -> Option<webkit2gtk::WebView> {
+    for child in app.ui.overlay.children() {
+        if child.widget_name() != "peek-card" {
+            continue;
+        }
+        let container = child.dynamic_cast_ref::<gtk::Container>()?;
+        for kid in container.children() {
+            if let Ok(view) = kid.downcast::<webkit2gtk::WebView>() {
+                return Some(view);
+            }
+        }
+    }
+    None
+}
+
+fn peek_eval(app: &AppRef, code: &str, sender: &mpsc::Sender<String>) {
+    let Some(view) = peek_view(app) else {
+        let _ = sender.send(fail("no peek card is open"));
+        return;
+    };
+    eval_in(&view, code, sender);
+}
+
 fn page_eval(app: &AppRef, code: &str, sender: &mpsc::Sender<String>) {
     let Some(view) = app.view(app.active_id()) else {
         let _ = sender.send(fail("no page"));
         return;
     };
-    // A test script is wrapped so an exception or a bare statement comes back
-    // as an answer rather than as an evaluation error.
+    eval_in(&view, code, sender);
+}
+
+fn eval_in(view: &webkit2gtk::WebView, code: &str, sender: &mpsc::Sender<String>) {
+    // A test script is an expression, placed in the wrapper as source rather
+    // than passed to eval(). Pages that require Trusted Types (YouTube is one)
+    // refuse eval() of a string, and every probe of them came back refused;
+    // a script the browser itself evaluates is not subject to that policy.
+    // An exception still comes back as an answer; a syntax error comes back as
+    // the engine's own message instead of a bare "did not answer".
     let wrapped = format!(
-        "(function(){{ try {{ const value = eval({}); return value === undefined ? 'undefined' : String(value); }} catch (error) {{ return 'error: ' + error; }} }})()",
-        serde_json::to_string(code).unwrap_or_else(|_| "\"\"".into())
+        "(function(){{ try {{ const value = ({code}\n); return value === undefined ? 'undefined' : String(value); }} catch (error) {{ return 'error: ' + error; }} }})()"
     );
     let sender = sender.clone();
-    crate::js::run(&view, &wrapped, move |result| {
+    crate::js::run(view, &wrapped, move |result| {
         let answer = match result {
             Ok(value) => ok(&format!(",\"value\":\"{}\"", json_escape(&value))),
-            Err(_) => fail("the page did not answer"),
+            Err(error) => fail(&format!("the page did not answer: {error}")),
         };
         let _ = sender.send(answer);
     });

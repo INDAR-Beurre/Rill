@@ -62,7 +62,7 @@ SEARCH_BINARY="$PWD/build/Search-1.0.1-x86_64.AppImage" python3 tools/stress.py
 sha256sum -c build/Search-1.0.1-x86_64.AppImage.sha256
 ```
 
-The current artifact passed all 101 checks in that full suite, including actual
+The latest build passed all 117 checks in that full suite, including actual
 WebKit navigation, downloads, private tabs, reading mode, sleeping tabs and
 session restoration. This verifies the current host, not every Linux
 distribution or graphics driver. The one-idle-tab total-PSS target of 100 MB is

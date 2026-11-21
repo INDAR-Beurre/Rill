@@ -25,6 +25,25 @@ is that window rules, snapping and the system menu come from the compositor
 rather than from the header, and window shadows differ between GNOME, KDE and
 whatever else is running.
 
+There is no top bar (`deskband`) above the page viewport: the window controls
+and navigation buttons (`helm`) sit in the tab column's top band (`topband`),
+and the page runs edge-to-edge beside the column. Only the bookmarks row
+(`bmarkbar`, hidden when empty) and a 3px floating load-progress bar overlaid at
+the top of the page viewport (`page_overlay`) ever appear above the page.
+
+## Motion and animations
+
+Where the Mac build leans on Core Animation / AppKit, this build uses
+`src/motion.rs`, a small VSync-synced GTK3 frame-clock animator built on
+`WidgetExt::add_tick_callback` and `gdk::FrameClock` timestamps with cubic and
+quintic easing curves. It drives the floating 3px load-progress bar (smoothly
+interpolating progress and fading out on completion), smooth tab-column
+fold/unfold (`Ctrl S`, sliding the `GtkPaned` divider while cross-fading body
+and strip), and overlay transitions for the omnibox, panels, find bar, Peek
+cards, site card, permission prompts, and bottom toasts. Under `SEARCH_BENCH`
+or when `gtk-enable-animations` is false, transitions finish synchronously in a
+single step with no frame delay.
+
 ## The engine
 
 The Mac build's pages are `WKWebView`, running WebKit with Apple's own
@@ -36,7 +55,7 @@ will fail only here.
 
 Memory is the visible consequence. Safari's WebKit shares a great deal between
 processes because the OS was built for it; on Linux each WebKit process maps the
-same shared libraries again, which is why proportional resident memory was 182.2 MB for one tab in the latest passing run while the browser's own
+same shared libraries again, which is why proportional resident memory was 226.7 MB for one tab in the latest passing run while the browser's own
 anonymous memory is 49 to 119 MB depending on
 the page and the host.
 
@@ -49,9 +68,26 @@ the page and the host.
   ported. They are Mac surface with no Linux equivalent in this build.
 - Downloads go to the XDG download directory (`~/Downloads` by default), not to
   a Mac `NSSavePanel` sheet.
-- Settings, history, bookmarks, hidden elements and the session are JSON files
-  under `$XDG_CONFIG_HOME/search` and `$XDG_DATA_HOME/search`, not preferences
-  in `~/Library`.
+- Settings, history, bookmarks, hidden elements, permission grants and the
+  session are JSON files under `$XDG_CONFIG_HOME/search` and
+  `$XDG_DATA_HOME/search`, not preferences in `~/Library`.
+- Ordinary tabs share a persistent `WebContext` (`src/web.rs`) backed by
+  `$XDG_DATA_HOME/search` and `$XDG_CACHE_HOME/search`, storing persistent
+  cookies in `cookies.sqlite`. Private tabs use an ephemeral
+  `WebsiteDataManager` so cookies, storage and history never reach disk. Site
+  cookies and storage for a single host can be cleared from the site card
+  (`Ctrl I`).
+- Permissions (`src/permissions.rs`) prompt per host in an inline overlay card
+  for notifications, location, camera, microphone and clipboard read requests
+  (`WebKitClipboardPermissionRequest`), saving decisions per host in
+  `permissions.json` for ordinary tabs and asking every time in private tabs.
+  Device info, media key systems (DRM), pointer lock, website data access and
+  XR are refused silently.
+- Importing (`src/import.rs`) brings bookmarks and history (up to 4,000
+  `http`/`https` entries, copied and read on a worker thread) from six
+  browsers: Firefox (all profiles), Chromium, Chrome, Brave, Microsoft Edge and
+  Vivaldi across native, Snap and Flatpak paths (`Default` and `Profile N`
+  folders).
 
 ## Reading mode
 

@@ -11,15 +11,17 @@ pub struct Ui {
     pub window: gtk::Window,
     pub overlay: gtk::Overlay,
     pub shell: gtk::Box,
-    pub desk: gtk::EventBox,
     pub paned: gtk::Paned,
     /// The column: the tab rows and their foot, with the hairline on its
     /// right edge.
     pub side: gtk::Box,
+    /// What is left of the column when it is folded (Ctrl S): a thin strip,
+    /// clicked to unfold. `body` holds everything else in the column.
+    pub strip: gtk::EventBox,
+    pub body: gtk::Box,
     /// The whole band at the top of the column, which is the window's handle:
     /// a titlebar that is not drawn still has to be somewhere to grab.
     pub top: gtk::EventBox,
-    pub lights: gtk::Box,
     pub light_red: gtk::EventBox,
     pub light_amber: gtk::EventBox,
     pub light_green: gtk::EventBox,
@@ -36,6 +38,8 @@ pub struct Ui {
     pub rows_scroll: gtk::ScrolledWindow,
     pub menu: gtk::Button,
     pub stack: gtk::Stack,
+    pub progress: gtk::DrawingArea,
+    pub progress_frac: std::rc::Rc<std::cell::Cell<f64>>,
     /// The row of kept pages under the top band. A real browser keeps them one
     /// click away; this one does too, and the row is only visible when there is
     /// something in it or when it was asked for.
@@ -73,6 +77,53 @@ pub fn pack<B: IsA<gtk::Box>, C: IsA<gtk::Widget>>(container: &B, child: &C, exp
 }
 
 
+/// Width of the column strip Ctrl S leaves behind. Clicking it unfolds the column.
+pub const STRIP_WIDTH: i32 = 10;
+
+/// Minimum width of an unfolded tab column so users can drag it narrower without
+/// being locked to the saved width.
+pub const MIN_COL: i32 = 140;
+
+fn label_a11y<W: IsA<gtk::Widget>>(widget: &W, name: &str, role: gtk::atk::Role) {
+    widget.set_tooltip_text(Some(name));
+    if let Some(access) = widget.accessible() {
+        // Fully qualified: gtk's prelude brings several traits with a
+        // `set_name`, and this one is atk's.
+        gtk::atk::prelude::AtkObjectExt::set_name(&access, name);
+        gtk::atk::prelude::AtkObjectExt::set_role(&access, role);
+    }
+}
+
+/// What the column looks like for a fold state and a page full-screen state.
+/// Fold and full screen are independent: a page leaving full screen restores
+/// whatever the fold state is, and never opens a folded column.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ColumnPlan {
+    /// False while a page is full screen: the column is hidden, not folded.
+    pub side_shown: bool,
+    /// Width request of the whole column.
+    pub width: i32,
+    /// Where the paned divider sits.
+    pub paned_at: i32,
+    pub strip: bool,
+    pub body: bool,
+}
+
+pub fn column_plan(folded: bool, page_full: bool, sidebar: bool, side_width: i32) -> ColumnPlan {
+    let width = match (sidebar, folded) {
+        (false, _) => 0,
+        (true, true) => STRIP_WIDTH,
+        (true, false) => side_width,
+    };
+    ColumnPlan {
+        side_shown: !page_full,
+        width,
+        paned_at: if folded { STRIP_WIDTH } else { side_width },
+        strip: folded && sidebar,
+        body: !folded,
+    }
+}
+
 pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs) -> Ui {
     let overlay = gtk::Overlay::new();
 
@@ -84,26 +135,37 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     paned.set_hexpand(true);
     paned.set_vexpand(true);
 
-    // The window's own band above everything, the way the original has one:
-    // 23px of desk-coloured chrome across the whole width, then the white
-    // window with its top-left corner rounded into it. Without it the top edge
-    // of the window is page, and the window has no edge at all.
-    //
-    // It is one strip above the paned, not a strip inside each side of it.
-    // Split in two, the paned's own 1px handle was left between the halves:
-    // in `01-default.png` rows y=1..23 read the band's grey at every x but
-    // 232, which was white, so the band was full width with a one-pixel hole
-    // punched in it. Above the paned there is nothing between the two sides
-    // for the hole to open in.
-    let deskband = gtk::EventBox::new();
-    crate::ui::class(&deskband, "desk");
-    deskband.set_size_request(-1, 23);
-    deskband.set_visible_window(true);
-
     let side_width = prefs.side_width.round() as i32;
     let side = widget_box(gtk::Orientation::Vertical, 0);
     crate::ui::class(&side, "side");
-    side.set_size_request(if prefs.sidebar { side_width } else { 0 }, -1);
+    let plan = column_plan(prefs.column_folded, false, prefs.sidebar, side_width);
+    let min_width = if !prefs.sidebar {
+        0
+    } else if prefs.column_folded {
+        STRIP_WIDTH
+    } else {
+        MIN_COL
+    };
+    side.set_size_request(min_width, -1);
+    let strip = gtk::EventBox::new();
+    crate::ui::class(&strip, "colstrip");
+    strip.set_visible_window(true);
+    strip.add_events(
+        gtk::gdk::EventMask::BUTTON_PRESS_MASK
+            | gtk::gdk::EventMask::ENTER_NOTIFY_MASK
+            | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK,
+    );
+    strip.set_size_request(STRIP_WIDTH, -1);
+    strip.set_no_show_all(true);
+    strip.set_visible(plan.strip);
+    label_a11y(&strip, "Show tab column", gtk::atk::Role::PushButton);
+    pack(&side, &strip, true);
+    let body = widget_box(gtk::Orientation::Vertical, 0);
+    // Opted out of show_all, so the window's show_all cannot unfold a column
+    // saved as folded. apply_column shows the body's own subtree when unfolded.
+    body.set_no_show_all(true);
+    body.set_visible(plan.body);
+    pack(&side, &body, true);
 
     // The lights and the page's own doors, in the band they share. The band
     // is one EventBox so the whole of it can be the window's handle, not only
@@ -111,6 +173,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let top = gtk::EventBox::new();
     crate::ui::class(&top, "topband");
     top.set_size_request(-1, 40);
+    top.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
     let band = widget_box(gtk::Orientation::Horizontal, 0);
     top.add(&band);
     let lights = widget_box(gtk::Orientation::Horizontal, 2);
@@ -131,15 +194,18 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     helm.set_no_show_all(true);
     let ink_muted = palette.muted;
     let back = icons::button(Icon::Back, 14, ink_muted, "door");
+    label_a11y(&back, "Back", gtk::atk::Role::PushButton);
     let forward = icons::button(Icon::Forward, 14, ink_muted, "door");
+    label_a11y(&forward, "Forward", gtk::atk::Role::PushButton);
     let reload = icons::button(Icon::Reload, 14, ink_muted, "door");
+    label_a11y(&reload, "Reload", gtk::atk::Role::PushButton);
     pack(&helm, &back, false);
     pack(&helm, &forward, false);
     pack(&helm, &reload, false);
     pack(&band, &helm, false);
     // Nothing here expands: the column keeps the width it is given.
 
-    pack(&side, &top, false);
+    pack(&body, &top, false);
 
     // Pinned pages: squares that keep their place.
     let pins_holder = widget_box(gtk::Orientation::Vertical, 0);
@@ -152,7 +218,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pins.set_halign(gtk::Align::Start);
     pack(&pins_holder, &pins, false);
     pins_holder.set_no_show_all(true);
-    pack(&side, &pins_holder, false);
+    pack(&body, &pins_holder, false);
 
     // The rows.
     let rows = widget_box(gtk::Orientation::Vertical, 2);
@@ -167,7 +233,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     rows_scroll.set_min_content_width(0);
     rows.set_size_request(0, -1);
     rows_scroll.add(&rows);
-    pack(&side, &rows_scroll, true);
+    pack(&body, &rows_scroll, true);
 
     // The foot: one door to everything else.
     let footer = widget_box(gtk::Orientation::Horizontal, 0);
@@ -175,9 +241,10 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     footer.set_margin_start(12);
     footer.set_margin_end(12);
     let menu = icons::button(Icon::Menu, 16, palette.muted, "foot");
+    label_a11y(&menu, "Menu", gtk::atk::Role::PushButton);
     menu.set_valign(gtk::Align::Center);
     pack(&footer, &menu, false);
-    pack(&side, &footer, false);
+    pack(&body, &footer, false);
 
     // The column is the paned's first child itself, with no wrapper around
     // it. `.side` draws the hairline as its own right border, so the line is
@@ -185,6 +252,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     // was outside that border and the line began at y=24 instead of at the
     // band's edge. Unwrapped it runs from the band to the window's bottom.
     paned.pack1(&side, false, false);
+    paned.set_position(plan.paned_at);
 
     // The pages you kept, in one row, above the page and below the column's
     // top band. Hidden unless it has something to show.
@@ -217,6 +285,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     stack.set_hexpand(true);
     stack.set_vexpand(true);
     stack.set_vexpand_set(true);
+    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    stack.set_transition_duration(if std::env::var_os("SEARCH_BENCH").is_some() { 0 } else { 90 });
     let blank_holder = gtk::EventBox::new();
     crate::ui::class(&blank_holder, "blank");
     blank_holder.set_visible_window(false);
@@ -289,19 +359,62 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     // The name stays "error": the browser and the bench both look the page up
     // by it, and only the widget under the name changed.
     stack.add_named(&error_holder, "error");
-    pack(&card, &stack, true);
+
+    // Overlay the page stack so the 3px load progress bar floats at the very top
+    // of the viewport without ever pushing page content down.
+    let page_overlay = gtk::Overlay::new();
+    page_overlay.set_hexpand(true);
+    page_overlay.set_vexpand(true);
+    page_overlay.add(&stack);
+
+    let progress_frac = std::rc::Rc::new(std::cell::Cell::new(0.0_f64));
+    let progress = gtk::DrawingArea::new();
+    crate::ui::class(&progress, "progress");
+    progress.set_size_request(-1, 3);
+    progress.set_halign(gtk::Align::Fill);
+    progress.set_valign(gtk::Align::Start);
+    progress.set_no_show_all(true);
+    progress.set_visible(false);
+    let frac_for_draw = progress_frac.clone();
+    progress.connect_draw(move |widget, cr| {
+        let frac = frac_for_draw.get().clamp(0.0, 1.0);
+        if frac <= 0.001 {
+            return crate::gtkx::inh(false);
+        }
+        let alloc = widget.allocation();
+        let w = alloc.width() as f64;
+        let h = alloc.height() as f64;
+        if w <= 0.0 || h <= 0.0 {
+            return crate::gtkx::inh(false);
+        }
+        let fill_w = (w * frac).max(2.0).min(w);
+        let rgba = widget.style_context().color(gtk::StateFlags::NORMAL);
+        cr.set_source_rgba(rgba.red(), rgba.green(), rgba.blue(), rgba.alpha());
+        cr.rectangle(0.0, 0.0, fill_w, h);
+        let _ = cr.fill();
+        if fill_w > 4.0 {
+            let glow_w = 18.0_f64.min(fill_w);
+            let x0 = (fill_w - glow_w).max(0.0);
+            let grad = cairo::LinearGradient::new(x0, 0.0, fill_w, 0.0);
+            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0);
+            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.45);
+            let _ = cr.set_source(&grad);
+            cr.rectangle(x0, 0.0, glow_w, h);
+            let _ = cr.fill();
+        }
+        crate::gtkx::inh(false)
+    });
+    page_overlay.add_overlay(&progress);
+    page_overlay.set_overlay_pass_through(&progress, true);
+    pack(&card, &page_overlay, true);
 
     // The page is the paned's second child itself: the band it used to begin
     // with is the one strip above the paned now, and a wrapper here would buy
     // a box with a single child in it.
     paned.pack2(&card, true, false);
 
-    // The outer frame is what the capture walks. The band is its first child
-    // and the paned its second, so the band is laid out above both columns and
-    // painted before them rather than over them.
     let frame = widget_box(gtk::Orientation::Vertical, 0);
     crate::ui::class(&frame, "shell");
-    pack(&frame, &deskband, false);
     pack(&frame, &paned, true);
     overlay.add(&frame);
 
@@ -309,11 +422,11 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         window,
         overlay,
         shell: frame,
-        desk: deskband,
         paned,
         side,
+        strip,
+        body,
         top,
-        lights,
         light_red,
         light_amber,
         light_green,
@@ -327,6 +440,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         rows_scroll,
         menu,
         stack,
+        progress,
+        progress_frac,
         bmarkbar,
         bmarks,
         blank_holder,
@@ -350,17 +465,12 @@ fn window_controls(palette: Palette) -> (gtk::EventBox, gtk::EventBox, gtk::Even
         e.style_context().add_class(name);
         e.set_size_request(22, 22);
         e.set_valign(gtk::Align::Center);
+        e.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
         // The mark is drawn, not typed: there is no text in this control for a
         // screen reader to read, so the words have to be given to it. A
         // button role says what it is; the tooltip and the accessible name say
         // which.
-        e.set_tooltip_text(Some(tooltip));
-        if let Some(access) = e.accessible() {
-            // Fully qualified: gtk's prelude brings several traits with a
-            // `set_name`, and this one is atk's.
-            gtk::atk::prelude::AtkObjectExt::set_name(&access, tooltip);
-            gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PushButton);
-        }
+        label_a11y(&e, tooltip, gtk::atk::Role::PushButton);
         let mark = icons::area(kind, 12, palette.muted);
         mark.set_halign(gtk::Align::Center);
         mark.set_valign(gtk::Align::Center);
@@ -516,9 +626,9 @@ pub fn loading_mark(icon: &gtk::Box, colour: crate::palette::Rgb) {
     area.set_valign(gtk::Align::Center);
     let angle = std::rc::Rc::new(std::cell::Cell::new(0.0_f64));
     let for_draw = angle.clone();
-    area.connect_draw(move |_, cr| {
+    area.connect_draw(move |widget, cr| {
         let a = for_draw.get();
-        cr.set_source_rgb(colour.0 as f64 / 255.0, colour.1 as f64 / 255.0, colour.2 as f64 / 255.0);
+        icons::set_source_color(widget, cr, colour);
         cr.set_line_width(1.6);
         cr.set_line_cap(cairo::LineCap::Round);
         cr.arc(7.0, 7.0, 5.0, a, a + std::f64::consts::TAU * 0.7);
@@ -704,3 +814,36 @@ pub fn scrim(palette: &Palette) -> gtk::DrawingArea {
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_folded_column_stays_folded_through_full_screen() {
+        let folded = column_plan(true, false, true, 260);
+        assert_eq!((folded.strip, folded.body, folded.width), (true, false, STRIP_WIDTH));
+        assert_eq!(folded.paned_at, STRIP_WIDTH);
+
+        let full = column_plan(true, true, true, 260);
+        assert!(!full.side_shown, "full screen hides the column");
+        assert!(full.strip, "full screen does not unfold the column");
+
+        let back = column_plan(true, false, true, 260);
+        assert_eq!(back, folded, "leaving full screen returns to the fold");
+    }
+
+    #[test]
+    fn an_unfolded_column_leaves_full_screen_open_again() {
+        let open = column_plan(false, false, true, 260);
+        assert_eq!((open.strip, open.body, open.width, open.paned_at), (false, true, 260, 260));
+        assert!(column_plan(false, true, true, 260).body == open.body, "full screen does not change the fold");
+        assert!(column_plan(false, false, true, 260).side_shown);
+    }
+
+    #[test]
+    fn no_sidebar_means_no_column_whatever_the_fold() {
+        assert_eq!(column_plan(true, false, false, 260).width, 0);
+        assert!(!column_plan(true, false, false, 260).strip);
+    }
+}

@@ -148,17 +148,67 @@ class Bench:
         raise BenchError(f"timed out waiting; last probe: {json.dumps(last)[:400]}")
 
     def wait_loaded(self, tab_id=None, timeout=25.0):
+        """Wait until a tab (the active one by default) has stopped loading.
+
+        The probe has no top-level `loading` field: loading is reported per
+        tab. Reading `probe.get("loading", False)` for the active tab was
+        always False, and the tab's address is set the moment `open` returns,
+        so this used to return at once while the page was still about:blank.
+        The active tab is now looked up in `tabs` like any other.
+        """
         def ready(probe):
             if probe.get("visibleChild") == "error":
                 return True
-            if tab_id is None:
-                return not probe.get("loading", False) and bool(probe.get("url"))
+            wanted = tab_id if tab_id is not None else probe.get("active")
             for tab in probe.get("tabs", []):
-                if tab.get("id") == tab_id:
+                if tab.get("id") == wanted:
                     return not tab.get("loading", False) and bool(tab.get("url"))
             return False
 
         return self.wait_for(ready, timeout=timeout)
+
+    def wait_page(self, expect, tab_id=None, timeout=25.0, min_chars=200):
+        """Wait until a page has really opened, not just stopped loading.
+
+        wait_loaded() returns as soon as loading stops, and it also returns
+        when the error pane is showing, so a crashed, blank or refused page
+        could still count as success. This one passes only when all of these
+        are true:
+          - the tab is not loading and has a committed address;
+          - the page itself is showing, not the error pane;
+          - the page text has at least `min_chars` characters;
+          - the page text contains every string in `expect`.
+        It raises BenchError with the reason otherwise, so a caller cannot
+        mistake an error page, a title on its own or a blank pane for a page.
+        """
+        if isinstance(expect, str):
+            expect = [expect]
+        deadline = time.time() + timeout
+        last_reason = "never checked"
+        while time.time() < deadline:
+            probe = self.probe()
+            if probe.get("visibleChild") == "error":
+                raise BenchError(f"error pane is showing: {json.dumps(probe)[:400]}")
+            tabs = {tab.get("id"): tab for tab in probe.get("tabs", [])}
+            wanted = tab_id if tab_id is not None else probe.get("active")
+            tab = tabs.get(wanted)
+            if tab is None:
+                last_reason = f"tab {wanted} is gone"
+            elif tab.get("loading", False) or not tab.get("url"):
+                last_reason = f"tab {wanted} still loading at {tab.get('url')!r}"
+            elif probe.get("active") != wanted:
+                last_reason = f"tab {wanted} is not the active tab"
+            else:
+                body = self.text().get("text") or ""
+                missing = [word for word in expect if word not in body]
+                if len(body) < min_chars:
+                    last_reason = f"only {len(body)} characters of page text"
+                elif missing:
+                    last_reason = f"page text lacks {missing!r}"
+                else:
+                    return {"probe": probe, "chars": len(body)}
+            time.sleep(0.25)
+        raise BenchError(f"page never really opened: {last_reason}")
 
     def disconnect(self):
         try:

@@ -3,8 +3,12 @@
 use crate::app::{App, AppRef, TabId};
 use javascriptcore::ValueExt;
 use webkit2gtk::{
-    UserContentInjectedFrames, UserContentManagerExt, UserStyleLevel, UserStyleSheet,
+    UserContentInjectedFrames, UserContentManagerExt, UserStyleLevel, UserStyleSheet, WebViewExt,
 };
+
+/// Isolated script world for the element picker so page JavaScript cannot spoof
+/// or intercept `searchHide` messages or tamper with picker state.
+const CURTAIN_WORLD: &str = "search-curtain";
 pub fn selectors(app: &App, host: &str) -> Vec<String> {
     app.state
         .borrow()
@@ -34,14 +38,19 @@ fn css_from(list: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+/// The style sheet the next document of the given manager will wear.
+pub fn sync_manager(app: &AppRef, manager: &webkit2gtk::UserContentManager, host: &str) {
+    let css = css_for(app, host);
+    replace_sheet(manager, &css);
+}
+
 /// The style sheet the next document of the shared manager will wear.
 pub fn sync(app: &AppRef, host: &str) {
     // Same key the view will be made with, or the sheet lands on the manager
     // the page does not use.
     let shielded = app.prefs.borrow().shield && !crate::shield::is_allowed(host);
     let manager = crate::web::shared_manager(app, shielded);
-    let css = css_for(app, host);
-    replace_sheet(&manager, &css);
+    sync_manager(app, &manager, host);
 }
 // The curtain puts one sheet on a manager and takes its own back off. Clearing
 // every sheet also cleared the dark page's, so turning the curtain off used to
@@ -92,7 +101,11 @@ pub fn apply_for_tab(app: &App, id: TabId) {
         .map(|t| crate::shield::host_of(&t.url))
         .unwrap_or_default();
     if !host.is_empty() {
-        sync(&app_ref, &host);
+        if let Some(manager) = app.view(id).and_then(|v| v.user_content_manager()) {
+            sync_manager(&app_ref, &manager, &host);
+        } else {
+            sync(&app_ref, &host);
+        }
     }
 }
 /// For a navigation WebKit starts itself: the style sheet has to be in place
@@ -136,6 +149,9 @@ const STYLE_ID: &str = "__search_hidden";
 fn sanitized(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_SELECTOR {
+        return None;
+    }
+    if trimmed.contains("/*") || trimmed.contains("*/") {
         return None;
     }
     let chars: Vec<char> = trimmed.chars().collect();
@@ -214,18 +230,49 @@ const PICK: &str = r#"
 "#;
 pub fn pick(_app: &App, view: &webkit2gtk::WebView, on: bool) {
     let js = if on {
-        PICK.to_string()
+        PICK
     } else {
-        "(() => { window.__searchHideOn = false; const st = document.getElementById('__search_hide_style'); if (st) st.remove(); })();".to_string()
+        "(() => { window.__searchHideOn = false; const st = document.getElementById('__search_hide_style'); if (st) st.remove(); if (window.__searchHideLast) window.__searchHideLast.classList.remove('__search_hide_hover'); })();"
     };
-    crate::js::run(view, &js, |_| {});
+    view.evaluate_javascript(
+        js,
+        Some(CURTAIN_WORLD),
+        None,
+        None::<&gtk::gio::Cancellable>,
+        |_| {},
+    );
 }
+/// Exercises the isolated picker world for the bench suite: turns hide mode on
+/// and posts `selector` from `CURTAIN_WORLD`, matching a real picker click.
+pub(crate) fn pick_selector(app: &AppRef, selector: &str) -> Result<(), &'static str> {
+    let Some(view) = app.view(app.active_id()) else {
+        return Err("no page");
+    };
+    let Some(clean) = sanitized(selector) else {
+        return Err("selector refused");
+    };
+    app.state.borrow_mut().hide_mode = true;
+    let payload = serde_json::to_string(&clean).unwrap_or_else(|_| "\"\"".into());
+    let js = format!("window.webkit.messageHandlers.searchHide.postMessage({payload});");
+    view.evaluate_javascript(
+        &js,
+        Some(CURTAIN_WORLD),
+        None,
+        None::<&gtk::gio::Cancellable>,
+        |_| {},
+    );
+    Ok(())
+}
+
 /// A style sheet that hides what was hidden here, as the page begins.
 pub fn install(app: &AppRef, manager: &webkit2gtk::UserContentManager) {
-    manager.register_script_message_handler("searchHide");
+    manager.register_script_message_handler_in_world("searchHide", CURTAIN_WORLD);
     let weak = app.weak();
     manager.connect_script_message_received(Some("searchHide"), move |_, value| {
         let Some(app) = weak.upgrade() else { return };
+        if !app.state.borrow().hide_mode {
+            return;
+        }
         let selector = value
             .js_value()
             .map(|value| value.to_str().to_string())
@@ -245,8 +292,10 @@ pub fn install(app: &AppRef, manager: &webkit2gtk::UserContentManager) {
             // page. The work is put on the loop and done after this returns.
             glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
                 if let Some(app) = crate::app::current() {
-                    app.hide_selector(&host, &selector);
-                    app.state.borrow_mut().hide_mode = false;
+                    if app.state.borrow().hide_mode {
+                        app.hide_selector(&host, &selector);
+                        app.state.borrow_mut().hide_mode = false;
+                    }
                 }
                 glib::ControlFlow::Break
             });
@@ -298,6 +347,13 @@ mod tests {
         assert_eq!(sanitized("#ad\nbody"), None);
         assert_eq!(sanitized("   "), None);
         assert_eq!(sanitized(&"#".repeat(MAX_SELECTOR + 1)), None);
+    }
+
+    #[test]
+    fn css_comment_delimiters_are_refused() {
+        assert_eq!(sanitized("#ad/*"), None);
+        assert_eq!(sanitized("*/#ad"), None);
+        assert_eq!(sanitized("#a/*comment*/b"), None);
     }
 
     #[test]

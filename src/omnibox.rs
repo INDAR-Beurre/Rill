@@ -1,12 +1,17 @@
 // The one field: an address, a few words, or the name of a tab. It rises over
 // the page when asked for and never sends what was typed until Return.
-use crate::app::{App, AppRef};
+use crate::app::{App, AppRef, TabId};
 use crate::layer::Layer;
 use crate::palette::Palette;
 use gtk::prelude::*;
 
 pub const FIELD_WIDTH: i32 = 560;
 const FIELD_HEIGHT: i32 = 50;
+
+/// Field width clamped to the available page width on narrow windows.
+fn field_width_for(page: i32) -> i32 {
+    FIELD_WIDTH.min((page - 24).max(260))
+}
 /// The most of the window the list may take. A cap, not a crop: past it the
 /// list scrolls.
 const LIST_CAP: i32 = 420;
@@ -28,6 +33,7 @@ pub struct Offer {
 pub struct Omnibox {
     pub offers: std::cell::RefCell<Vec<Offer>>,
     column: std::cell::Cell<i32>,
+    band: std::cell::Cell<i32>,
     pub picked: std::cell::Cell<i32>,
     pub holder: gtk::Fixed,
     layer: Layer,
@@ -36,13 +42,14 @@ pub struct Omnibox {
     pub field: gtk::Box,
     pub entry: gtk::Entry,
     pub site: gtk::Label,
+    pub site_box: gtk::EventBox,
     pub list: gtk::Box,
     pub list_scroll: gtk::ScrolledWindow,
     /// The rows, in draw order, so a pick can restyle one row instead of
     /// rebuilding every one of them: a rebuild leaves the whole list needing a
     /// fresh allocation, and GTK drops a draw on a widget that needs one.
     rows: std::cell::RefCell<Vec<gtk::EventBox>>,
-    pub visible: std::cell::Cell<bool>,
+    pub visible: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 /// A scheme is a name, not a sentence: `data:text/html,<a href="http://x">`
@@ -186,15 +193,35 @@ impl Omnibox {
         site.set_ellipsize(gtk::pango::EllipsizeMode::End);
         site.set_max_width_chars(14);
         site.set_no_show_all(true);
-        crate::ui::pack(&field, &site, false);
+        // Clicking the site name opens its card, the same as Ctrl I.
+        let site_box = gtk::EventBox::new();
+        site_box.set_no_show_all(true);
+        site_box.set_visible_window(false);
+        crate::ui::class(&site_box, "omnisite-hit");
+        if let Some(access) = site_box.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Site information");
+        }
+        site_box.add(&site);
+        site_box.connect_button_press_event(|_, _| {
+            if let Some(app) = crate::app::current() {
+                app.close_omni();
+                crate::sitecard::open(&app);
+            }
+            glib::Propagation::Stop
+        });
+        crate::ui::pack(&field, &site_box, false);
 
         let entry = gtk::Entry::new();
         crate::ui::class(&entry, "omnitext");
         entry.set_placeholder_text(Some("Search or enter address"));
+        entry.set_width_chars(1);
         entry.set_hexpand(true);
         entry.set_margin_end(18);
         entry.set_valign(gtk::Align::Center);
         entry.set_has_frame(false);
+        if let Some(access) = entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Address and search");
+        }
         crate::ui::pack(&field, &entry, true);
         block.add(&field);
 
@@ -251,10 +278,41 @@ impl Omnibox {
             crate::gtkx::inh(true)
         });
 
+        // Paste and Go: the field's own right-click menu gains one item that
+        // pastes what is on the clipboard and goes there at once, the same way
+        // Return would (a keyword, an address or a search). The clipboard is
+        // read when the menu opens, so the item is greyed out when there is
+        // nothing to paste instead of offering a press that does nothing. A
+        // pasted block with line breaks is one line of words, not several.
+        entry.connect_populate_popup(|_, popup| {
+            let Some(menu) = popup.downcast_ref::<gtk::Menu>() else { return };
+            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+            let text = clipboard
+                .wait_for_text()
+                .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|t| !t.is_empty());
+            let separator = gtk::SeparatorMenuItem::new();
+            let item = gtk::MenuItem::with_label("Paste and Go");
+            item.set_sensitive(text.is_some());
+            item.connect_activate(move |_| {
+                let (Some(app), Some(text)) = (crate::app::current(), text.as_deref()) else { return };
+                let target = crate::app::resolve(&app, text);
+                if target.is_empty() {
+                    return;
+                }
+                // Never a picked row: the clipboard is what was asked for.
+                app.omni.picked.set(-1);
+                choose(&app, &target, false, false);
+            });
+            menu.append(&separator);
+            menu.append(&item);
+            separator.show();
+            item.show();
+        });
+
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "suggest");
-        list.set_size_request(FIELD_WIDTH, -1);
-        list.set_halign(gtk::Align::Start);
+        list.set_hexpand(true);
         list.set_no_show_all(true);
         list_scroll.add(&list);
         block.add(&list_scroll);
@@ -265,6 +323,7 @@ impl Omnibox {
         Omnibox {
             offers: std::cell::RefCell::new(Vec::new()),
             column: std::cell::Cell::new(0),
+            band: std::cell::Cell::new(23),
             picked: std::cell::Cell::new(-1),
             holder,
             layer,
@@ -273,56 +332,91 @@ impl Omnibox {
             field,
             entry,
             site,
+            site_box,
             list,
             list_scroll,
             rows: std::cell::RefCell::new(Vec::new()),
-            visible: std::cell::Cell::new(false),
+            visible: std::rc::Rc::new(std::cell::Cell::new(false)),
         }
     }
 
     /// Where the field stands for a window of this size, and how much room the
     /// list under it has.
     pub fn layout(&self, width: i32, height: i32) {
-        self.layout_with_column(width, height, self.column.get());
+        self.layout_in(width, height, self.column.get(), self.band.get());
     }
 
-    /// The scrim covers the page, not the column: the tabs stay readable while
-    /// the field is up.
-    pub fn layout_with_column(&self, width: i32, height: i32, column: i32) {
+    /// Lay out the scrim and omnibox inside the page area starting at `column` and `band`.
+    pub fn layout_in(&self, width: i32, height: i32, column: i32, band: i32) {
         self.column.set(column);
-        self.layer.place(&self.scrim, column, 0, (width - column).max(0), height);
+        let band = band.max(0);
+        self.band.set(band);
+        let page = (width - column).max(0);
+        self.layer.place(&self.scrim, column, band, page, (height - band).max(0));
+        let field_width = field_width_for(page);
         // Centred on the page, not on the window: the column is not part of
         // the page the field is over.
-        let x = (column + (width - column - FIELD_WIDTH) / 2).max(column + 12);
+        let x = column + ((page - field_width) / 2).max(12);
         // The list is capped, not cropped: it scrolls past the cap, and the
         // block is exactly as tall as the list that is really in it. The
         // anchor above it does not depend on any of that.
         let shown = self.list_scroll.get_visible();
-        let placed = plan(height, if shown { self.list_height() } else { 0 });
-        self.layer.place(&self.block, x, placed.top, FIELD_WIDTH, placed.block.max(FIELD_HEIGHT));
+        let placed = plan(height, if shown { self.list_height_for(field_width) } else { 0 });
+        self.layer.place(&self.block, x, placed.top, field_width, placed.block.max(FIELD_HEIGHT));
         if shown {
-            self.list_scroll.set_size_request(FIELD_WIDTH, placed.list);
+            self.list_scroll.set_size_request(field_width, placed.list);
         }
-        self.field.set_size_request(FIELD_WIDTH, FIELD_HEIGHT);
+        self.field.set_size_request(field_width, FIELD_HEIGHT);
     }
 
     /// The list's own preferred height, not a guess: group headers are shorter
     /// than rows, and the cap has to be a scroll, not a crop.
-    fn list_height(&self) -> i32 {
-        self.list.preferred_height_for_width(FIELD_WIDTH).0.max(0)
+    fn list_height_for(&self, width: i32) -> i32 {
+        self.list.preferred_height_for_width(width).0.max(0)
+    }
+
+    fn set_site_chip(&self, host: &str) {
+        if host.is_empty() {
+            self.site_box.set_no_show_all(true);
+            self.site_box.hide();
+            self.entry.set_margin_start(18);
+        } else {
+            self.site_box.set_no_show_all(false);
+            self.site.set_text(host);
+            self.site_box.show_all();
+            self.entry.set_margin_start(0);
+        }
     }
 
     pub fn show(&self, ui: &crate::ui::Ui, over: bool, offers: Vec<Offer>) {
+        crate::motion::cancel(&self.layer.root);
+        crate::motion::cancel(&self.scrim);
+        crate::motion::cancel(&self.block);
+        crate::motion::cancel(&self.list_scroll);
+        self.layer.root.set_opacity(1.0);
+        self.scrim.set_opacity(1.0);
+        self.block.set_opacity(1.0);
+        self.list_scroll.set_opacity(1.0);
         self.visible.set(true);
         // A new field starts with nothing picked: a pick from the last time is
         // a pick the user did not make.
         self.picked.set(-1);
         self.scrim.set_visible(over);
+        let column = if ui.side.is_visible() && ui.side.is_child_visible() {
+            ui.side.allocated_width().max(0)
+        } else {
+            0
+        };
+        self.column.set(column);
+        self.band.set(0);
         // The holder is an overlay child, and GTK leaves a hidden overlay child
         // unallocated: it reads 1x1 until the pass after it is shown. Giving it
         // the window's size before anything is placed in it is what lets the
         // first field raised by a keystroke stand where it belongs.
-        let (width, height) = (ui.window.allocated_width(), ui.window.allocated_height());
+        let (width, height) = (
+            ui.overlay.allocated_width().max(ui.window.allocated_width()),
+            ui.overlay.allocated_height().max(ui.window.allocated_height()),
+        );
         if width > 1 && height > 1 {
             self.holder.set_size_request(width, height);
             let place = gtk::Allocation::new(0, 0, width, height);
@@ -335,14 +429,7 @@ impl Omnibox {
             .and_then(|app| app.state.borrow().active_tab().map(|tab| chip_host(&tab.url)))
             .unwrap_or_default();
         // The chip names where you are, whenever there is a where.
-        if host.is_empty() {
-            self.site.set_no_show_all(true);
-            self.site.hide();
-        } else {
-            self.site.set_no_show_all(false);
-            self.site.set_text(&host);
-            self.site.show();
-        }
+        self.set_site_chip(&host);
         let current = crate::app::current()
             .and_then(|app| app.state.borrow().active_tab().map(|tab| tab.url.clone()))
             .unwrap_or_default();
@@ -363,14 +450,42 @@ impl Omnibox {
             self.set_offers(ui, &app, offers);
         }
         self.layout(width, height);
+        if over {
+            crate::motion::fade_in(&self.scrim, 130);
+        }
+        if width > 1 && height > 1 {
+            let page = (width - column).max(0);
+            let field_width = field_width_for(page);
+            let x = column + ((page - field_width) / 2).max(12);
+            let y = plan(height, 0).top;
+            crate::motion::slide_in_fixed(&self.layer.root, &self.block, x, y, -10, 160);
+        }
+        if self.list_scroll.get_visible() {
+            crate::motion::fade_in(&self.list_scroll, 150);
+        }
     }
 
     pub fn hide(&self, _ui: &crate::ui::Ui) {
-        self.visible.set(false);
+        let was_visible = self.visible.replace(false);
         // A hidden field holds no focus, and leaving the ring on would paint
         // the next field as already chosen.
         self.field.style_context().remove_class("focused");
-        self.layer.hide();
+        if !was_visible {
+            return;
+        }
+        crate::motion::cancel(&self.layer.root);
+        crate::motion::cancel(&self.scrim);
+        crate::motion::cancel(&self.block);
+        crate::motion::cancel(&self.list_scroll);
+        let visible_flag = self.visible.clone();
+        let root = self.layer.root.clone();
+        crate::motion::fade_out_then(&self.layer.root, 100, move || {
+            if !visible_flag.get() {
+                root.hide();
+                root.set_no_show_all(true);
+                root.set_opacity(1.0);
+            }
+        });
     }
 
     pub fn set_offers(&self, _ui: &crate::ui::Ui, app: &AppRef, offers: Vec<Offer>) {
@@ -409,7 +524,11 @@ impl Omnibox {
             let row = gtk::EventBox::new();
             crate::ui::class(&row, "sgrow");
             row.set_can_focus(true);
-            row.set_tooltip_text(Some(&format!("{} — {}", offer.title, offer.kind)));
+            let row_label = format!("{} — {}", offer.title, offer.kind);
+            row.set_tooltip_text(Some(&row_label));
+            if let Some(access) = row.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, &row_label);
+            }
             if index as i32 == picked {
                 crate::ui::class(&row, "picked");
             }
@@ -426,7 +545,7 @@ impl Omnibox {
                 "Open" => crate::icons::Icon::Tab,
                 "History" => crate::icons::Icon::Clock,
                 "Bookmark" => crate::icons::Icon::Star,
-                "Search" => crate::icons::Icon::Search,
+                "Search" | "Suggest" => crate::icons::Icon::Search,
                 _ => crate::icons::Icon::Globe,
             };
             let mark = crate::icons::area(glyph, 15, tint);
@@ -460,9 +579,10 @@ impl Omnibox {
             let app_weak = app.weak();
             let target = offer.url.clone();
             let from_key = target.clone();
+            let open_row = offer.kind == "Open";
             row.connect_button_press_event(move |_, event| {
                 if let Some(app) = app_weak.upgrade() {
-                    choose(&app, &target, opens_beside(Some(event.state())));
+                    choose(&app, &target, opens_beside(Some(event.state())), open_row);
                 }
                 crate::gtkx::inh(true)
             });
@@ -482,7 +602,7 @@ impl Omnibox {
                     return crate::gtkx::inh(false);
                 }
                 if let Some(app) = app_weak.upgrade() {
-                    choose(&app, &from_key, opens_beside(Some(event.state())));
+                    choose(&app, &from_key, opens_beside(Some(event.state())), open_row);
                 }
                 crate::gtkx::inh(true)
             });
@@ -549,10 +669,23 @@ impl Omnibox {
         }
         if picked >= 0 {
             if let Some(row) = self.rows.borrow().get(picked as usize) {
-                let inside = row.translate_coordinates(&self.list_scroll, 0, 0).unwrap_or((0, 0));
-                let span = self.list_scroll.allocated_height();
-                if inside.1 < 0 || inside.1 + row.allocated_height() > span {
-                    self.list_scroll.vadjustment().set_value(inside.1 as f64);
+                let adjust = self.list_scroll.vadjustment();
+                if let Some((_, y)) = row.translate_coordinates(&self.list, 0, 0) {
+                    let height = row.allocated_height().max(1);
+                    let val = adjust.value();
+                    let page = adjust.page_size();
+                    let wanted = if (y as f64) < val {
+                        Some(y as f64)
+                    } else if (y + height) as f64 > val + page {
+                        Some((y + height) as f64 - page)
+                    } else {
+                        None
+                    };
+                    if let Some(wanted) = wanted {
+                        adjust.set_value(
+                            wanted.clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())),
+                        );
+                    }
                 }
             }
         }
@@ -574,14 +707,12 @@ impl Omnibox {
             })
             .unwrap_or_default();
         let host = chip_host(&target);
-        if host.is_empty() {
-            self.site.set_no_show_all(true);
-            self.site.hide();
-        } else {
-            self.site.set_no_show_all(false);
-            self.site.set_text(&host);
-            self.site.show();
-        }
+        self.set_site_chip(&host);
+    }
+
+    pub fn picked_is_open_tab(&self) -> bool {
+        let picked = self.picked.get();
+        picked >= 0 && self.offers.borrow().get(picked as usize).is_some_and(|offer| offer.kind == "Open")
     }
 
     pub fn picked_url(&self) -> Option<String> {
@@ -623,7 +754,7 @@ fn opens_beside(state: Option<gtk::gdk::ModifierType>) -> bool {
 /// this tab. Taking it puts the field away, always — a field left standing
 /// over the page it just opened holds the next keystroke somewhere the user is
 /// not looking, and the page it names is no longer the page under it.
-fn choose(app: &App, target: &str, beside: bool) {
+fn choose(app: &App, target: &str, beside: bool, open_row: bool) {
     if beside {
         // A chosen tab closes the field from `select`, so the order here is
         // the tab first: at the tab limit `new_tab` refuses and says so, and a
@@ -632,14 +763,40 @@ fn choose(app: &App, target: &str, beside: bool) {
         app.new_tab(Some(target), false, false);
         return;
     }
+    // A typed or pasted address loads here. Only a row that is an open tab
+    // goes to that tab, so picking it does not make a second copy of the page.
+    let open = if open_row {
+        let state = app.state.borrow();
+        let tabs: Vec<(TabId, &str, bool)> =
+            state.tabs.iter().map(|tab| (tab.id, tab.url.as_str(), tab.private)).collect();
+        same_privacy_tab(&tabs, state.active, target)
+    } else {
+        None
+    };
+    if let Some(id) = open {
+        // select() puts the field away itself.
+        app.select(id);
+        return;
+    }
     app.close_omni();
     app.navigate_active(target);
+}
+
+/// The other tab showing `target` that has the same privacy as the active one,
+/// so an open-tab row never carries a normal page into a private tab or back.
+/// `tabs` holds (id, url, private) for every tab.
+fn same_privacy_tab(tabs: &[(TabId, &str, bool)], active: TabId, target: &str) -> Option<TabId> {
+    let active_private = tabs.iter().find(|(id, _, _)| *id == active)?.2;
+    tabs.iter()
+        .find(|(id, url, private)| *id != active && *url == target && *private == active_private)
+        .map(|(id, _, _)| *id)
 }
 
 /// Return in the field: the picked row if there is one, else the typed words.
 pub fn commit(app: &App) {
     if let Some(url) = app.omni.picked_url() {
-        choose(app, &url, opens_beside(gtk::current_event_state()));
+        let open_row = app.omni.picked_is_open_tab();
+        choose(app, &url, opens_beside(gtk::current_event_state()), open_row);
         return;
     }
     let typed = app.omni.entry.text().to_string();
@@ -655,7 +812,7 @@ pub fn commit(app: &App) {
         app.close_omni();
         return;
     }
-    choose(app, &target, opens_beside(gtk::current_event_state()));
+    choose(app, &target, opens_beside(gtk::current_event_state()), false);
 }
 
 #[cfg(test)]
@@ -665,6 +822,15 @@ mod tests {
     // The field is filled from the address and the chip beside it, so the two
     // have to agree on one thing: the chip names the site, the field never
     // names it again and never names a site it is not on.
+
+    #[test]
+    fn an_open_row_never_crosses_into_a_tab_of_the_other_privacy() {
+        // Tab 1 is the normal tab in front; tab 2 is a private copy of the same page.
+        let tabs = [(1, "https://a.example/", false), (2, "https://a.example/", true), (3, "https://a.example/", false)];
+        assert_eq!(same_privacy_tab(&tabs, 1, "https://a.example/"), Some(3));
+        assert_eq!(same_privacy_tab(&tabs, 2, "https://a.example/"), None);
+        assert_eq!(same_privacy_tab(&tabs[..2], 1, "https://a.example/"), None);
+    }
 
     #[test]
     fn a_bare_host_leaves_the_slash_it_stands_on() {
@@ -824,5 +990,12 @@ mod tests {
         let none = plan(917, 0);
         assert_eq!(none.block, FIELD_HEIGHT);
         assert!(plan(917, 352).block > FIELD_HEIGHT);
+    }
+
+    #[test]
+    fn field_width_clamps_to_narrow_page() {
+        assert_eq!(field_width_for(1268), FIELD_WIDTH);
+        assert_eq!(field_width_for(400), 376);
+        assert_eq!(field_width_for(200), 260);
     }
 }

@@ -5,4 +5,5 @@
 pub const FILTERS: &[&str] = &[
     include_str!("../assets/shield/network.json"),
     include_str!("../assets/shield/hide-0.json"),
+    include_str!("../assets/shield/hide-sites.json"),
 ];

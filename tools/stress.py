@@ -18,6 +18,7 @@ failed or the browser died.
 import argparse
 import json
 import os
+import shutil
 import signal
 import socket
 import statistics
@@ -135,6 +136,15 @@ class Run:
         self.server = None
         self.port = 0
         self.tmp = Path(tempfile.mkdtemp(prefix="search-stress-"))
+        self.sock = (
+            Path(os.environ["SEARCH_BENCH_SOCKET"])
+            if args.attach and os.environ.get("SEARCH_BENCH_SOCKET")
+            else (
+                Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "search-bench.sock"
+                if args.attach
+                else self.tmp / "bench.sock"
+            )
+        )
         # One name for the folder the suite's downloads land in, so a check can
         # say whether a file landed there or in the person's real Downloads.
         self.downloads = self.tmp / "downloads"
@@ -165,6 +175,7 @@ class Run:
     def start_browser(self, fresh=True):
         env = dict(os.environ)
         env["SEARCH_BENCH"] = "1"
+        env["SEARCH_BENCH_SOCKET"] = str(self.sock)
         # Assigned, not defaulted: an XDG_DATA_HOME inherited from the shell
         # would hand this run the profile it is meant to be independent of, and
         # its history would leak into checks that ask whether something was
@@ -197,7 +208,7 @@ class Run:
                 out = self.browser.stderr.read().decode(errors="replace")[-2000:]
                 raise RuntimeError(f"the browser exited at launch:\n{out}")
             try:
-                self.bench = Bench(timeout=20)
+                self.bench = Bench(path=str(self.sock), timeout=20)
                 self.bench.must("ping")
                 self.startup = round(time.time() - started, 2)
                 return
@@ -249,7 +260,11 @@ class Run:
                 self.bench.command("quit")
             except Exception:
                 pass
-        if self.browser and self.browser.poll() is None:
+            try:
+                self.bench.disconnect()
+            except Exception:
+                pass
+        if self.browser and not self.args.attach and self.browser.poll() is None:
             try:
                 os.killpg(self.browser.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -263,6 +278,13 @@ class Run:
                     pass
         if self.server:
             self.server.terminate()
+            try:
+                self.server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.server.kill()
+        if not self.args.attach:
+            Path(self.sock).unlink(missing_ok=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     # -- reporting ------------------------------------------------------
     def check(self, name, ok, detail, extra=None):
@@ -642,6 +664,20 @@ class Run:
                        f"{len(probe['tabs'])} tabs, "
                        f"{sum(1 for tab in probe['tabs'] if tab['hasView'])} with a view")
 
+            # An error status that carries the site's own HTML page (a
+            # Cloudflare check, GitHub's 404, a 401 sign-in screen) is shown
+            # as the site sent it. Only an answer with nothing to show, like
+            # /missing above (text/plain), gets the browser's own page.
+            for code in (403, 503):
+                site_error = bench.open(self.url(f"/status?code={code}"))
+                bench.wait_loaded(site_error, timeout=15)
+                time.sleep(0.4)
+                probe = bench.probe()
+                self.check(f"a {code} with its own page is shown as the site sent it",
+                           probe["visibleChild"] != "error",
+                           f"showing {probe['visibleChild']}, url {probe['url']}")
+                bench.close(site_error)
+
             redirect = bench.open(self.url("/redirect?n=6"))
             landed = bench.wait_for(lambda probe: probe["url"].endswith("/plain"), timeout=25)
             self.check("a redirect chain lands", landed["url"].endswith("/plain"), landed["url"])
@@ -691,7 +727,15 @@ class Run:
             spray = bench.open(self.url("/js-leak"))
             time.sleep(3)
             usage = self.ram()
+            # How far the spray pushed memory above the reading before it. The
+            # absolute peak can pass with a browser that was already large, so
+            # the growth is recorded beside it, and a generous bound catches a
+            # spray that stays inflated (a leak the absolute figure would miss).
+            self.spray_growth_mb = round(usage["pss_mb"] - before_spray["pss_mb"], 1)
             self.check("a memory spray is survived", usage["pss_mb"] < 2600, json.dumps(usage))
+            self.check("the spray adds at most 1500 MB over the reading before it",
+                       self.spray_growth_mb < 1500,
+                       f"{self.spray_growth_mb} MB over {before_spray['pss_mb']} MB before")
             bench.close(spray)
             time.sleep(4)
             after = self.ram()
@@ -844,7 +888,15 @@ class Run:
             answer = bench.must("js document.querySelectorAll('#hide-me').length")
             print(f"    [hide] count={answer}")
             self.check("the strip is there", answer.get("value") == "1", str(answer)[:60])
-            bench.must("js window.webkit.messageHandlers.searchHide.postMessage('#hide-me')")
+            # An untrusted page script outside hide mode must not be able to
+            # post directly into the isolated searchHide handler.
+            bench.command("js window.webkit.messageHandlers.searchHide.postMessage('#hide-me')")
+            time.sleep(0.3)
+            untrusted = bench.must("hidden")
+            self.check("an untrusted page cannot hide elements on its own",
+                       "#hide-me" not in json.dumps(untrusted), str(untrusted)[:90])
+            # Real hiding goes through hide mode in the isolated curtain world.
+            bench.must("hide #hide-me")
             time.sleep(1)
             hidden = bench.must("hidden")
             self.check("a hidden thing is kept", "#hide-me" in json.dumps(hidden), str(hidden)[:90])
@@ -888,6 +940,25 @@ class Run:
                 f"active {before['active']} -> {probe['active']}, showing {probe['visibleChild']}",
             )
 
+            # A page that asks for a window by itself, on load, with no click.
+            # The browser must refuse it: the tab count stays put, and the
+            # browser still answers. The tab it opens would be a new tab.
+            auto = bench.open(self.url("/popup-auto"))
+            # The baseline is taken after the opener exists, so its own tab is
+            # not counted as a rise; only a tab the page opened would be.
+            baseline = len(bench.probe()["tabs"])
+            bench.wait_loaded(auto, timeout=20)
+            time.sleep(1.5)
+            after_auto = bench.probe()
+            self.check("a pop-up without a click does not open a tab",
+                       len(after_auto["tabs"]) == baseline
+                       and not any(t["url"].endswith("/popup-target") for t in after_auto["tabs"]),
+                       f"{baseline} -> {len(after_auto['tabs'])} tabs, "
+                       f"target open: {any(t['url'].endswith('/popup-target') for t in after_auto['tabs'])}")
+            self.check("and the browser still answers after it",
+                       bool(bench.probe().get("ok")), "probe answered")
+            bench.close(auto)
+
             bench.open(self.url("/download"))
             for _ in range(30):
                 answer = bench.must("downloads")
@@ -917,7 +988,16 @@ class Run:
                     inside = self.downloads.resolve() in Path(path).resolve().parents
                 except OSError:
                     inside = False
-            geometry = bench.must("settle")
+            # This check used to pass only because the browser treated a
+            # download as a failed load and put an error page over the
+            # /download address. That was a bug, and it is now fixed, so a
+            # download leaves the tab as it was and nothing here has failed.
+            # Load a page that really fails (/missing returns a 404, and the
+            # tab shows its error page) so the geometry and the capture are
+            # taken from a real failed page.
+            bench.open(self.url("/missing"))
+            bench.wait_loaded(timeout=20)
+            bench.must("settle")
             geometry = bench.must("errorgeometry")
             self.check("a failed page has readable text and real geometry",
                        geometry["holder"][0] > 500 and geometry["holder"][1] > 400
@@ -1277,12 +1357,277 @@ class Run:
             self.check("keeping a page shows the bar", probe.get("bookmarkBar") is True, str(probe.get("bookmarkBar")))
             self.check("with one chip in it", probe.get("bookmarkCount") == 1, str(probe.get("bookmarkCount")))
 
+        @self.scenario("peek, site card and folded column")
+        def _cards_and_fold():
+            bench.must("escape")
+            opener = bench.open(self.url("/plain?peek-opener=1"))
+            bench.wait_loaded(opener, timeout=20)
+            bench.settle()
+            side_width = bench.must("fullscreen").get("sideWidth", 0)
+
+            # Peek: open fixture page in peek card, check geometry + page width, dismiss with escape.
+            peek_url = self.url("/titled?t=Peeked")
+            bench.must(f"peek {peek_url}")
+            peek_info = {}
+            cards = []
+            peek_card = None
+            peek_view = None
+            view_w = 0
+            for _ in range(60):
+                bench.settle()
+                cards = bench.must("cards").get("cards", [])
+                peek_card = next((c for c in cards if c.get("name") == "peek-card"), None)
+                peek_view = next(
+                    (kid for kid in (peek_card or {}).get("children", []) if kid.get("name") == "peek-view"),
+                    None,
+                )
+                view_w = (peek_view or {}).get("size", [0, 0])[0]
+                ans = bench.command(
+                    "peekjs (() => JSON.stringify({"
+                    "ready: document.readyState, "
+                    "href: location.href, "
+                    "scrollW: document.documentElement ? document.documentElement.scrollWidth : 0, "
+                    "clientW: document.documentElement ? document.documentElement.clientWidth : 0, "
+                    "textLen: document.body ? (document.body.innerText || '').length : 0"
+                    "}))()"
+                )
+                if ans.get("ok"):
+                    try:
+                        info = json.loads(ans.get("value") or "{}")
+                    except json.JSONDecodeError:
+                        info = {}
+                    if (
+                        info.get("ready") == "complete"
+                        and "/titled" in info.get("href", "")
+                        and info.get("textLen", 0) > 20
+                    ):
+                        peek_info = info
+                        if view_w > 200 and 0 < info.get("clientW", 0) <= view_w:
+                            break
+                time.sleep(0.15)
+            card_at = (peek_card or {}).get("at", [-1, -1])
+            self.check(
+                "peek card sits beside tab column and below top edge",
+                peek_card is not None and card_at[0] >= side_width and card_at[1] >= 10,
+                f"sideWidth={side_width}, card={peek_card}",
+            )
+            scroll_w = peek_info.get("scrollW", 0)
+            client_w = peek_info.get("clientW", 0)
+            self.check(
+                "peek page fits inside peek-view",
+                peek_view is not None and view_w > 200 and 0 < scroll_w <= view_w and scroll_w <= client_w,
+                f"scrollW={scroll_w}, clientW={client_w}, peek-view={view_w}",
+            )
+            bench.must("escape")
+            bench.settle()
+            after_peek = bench.must("cards").get("cards", [])
+            self.check(
+                "escape dismisses peek card",
+                not any(c.get("name") == "peek-card" for c in after_peek),
+                f"cards after escape: {after_peek}",
+            )
+
+            # SiteCard: open via key sitecard, verify below top band, dismiss with escape.
+            bench.must("key sitecard")
+            site_card = None
+            for _ in range(20):
+                bench.settle()
+                cards = bench.must("cards").get("cards", [])
+                site_card = next(
+                    (c for c in cards if c.get("name") == "site-card"),
+                    None,
+                )
+                if site_card is not None:
+                    break
+                time.sleep(0.05)
+            self.check(
+                "site card opens with clean top inset",
+                site_card is not None and site_card.get("at", [-1, -1])[1] >= 10,
+                f"card={site_card}",
+            )
+            bench.must("escape")
+            bench.settle()
+            after_site = bench.must("cards").get("cards", [])
+            self.check(
+                "escape dismisses site card",
+                not any(c.get("name") == "site-card" for c in after_site),
+                f"cards after escape: {after_site}",
+            )
+
+            # Folded tab column: toggle fold on (<= 20px strip), then off (>= 140px).
+            before_fold = bench.must("fullscreen").get("sideWidth", 0)
+            bench.must("key foldcolumn")
+            folded_width = before_fold
+            for _ in range(20):
+                folded_width = bench.must("fullscreen").get("sideWidth", before_fold)
+                if folded_width <= 20:
+                    break
+                time.sleep(0.05)
+            self.check(
+                "folding tab column collapses to strip",
+                before_fold >= 140 and folded_width <= 20,
+                f"sideWidth {before_fold} -> {folded_width}",
+            )
+            bench.must("key foldcolumn")
+            unfolded_width = folded_width
+            for _ in range(20):
+                unfolded_width = bench.must("fullscreen").get("sideWidth", 0)
+                if unfolded_width >= 140:
+                    break
+                time.sleep(0.05)
+            self.check(
+                "unfolding tab column restores width",
+                unfolded_width >= 140,
+                f"sideWidth {folded_width} -> {unfolded_width}",
+            )
+            bench.close(opener)
+
+        @self.scenario("duplicate private tab and reopen closed tab")
+        def _dup_reopen():
+            bench.must("closeall")
+            time.sleep(0.4)
+
+            bench.must("key privatetab")
+            priv_probe = bench.wait_for(
+                lambda p: any(t["id"] == p["active"] and t["private"] for t in p["tabs"]),
+                timeout=10,
+            )
+            priv_id = priv_probe["active"]
+            priv_url = self.url("/titled?t=PrivateDup")
+            bench.must(f"go {priv_url}")
+            bench.wait_loaded(priv_id, timeout=20)
+
+            bench.must("key duplicatetab")
+            dup_probe = bench.wait_for(
+                lambda p: p["active"] != priv_id and any(t["id"] == p["active"] and t["url"] == priv_url for t in p["tabs"]),
+                timeout=15,
+            )
+            dup_id = dup_probe["active"]
+            bench.wait_loaded(dup_id, timeout=20)
+            dup_probe = bench.probe()
+            dup_tab = next((t for t in dup_probe["tabs"] if t["id"] == dup_id), None)
+            self.check(
+                "duplicating a private tab keeps it private",
+                dup_id != priv_id
+                and dup_tab is not None
+                and dup_tab["private"] is True
+                and dup_tab["url"] == priv_url,
+                f"orig={priv_id}, dup={dup_tab}",
+            )
+            bench.close(dup_id)
+            bench.close(priv_id)
+            time.sleep(0.3)
+
+            reopen_url = self.url("/titled?t=ReopenMe")
+            normal_id = bench.open(reopen_url)
+            bench.wait_loaded(normal_id, timeout=20)
+            bench.close(normal_id)
+            bench.wait_for(lambda p: all(t["id"] != normal_id for t in p["tabs"]), timeout=10)
+
+            bench.must("key reopen")
+            reopened = bench.wait_for(
+                lambda p: any(t["url"] == reopen_url for t in p["tabs"]),
+                timeout=15,
+            )
+            reopened_tab = next((t for t in reopened["tabs"] if t["url"] == reopen_url), None)
+            if reopened_tab:
+                bench.wait_loaded(reopened_tab["id"], timeout=20)
+            self.check(
+                "reopening closed tab restores exact URL",
+                reopened_tab is not None and not reopened_tab["private"] and reopened_tab["url"] == reopen_url,
+                f"reopened={reopened_tab}",
+            )
+            bench.must("closeall")
+            time.sleep(0.5)
+
+        @self.scenario("disk-full stderr resilience")
+        def _disk_full_stderr():
+            if self.args.attach:
+                self.check("disk-full stderr starts, pings, and quits cleanly", True, "skipped under --attach")
+                return
+            full_tmp = Path(tempfile.mkdtemp(prefix="search-full-"))
+            full_sock = full_tmp / "bench.sock"
+            proc = None
+            full_bench = None
+            try:
+                env = dict(os.environ)
+                env["SEARCH_BENCH"] = "1"
+                env["SEARCH_BENCH_SOCKET"] = str(full_sock)
+                env["XDG_CONFIG_HOME"] = str(full_tmp / "config")
+                env["XDG_DATA_HOME"] = str(full_tmp / "data")
+                (full_tmp / "downloads").mkdir(exist_ok=True)
+                env["XDG_DOWNLOAD_DIR"] = str(full_tmp / "downloads")
+                env.pop("DISPLAY", None)
+                env["GDK_BACKEND"] = "wayland"
+                with open("/dev/full", "wb") as err_sink:
+                    proc = subprocess.Popen(
+                        [str(BINARY), "--appearance", "light", "--fresh"],
+                        env=env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=err_sink,
+                        start_new_session=True,
+                    )
+                ping_ok = False
+                exit_code = None
+                detail = ""
+                deadline = time.time() + 30
+                while time.time() < deadline:
+                    if proc.poll() is not None:
+                        detail = f"exited early with code {proc.returncode}"
+                        break
+                    try:
+                        full_bench = Bench(path=str(full_sock), timeout=10)
+                        ans = full_bench.must("ping")
+                        ping_ok = bool(ans.get("ok"))
+                        break
+                    except (BenchError, OSError):
+                        if full_bench is not None:
+                            full_bench.disconnect()
+                            full_bench = None
+                        time.sleep(0.1)
+                if ping_ok and full_bench is not None:
+                    try:
+                        full_bench.must("quit")
+                    except BenchError as error:
+                        detail = f"quit failed: {error}"
+                    full_bench.disconnect()
+                    full_bench = None
+                    try:
+                        exit_code = proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        detail = "timed out waiting for clean exit"
+                elif not detail:
+                    detail = "bench socket never answered ping"
+                self.check(
+                    "disk-full stderr starts, pings, and quits cleanly",
+                    ping_ok and exit_code == 0,
+                    f"ping_ok={ping_ok}, exit_code={exit_code}" + (f" ({detail})" if detail else ""),
+                )
+            finally:
+                if full_bench is not None:
+                    full_bench.disconnect()
+                if proc is not None and proc.poll() is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                full_sock.unlink(missing_ok=True)
+                shutil.rmtree(full_tmp, ignore_errors=True)
+
         @self.scenario("a tab that is not looked at lets go of its page")
         def _sleep():
             # The sleep timer had never been exercised by any run: the docs
             # described it and every check measured tabs that were all awake.
-            # A minute is the shortest setting, and the tick is a minute, so
-            # this waits long enough for one tick to find an old tab.
+            # Zero minutes is the shortest setting ("anything not looked at"),
+            # and the tick is two minutes, so this waits long enough for one
+            # tick to find an old tab.
             # The restart below replaces the socket, and every later scenario
             # reads the same name, so it has to point at the new browser.
             nonlocal bench
@@ -1335,7 +1680,7 @@ class Run:
             # Leave the setting as it was found, so later scenarios measure the
             # browser the rest of the suite describes.
             prefs["memory_saver"] = False
-            prefs["sleep_minutes"] = 30
+            prefs["sleep_minutes"] = 10
             self.restart_with_prefs(prefs_path, prefs)
             bench = self.bench
 
@@ -1366,7 +1711,8 @@ class Run:
                                       "failed": len(failed),
                                       "startup_seconds": getattr(self, "startup", None),
                                       "idle_rss_mb": idle.get("rss_mb"),
-                                      "idle_own_mb": idle.get("anon_mb")}, indent=2))
+                                      "idle_own_mb": idle.get("anon_mb"),
+                                      "spray_growth_mb": getattr(self, "spray_growth_mb", None)}, indent=2))
         print("\n" + "=" * 60)
         print(f"{passed} passed, {len(failed)} failed, {len(self.results)} checks")
         if hasattr(self, "one_tab"):
@@ -1414,6 +1760,8 @@ def main(argv):
     finally:
         if not args.keep:
             run.stop()
+        elif args.attach:
+            shutil.rmtree(run.tmp, ignore_errors=True)
     return run.summary()
 
 

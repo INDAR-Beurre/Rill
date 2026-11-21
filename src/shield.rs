@@ -28,6 +28,31 @@ thread_local! {
     static INSTALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+static FAILURE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn should_warn_failed(lists: usize, done: usize, compiled: usize) -> bool {
+    lists > 0 && done >= lists && compiled == 0
+}
+
+fn maybe_warn_failed() {
+    let warn = SHIELD_STATE.with(|state| {
+        let s = state.borrow();
+        should_warn_failed(s.lists, s.done, s.compiled)
+    });
+    if warn
+        && !FAILURE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        glib::idle_add_local_once(|| {
+            if let Some(app) = crate::app::current() {
+                app.flash_toast(
+                    "Ad-blocker could not start (disk may be full). Browsing without blocking this session.",
+                );
+            }
+        });
+    }
+}
+
 pub struct ShieldState {
     pub lists: usize,
     pub done: usize,
@@ -237,6 +262,7 @@ fn count(slot: &Mutex<Slot>, accepted: bool) {
         }
         state.compiled += added;
     });
+    maybe_warn_failed();
 }
 
 /// Report a finished list, hand its filter to the manager, and free the
@@ -304,9 +330,21 @@ unsafe extern "C" fn saved(
         // A list WebKit cannot parse fails whole, which is a silent loss of
         // every rule in it. Loud, once, at launch, with the name and size of
         // what was lost so the number is not a mystery later.
-        eprintln!(
-            "search: shield list {ident} did not compile ({msg}); its {rules} rules block nothing"
-        );
+        //
+        // Not eprintln!: it panics when stderr cannot be written, and this
+        // runs inside a C callback, where a panic cannot unwind and aborts the
+        // whole browser. That is what happened when /tmp filled up: the save
+        // failed with "database or disk is full", this line tried to report it
+        // to a log file on the same full disk, the write failed, and the
+        // browser died at launch with SIGABRT and no message. A report that
+        // cannot be written is dropped; the browser starts without the list.
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "search: shield list {ident} did not compile ({msg}); its {rules} rules block nothing"
+            );
+        }
         glib_ffi::g_error_free(err);
     }
     delivered(data, filter);
@@ -424,7 +462,7 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
     let mut installed = 0;
     for (index, json) in lists.iter().enumerate() {
         if json.trim().is_empty() || !json.trim_start().starts_with('[') {
-            eprintln!("search: shield list {index} is not a JSON array; skipping it");
+            note!("search: shield list {index} is not a JSON array; skipping it");
             // Attempted and dealt with: a list the build broke must not leave
             // `finished` short of `lists` forever, or the only signal there is
             // would read as a compile that never ended.
@@ -433,6 +471,7 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
                     state.borrow_mut().done += 1;
                 }
             });
+            maybe_warn_failed();
             continue;
         }
         // One slot for both attempts: a load and a compile can both finish for
@@ -473,11 +512,12 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
         // whole module exists to avoid, and silence is how it went unnoticed
         // the first time. The path names where to look; the list itself has
         // already said why it was refused.
-        eprintln!(
+        note!(
             "search: the shield installed no list from {}; nothing is blocked this session",
             store_path.to_string_lossy()
         );
     }
+    maybe_warn_failed();
     installed > 0
 }
 
@@ -540,9 +580,13 @@ fn save_one(
     wait: Duration,
 ) -> Option<bool> {
     let Ok(ident) = CString::new(ident) else {
+        count(slot, false);
         return Some(false);
     };
-    let data = hand_off(slot, manager)?;
+    let Some(data) = hand_off(slot, manager) else {
+        count(slot, false);
+        return Some(false);
+    };
     let target = register(slot);
     let bytes = glib::Bytes::from(json.as_bytes());
     unsafe {
@@ -551,6 +595,7 @@ fn save_one(
             // Nothing will call back: give the pins back and say so once, from
             // the caller, rather than twice from here.
             release(data);
+            count(slot, false);
             return Some(false);
         }
         ffi::webkit_user_content_filter_store_save(
@@ -718,5 +763,14 @@ mod tests {
         assert_eq!(host_of("http://127.0.0.1:8099/plain?x=1"), "127.0.0.1");
         assert_eq!(host_of("https://user:pw@example.com:443/x"), "example.com");
         assert_eq!(host_of("example.com/path"), "example.com");
+    }
+
+    #[test]
+    fn failure_warning_fires_only_when_all_lists_finish_with_zero_compiled() {
+        assert!(!should_warn_failed(0, 0, 0));
+        assert!(!should_warn_failed(3, 2, 0));
+        assert!(!should_warn_failed(3, 3, 1));
+        assert!(should_warn_failed(3, 3, 0));
+        assert!(should_warn_failed(1, 2, 0));
     }
 }

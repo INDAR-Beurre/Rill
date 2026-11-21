@@ -69,8 +69,26 @@ window.__searchReader = function (palette) {
   if (!best) return 'empty';
 
   const clone = best.cloneNode(true);
-  const junk = 'script, style, nav, aside, form, iframe, noscript, footer, header, button, [class*=share], [class*=comment], [class*=newsletter], [class*=cookie], [class*=sidebar], [class*=related], [aria-hidden=true]';
+  const junk = 'script, style, nav, aside, form, iframe, noscript, footer, header, button, svg, object, embed, [class*=share], [class*=comment], [class*=newsletter], [class*=cookie], [class*=sidebar], [class*=related], [aria-hidden=true]';
   clone.querySelectorAll(junk).forEach((n) => n.remove());
+  const isUnsafeUrl = (val) => {
+    const clean = String(val || '').replace(/[\u0000-\u0020\u007f]+/g, '').toLowerCase();
+    return clean.startsWith('javascript:') || clean.startsWith('vbscript:');
+  };
+  for (const el of [clone, ...clone.querySelectorAll('*')]) {
+    if (!el.attributes) continue;
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith('on')) {
+        el.removeAttribute(attr.name);
+      } else if (
+        (name === 'href' || name === 'src' || name === 'xlink:href') &&
+        isUnsafeUrl(attr.value)
+      ) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  }
 
   const heading =
     (document.querySelector('h1') || {}).innerText ||

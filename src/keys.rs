@@ -7,7 +7,7 @@
 use crate::app::AppRef;
 use crate::panels::PanelKind;
 use gtk::gdk::ModifierType;
-use gtk::prelude::EntryExt;
+use gtk::prelude::*;
 use webkit2gtk::WebViewExt;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -30,6 +30,7 @@ pub enum Intent {
     Bookmarks,
     Settings,
     Shortcuts,
+    Print,
     HideSomething,
     ShowHidden,
     Inspector,
@@ -48,6 +49,15 @@ pub enum Intent {
     PanelLeft,
     PanelRight,
     PanelFocus,
+    /// Ctrl K: the field, showing only open tabs, so typing a few letters of
+    /// a title and pressing Return switches to that tab.
+    SwitchTab,
+    /// Ctrl Shift K: the same page again, in a new tab beside this one.
+    DuplicateTab,
+    /// Ctrl I: the site card for the page on screen.
+    SiteCard,
+    /// Ctrl S: fold the tab column to a strip, or open it again.
+    FoldColumn,
 }
 
 pub struct Key {
@@ -108,6 +118,7 @@ impl Key {
                 ("d", _) => Intent::Bookmark,
                 ("f", _) => Intent::Find,
                 ("y", _) => Intent::History,
+                ("h", false) => Intent::History,
                 ("j", _) => Intent::Downloads,
                 ("b", true) => Intent::Bookmarks,
                 ("slash", _) => Intent::Shortcuts,
@@ -115,6 +126,7 @@ impl Key {
                 ("h", true) => Intent::HideSomething,
                 ("u", true) => Intent::ShowHidden,
                 ("i", true) => Intent::Inspector,
+                ("i", false) => Intent::SiteCard,
                 ("u", false) => Intent::ViewSource,
                 ("c", true) => Intent::CopyAddress,
                 // Shift Tab is a keyval of its own, and Ctrl Shift Tab is the
@@ -123,9 +135,13 @@ impl Key {
                 ("tab", true) | ("iso_left_tab", _) | ("page_up", _) => Intent::PreviousTab,
                 ("bracketleft", _) => Intent::Back,
                 ("bracketright", _) => Intent::Forward,
-                ("plus", _) | ("equal", _) => Intent::ZoomIn,
-                ("minus", _) => Intent::ZoomOut,
-                ("0", _) => Intent::ZoomReset,
+                ("plus", _) | ("equal", _) | ("kp_add", _) => Intent::ZoomIn,
+                ("minus", _) | ("kp_subtract", _) => Intent::ZoomOut,
+                ("0", _) | ("kp_0", _) => Intent::ZoomReset,
+                ("p", false) => Intent::Print,
+                ("k", false) => Intent::SwitchTab,
+                ("k", true) => Intent::DuplicateTab,
+                ("s", false) => Intent::FoldColumn,
                 (digit, _) if digit.len() == 1 && digit.as_bytes()[0].is_ascii_digit() => {
                     match digit.parse::<usize>() {
                         Ok(number) => Intent::Jump(number),
@@ -186,6 +202,9 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("nexttab", "Ctrl Tab", "Next tab", "tab", true, false, false),
     ("previoustab", "Ctrl Shift Tab", "Previous tab", "tab", true, true, false),
     ("jump", "Ctrl 1 to 9", "Jump to a tab", "3", true, false, false),
+    ("switchtab", "Ctrl K", "Switch to a tab by typing its name", "k", true, false, false),
+    ("duplicatetab", "Ctrl Shift K", "Duplicate this tab", "k", true, true, false),
+    ("foldcolumn", "Ctrl S", "Fold the tab column to a strip, or open it", "s", true, false, false),
     ("back", "Alt Left", "Back", "left", false, false, true),
     ("forward", "Alt Right", "Forward", "right", false, false, true),
     ("reload", "Ctrl R", "Reload", "r", true, false, false),
@@ -197,6 +216,8 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("findprevious", "Shift F3", "Previous match", "f3", false, true, false),
     ("bookmark", "Ctrl D", "Keep this page", "d", true, false, false),
     ("history", "Ctrl Y", "History", "y", true, false, false),
+    // Ctrl H is the second spelling of History, the way Ctrl N is of a new tab.
+    ("historyh", "Ctrl H", "History", "h", true, false, false),
     ("bookmarks", "Ctrl Shift B", "Bookmarks", "b", true, true, false),
     ("downloads", "Ctrl J", "Downloads", "j", true, false, false),
     ("settings", "Ctrl ,", "Settings", "comma", true, false, false),
@@ -205,7 +226,9 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("copy", "Ctrl Shift C", "Copy the address", "c", true, true, false),
     ("inspector", "F12", "The inspector", "f12", false, false, false),
     ("inspectorctrl", "Ctrl Shift I", "The inspector", "i", true, true, false),
+    ("sitecard", "Ctrl I", "About this site: connection, permissions, zoom, data", "i", true, false, false),
     ("source", "Ctrl U", "The page's own source", "u", true, false, false),
+    ("print", "Ctrl P", "Print this page", "p", true, false, false),
     ("fullscreen", "F11", "Full screen", "f11", false, false, false),
     ("pagedown", "Ctrl Page Down", "Next tab", "page_down", true, false, false),
     ("pageup", "Ctrl Page Up", "Previous tab", "page_up", true, false, false),
@@ -305,10 +328,15 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::Jump(number) => app.jump(number),
         Intent::CopyAddress => app.copy_address(),
         Intent::ViewSource => app.view_source(),
+        Intent::Print => app.print_page(),
         Intent::FullScreen => app.toggle_fullscreen(),
         Intent::PanelLeft => app.panel_arrow(false),
         Intent::PanelRight => app.panel_arrow(true),
         Intent::PanelFocus => app.panel_focus(),
+        Intent::SwitchTab => app.open_tab_switcher(),
+        Intent::DuplicateTab => app.duplicate_tab(),
+        Intent::FoldColumn => app.toggle_fold(),
+        Intent::SiteCard => crate::sitecard::open(app),
     }
 }
 
@@ -325,20 +353,104 @@ pub fn taken(app: &AppRef, intent: Intent) -> bool {
                 || app.reading.get()
                 || app.state.borrow().tab(app.state.borrow().active).is_some_and(|t| t.loading)
         }
-        Intent::PanelLeft | Intent::PanelRight | Intent::PanelFocus => {
-            app.panels.borrow().open.is_some()
+        Intent::PanelLeft | Intent::PanelRight => {
+            arrow_belongs_to_panel(app.panels.borrow().open.is_some(), focus_in_entry(app))
+        }
+        Intent::PanelFocus => {
+            tab_belongs_to_panel(app.panels.borrow().open.is_some(), focus_in_panel(app))
         }
         _ => true,
     }
 }
 
+/// Escape's first three jobs are the address field, the find bar, and any open
+/// panel. Only when none of them is open may a card (permission, sign-in,
+/// first-run, peek, site card) take it.
+pub fn escape_reaches_cards(field_open: bool, find_open: bool, panel_open: bool) -> bool {
+    !field_open && !find_open && !panel_open
+}
+
+/// Tab moves the panel's focus only when focus is outside the panel. Inside,
+/// it is GTK's to move, so Tab can walk the controls instead of looping.
+pub fn tab_belongs_to_panel(panel_open: bool, focus_inside: bool) -> bool {
+    panel_open && !focus_inside
+}
+
+/// Ctrl+Left / Ctrl+Right switch panels only when focus is not inside a text
+/// entry, so search and keyword fields keep word-by-word cursor movement.
+pub fn arrow_belongs_to_panel(panel_open: bool, focus_in_entry: bool) -> bool {
+    panel_open && !focus_in_entry
+}
+
+fn focus_in_panel(app: &AppRef) -> bool {
+    let card = app.panels.borrow().card.clone();
+    app.ui.window.focused_widget().is_some_and(|widget| widget.is_ancestor(&card))
+}
+
+fn focus_in_entry(app: &AppRef) -> bool {
+    app.ui.window.focused_widget().is_some_and(|widget| widget.is::<gtk::Entry>())
+}
+
 pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
+    let field_open = app.omni.visible.get();
+    let find_open = app.find.borrow().visible;
+    let panel_open = app.panels.borrow().open.is_some();
+    let chrome_open = field_open || find_open || panel_open;
     let intent = Key::from_event(event).intent();
+
+    if !chrome_open {
+        // A dialog on screen takes Escape and Enter only when no browser
+        // chrome (omnibox, find bar, panel) is open above it.
+        if crate::dialogs::key(app, event) {
+            return crate::gtkx::inh(true);
+        }
+        // Escape answers the cards only after the field, find bar, and panels.
+        if intent == Intent::Escape
+            && escape_reaches_cards(field_open, find_open, panel_open)
+            && (crate::permissions::key(app, event)
+                || crate::welcome::key(app, event)
+                || crate::peek::key(app, event)
+                || crate::sitecard::key(app, event))
+        {
+            return crate::gtkx::inh(true);
+        }
+    }
+
     // Decide before applying: stopping a load changes the state `taken`
     // reads, but the key must still be consumed.
     let consume = taken(app, intent);
-    apply(app, intent);
+    if consume {
+        apply(app, intent);
+    }
     crate::gtkx::inh(consume)
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn escape_waits_for_the_field_find_bar_and_panels() {
+        assert!(escape_reaches_cards(false, false, false));
+        assert!(!escape_reaches_cards(true, false, false));
+        assert!(!escape_reaches_cards(false, true, false));
+        assert!(!escape_reaches_cards(false, false, true));
+        assert!(!escape_reaches_cards(true, true, true));
+    }
+
+    #[test]
+    fn tab_moves_the_panel_only_from_outside_it() {
+        assert!(tab_belongs_to_panel(true, false));
+        assert!(!tab_belongs_to_panel(true, true));
+        assert!(!tab_belongs_to_panel(false, false));
+    }
+
+    #[test]
+    fn ctrl_arrows_switch_panels_only_outside_entries() {
+        assert!(arrow_belongs_to_panel(true, false));
+        assert!(!arrow_belongs_to_panel(true, true));
+        assert!(!arrow_belongs_to_panel(false, false));
+    }
 }
 
 #[cfg(test)]
@@ -430,10 +542,15 @@ mod sheet_tests {
             | Intent::CopyAddress
             | Intent::Escape
             | Intent::ViewSource
+            | Intent::Print
             | Intent::FullScreen
             | Intent::PanelLeft
             | Intent::PanelRight
-            | Intent::PanelFocus => true,
+            | Intent::PanelFocus
+            | Intent::SwitchTab
+            | Intent::DuplicateTab
+            | Intent::SiteCard
+            | Intent::FoldColumn => true,
         }
     }
 
@@ -481,10 +598,13 @@ mod sheet_tests {
             Intent::CopyAddress,
             Intent::Escape,
             Intent::ViewSource,
+            Intent::Print,
             Intent::FullScreen,
             Intent::PanelLeft,
             Intent::PanelRight,
             Intent::PanelFocus,
+            Intent::SiteCard,
+            Intent::FoldColumn,
         ];
         for wanted in all {
             if !must_be_advertised(wanted) {
@@ -599,6 +719,22 @@ mod tests {
         assert_eq!(key("Left", false, false, true).intent(), Intent::Back);
         assert_eq!(key("Right", false, false, true).intent(), Intent::Forward);
         assert_eq!(key("Left", false, false, false).intent(), Intent::Nothing);
+    }
+
+    #[test]
+    fn ctrl_h_is_history_and_ctrl_shift_p_is_not_print() {
+        assert_eq!(key("h", true, false, false).intent(), Intent::History);
+        assert_eq!(key("H", true, false, false).intent(), Intent::History);
+        assert_eq!(key("p", true, false, false).intent(), Intent::Print);
+        assert_eq!(key("P", true, true, false).intent(), Intent::Nothing);
+    }
+
+    #[test]
+    fn numpad_zoom_keys_map_to_zoom_intents() {
+        assert_eq!(key("KP_Add", true, false, false).intent(), Intent::ZoomIn);
+        assert_eq!(key("KP_Subtract", true, false, false).intent(), Intent::ZoomOut);
+        assert_eq!(key("KP_0", true, false, false).intent(), Intent::ZoomReset);
+        assert_eq!(key("KP_Add", false, false, false).intent(), Intent::Nothing);
     }
 }
 

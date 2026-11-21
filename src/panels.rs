@@ -5,6 +5,14 @@ use crate::palette::Palette;
 use crate::store::{ago, day_of, now_secs, Records};
 use gtk::prelude::*;
 
+/// True for a section heading such as "TABS" or "BROWSING": a label with the
+/// `group` style class. Every panel heading is built that way (Settings,
+/// History days, keywords, site permissions). `snap_to_row` uses this so a
+/// scrolling card never ends just below a heading with none of its rows.
+fn is_heading(widget: &gtk::Widget) -> bool {
+    widget.is::<gtk::Label>() && widget.style_context().has_class("group")
+}
+
 /// The card's horizontal inset: head, tab strip and body all start and end
 /// here, so nothing hangs further out than anything else.
 const INSET: i32 = 16;
@@ -42,10 +50,68 @@ impl PanelKind {
     }
 }
 
+thread_local! {
+    static EXTENSION_CHOOSERS: std::cell::RefCell<Vec<gtk::FileChooserNative>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Card width clamped to the page viewport width so narrow windows never overflow.
+pub fn panel_card_width(page_width: i32) -> i32 {
+    680.min((page_width - 24).max(280))
+}
+
+/// Map a shortcut description from `crate::keys::SHEET` to its section heading.
+pub fn shortcut_section(what: &str) -> &'static str {
+    match what {
+        "New tab"
+        | "Private tab"
+        | "Close tab"
+        | "Reopen the last closed tab"
+        | "Next tab"
+        | "Previous tab"
+        | "Jump to a tab"
+        | "Switch to a tab by typing its name"
+        | "Duplicate this tab"
+        | "Fold the tab column to a strip, or open it" => "TABS",
+        "Back"
+        | "Forward"
+        | "Reload"
+        | "Reload past the cache"
+        | "Reading mode (again to leave)"
+        | "Keep this page"
+        | "Find in the page"
+        | "Next match"
+        | "Previous match"
+        | "Copy the address"
+        | "The inspector"
+        | "About this site: connection, permissions, zoom, data"
+        | "The page's own source"
+        | "Print this page"
+        | "Full screen"
+        | "Hide something on this site"
+        | "Show what is hidden here"
+        | "Zoom in"
+        | "Zoom out"
+        | "Zoom reset" => "PAGE",
+        "History"
+        | "Downloads"
+        | "Bookmarks"
+        | "Settings"
+        | "This list"
+        | "The field"
+        | "Close the field, find, a panel or reader, else stop the page"
+        | "Previous panel"
+        | "Next panel"
+        | "Focus the panel" => "BROWSER",
+        _ => "BROWSER",
+    }
+}
+
 pub struct Panels {
     pub wanted_height: std::cell::Cell<i32>,
 
     column: std::cell::Cell<i32>,
+    band: std::cell::Cell<i32>,
     pub filter: std::cell::RefCell<String>,
     pub holder: gtk::Fixed,
     layer: crate::layer::Layer,
@@ -89,6 +155,10 @@ impl Panels {
         close.set_can_focus(true);
         close.set_focus_on_click(false);
         close.set_valign(gtk::Align::Center);
+        close.set_tooltip_text(Some("Close panel"));
+        if let Some(access) = close.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Close panel");
+        }
         crate::ui::class(&close, "panelclose");
         head.add(&close);
         card.add(&head);
@@ -127,6 +197,7 @@ impl Panels {
         let panels = Panels {
             wanted_height: std::cell::Cell::new(420),
             column: std::cell::Cell::new(0),
+            band: std::cell::Cell::new(23),
             filter: std::cell::RefCell::new(String::new()),
             holder,
             layer,
@@ -172,6 +243,18 @@ impl Panels {
     }
 
     fn open_panel_with(&mut self, app: &AppRef, kind: PanelKind) -> Option<gtk::Entry> {
+        let prev = self.open.clone();
+        let was_open = prev.is_some();
+        let switched = prev.as_ref().is_some_and(|p| *p != kind);
+        crate::motion::cancel(&self.layer.root);
+        crate::motion::cancel(&self.scrim);
+        crate::motion::cancel(&self.card);
+        crate::motion::cancel(&self.scroll);
+        self.layer.root.set_opacity(1.0);
+        self.scrim.set_opacity(1.0);
+        self.card.set_opacity(1.0);
+        self.scroll.set_opacity(1.0);
+
         self.open = Some(kind.clone());
         self.title.set_text(kind.title());
         self.build_nav(app, &kind);
@@ -192,7 +275,20 @@ impl Panels {
                 None
             }
         };
-        let card_width = 680.min(app.ui.window.allocated_width() - 48).max(320);
+        let column = if app.ui.side.is_visible() && app.ui.side.is_child_visible() {
+            app.ui.side.allocated_width().max(0)
+        } else {
+            0
+        };
+        let band = 0;
+        self.column.set(column);
+        self.band.set(band);
+        let (width, height) = (
+            app.ui.overlay.allocated_width().max(app.ui.window.allocated_width()),
+            app.ui.overlay.allocated_height().max(app.ui.window.allocated_height()),
+        );
+        let page = (width - column).max(0);
+        let card_width = panel_card_width(page);
         // Shown before measured. A widget that is not shown yet reports a
         // preferred height of 0, so measuring the title row and the nav before
         // this point counted them as nothing: the card came out 45px shorter
@@ -204,20 +300,35 @@ impl Panels {
         self.wanted_height.set(self.fit_height(card_width));
         self.card.set_can_focus(true);
         self.layer.show();
-        self.layout(app.ui.window.allocated_width(), app.ui.window.allocated_height());
-        if field.is_none() {
-            self.card.grab_focus();
+        self.layout(width, height);
+        if !was_open {
+            crate::motion::fade_in(&self.scrim, 130);
+            if width > 1 && height > 1 {
+                let card_height = self.wanted_height.get().min(height - 80).max(240);
+                let x = column + ((page - card_width) / 2).max(12);
+                let y = ((height - card_height) / 2).max(band + 4);
+                crate::motion::slide_in_fixed(&self.layer.root, &self.card, x, y, 14, 175);
+            } else {
+                crate::motion::fade_in(&self.card, 175);
+            }
+        } else if switched {
+            crate::motion::fade_from(&self.scroll, 0.35, 1.0, 105);
         }
-        glib::timeout_add_local_once(std::time::Duration::from_millis(30), {
-            let card = self.card.clone();
-            move || {
-                if let Some(app) = crate::app::current() {
-                    if app.panels.borrow().open.is_some() {
-                        card.grab_focus();
+        if let Some(ref entry) = field {
+            entry.grab_focus();
+        } else {
+            self.card.grab_focus();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(30), {
+                let card = self.card.clone();
+                move || {
+                    if let Some(app) = crate::app::current() {
+                        if app.panels.borrow().open.is_some() {
+                            card.grab_focus();
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
         field
     }
 
@@ -231,9 +342,52 @@ impl Panels {
         self.open_panel_with(app, kind);
     }
 
+    /// Rebuild an open Downloads panel in-place without dropping filter text, cursor, or focus.
+    pub fn refresh_downloads_open(&mut self, app: &AppRef) {
+        if self.open.as_ref() != Some(&PanelKind::Downloads) {
+            return;
+        }
+        let existing = self
+            .body
+            .children()
+            .into_iter()
+            .find_map(|child| child.downcast::<gtk::Entry>().ok());
+        let was_focused = existing.as_ref().is_some_and(|entry| entry.has_focus());
+        let caret = existing.as_ref().map(|entry| entry.position()).unwrap_or(0);
+        let typed = existing
+            .as_ref()
+            .map(|entry| entry.text().to_string())
+            .unwrap_or_default();
+        let scroll_val = self.scroll.vadjustment().value();
+
+        let new_entry = self.build_downloads(app);
+        let page = (app.ui.window.allocated_width() - self.column.get()).max(0);
+        let card_width = panel_card_width(page);
+        self.wanted_height.set(self.fit_height(card_width));
+        self.layout_card(
+            app.ui.window.allocated_width(),
+            app.ui.window.allocated_height(),
+        );
+
+        let adjust = self.scroll.vadjustment();
+        adjust.set_value(scroll_val.clamp(
+            adjust.lower(),
+            (adjust.upper() - adjust.page_size()).max(adjust.lower()),
+        ));
+
+        if let Some(entry) = new_entry {
+            if !typed.is_empty() {
+                entry.set_text(&typed);
+            }
+            if was_focused {
+                entry.grab_focus();
+                entry.set_position(caret);
+            }
+        }
+    }
+
     /// The card stands in the middle of the page it covers.
     pub fn layout(&self, width: i32, height: i32) {
-        self.layer.place(&self.scrim, 0, 0, width, height);
         self.layout_card(width, height);
     }
 
@@ -241,13 +395,16 @@ impl Panels {
         // The column stays readable while a panel is up: the scrim covers the
         // page, not the tabs.
         self.column.set(column);
+        self.band.set(0);
         self.layout_card(width, height);
     }
 
     fn layout_card(&self, width: i32, height: i32) {
         let column = self.column.get();
-        self.layer.place(&self.scrim, column, 0, (width - column).max(0), height);
-        let card_width = 680.min(width - 48);
+        let band = self.band.get();
+        let page = (width - column).max(0);
+        self.layer.place(&self.scrim, column, band, page, (height - band).max(0));
+        let card_width = panel_card_width(page);
         // A narrower window wraps the body's sentences onto more lines, so the
         // height the card asked for on the way in is no longer the height it
         // needs. Re-ask whenever the width moved.
@@ -257,19 +414,35 @@ impl Panels {
         // The card is as tall as what it holds, within reason: a panel with
         // one line in it should not be a window with one line in it.
         let card_height = self.wanted_height.get().min(height - 80).max(240);
-        let page = (width - column).max(0);
         self.layer.place(
             &self.card,
             column + ((page - card_width) / 2).max(12),
-            (height - card_height) / 2,
+            ((height - card_height) / 2).max(band + 4),
             card_width,
             card_height,
         );
     }
 
     pub fn close(&mut self, _ui: &crate::ui::Ui) {
+        if self.open.is_none() {
+            return;
+        }
         self.open = None;
-        self.layer.hide();
+        crate::motion::cancel(&self.layer.root);
+        crate::motion::cancel(&self.scrim);
+        crate::motion::cancel(&self.card);
+        crate::motion::cancel(&self.scroll);
+        let root = self.layer.root.clone();
+        crate::motion::fade_out_then(&self.layer.root, 105, move || {
+            let still_closed = crate::app::current()
+                .and_then(|app| app.panels.try_borrow().ok().map(|p| p.open.is_none()))
+                .unwrap_or(true);
+            if still_closed {
+                root.hide();
+                root.set_no_show_all(true);
+                root.set_opacity(1.0);
+            }
+        });
     }
 
     fn build_nav(&self, app: &AppRef, current: &PanelKind) {
@@ -310,9 +483,10 @@ impl Panels {
     /// a list in half and made a scrollable card look broken.
     fn fit_height(&self, card_width: i32) -> i32 {
         let inner = (card_width - 2 * INSET).max(1);
+        let scroll: gtk::Widget = self.scroll.clone().upcast();
         let mut above = 0;
         for child in self.card.children() {
-            if child == self.body.clone().upcast::<gtk::Widget>() {
+            if child == scroll {
                 continue;
             }
             above += child.preferred_height().0;
@@ -326,7 +500,13 @@ impl Panels {
         if wanted > 640 {
             let inner_scrolled = (inner - 18).max(1);
             self.fitted_width.set(card_width);
-            return (self.measure_content(inner_scrolled) + above).clamp(200, 640);
+            let capped = (self.measure_content(inner_scrolled) + above).clamp(200, 640);
+            // The list scrolls at this height. Make the card end on a row edge
+            // so the last visible row is whole. The round-39 History shot
+            // stopped partway through "X": content was 595px in a 522px
+            // viewport, so 73px were hidden. Half a row looks like a broken
+            // panel. A whole row followed by the scrollbar shows the list goes on.
+            return self.snap_to_row(inner_scrolled, capped);
         }
         self.fitted_width.set(card_width);
         wanted.clamp(200, 640)
@@ -362,6 +542,69 @@ impl Panels {
         total
     }
 
+    /// Shortens a scrolling card so its viewport ends on the edge of a row.
+    /// The edge is never just below a group heading: the cut goes above the
+    /// heading instead, so a section title is shown with at least one row.
+    ///
+    /// The viewport is the card minus everything outside the scroller (the
+    /// title row and the panel tabs). Walk the body's children from the top,
+    /// and step into a vertical list box one row at a time. Keep the last edge
+    /// that still fits. If no edge reaches past half the viewport (one very
+    /// tall child), keep the height as it is, because cutting more would hide
+    /// more than it shows.
+    fn snap_to_row(&self, width: i32, card_height: i32) -> i32 {
+        let scroll: gtk::Widget = self.scroll.clone().upcast();
+        let mut chrome = 0;
+        for child in self.card.children() {
+            if child == scroll {
+                continue;
+            }
+            chrome += child.preferred_height().0;
+        }
+        let viewport = card_height - chrome;
+        if viewport <= 0 {
+            return card_height;
+        }
+        let mut edge = 0;
+        let mut y = 0;
+        'walk: for child in self.body.children() {
+            let list = child
+                .downcast_ref::<gtk::Box>()
+                .filter(|b| b.orientation() == gtk::Orientation::Vertical && !b.children().is_empty());
+            match list {
+                Some(list) => {
+                    for row in list.children() {
+                        let h = row.preferred_height_for_width(width).1;
+                        if y + h > viewport {
+                            break 'walk;
+                        }
+                        y += h;
+                        // A group heading is never the last thing shown: a
+                        // heading with none of its rows under it reads as a
+                        // panel cut short (round 40: Settings ended on "TABS").
+                        if !is_heading(&row) {
+                            edge = y;
+                        }
+                    }
+                }
+                None => {
+                    let h = child.preferred_height_for_width(width).1;
+                    if y + h > viewport {
+                        break 'walk;
+                    }
+                    y += h;
+                    if !is_heading(&child) {
+                        edge = y;
+                    }
+                }
+            }
+        }
+        if edge * 2 < viewport {
+            return card_height;
+        }
+        (card_height - (viewport - edge)).max(200)
+    }
+
     fn body_scroll(&self, content: &gtk::Box) -> gtk::Box {
         // One scroller owns every panel. Returning the content here avoids
         // nesting a second GtkViewport, which breaks measurement and clipping.
@@ -372,6 +615,9 @@ impl Panels {
         let entry = gtk::Entry::new();
         entry.set_placeholder_text(Some(placeholder));
         entry.set_margin_bottom(8);
+        if let Some(access) = entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Filter items");
+        }
         let on_type = std::rc::Rc::new(on_type);
         entry.connect_changed(move |entry| on_type(&entry.text()));
         entry
@@ -438,6 +684,13 @@ impl Panels {
         header.add(&count);
         let clear = gtk::Button::with_label("Clear History");
         crate::ui::class(&clear, "act");
+        // A child of a horizontal box fills the row's height by default, and
+        // measure_content pins the header to its height-for-width answer. In
+        // the round-39 shot that stretched this chip to about 60px, twice the
+        // height of the rows around it. Centred, it keeps the 32px minimum that
+        // `.panel button.act` gives every other action chip.
+        clear.set_valign(gtk::Align::Center);
+        clear.set_vexpand(false);
         // The one irreversible control in the panel says so before it is
         // pressed. The stylesheet owns the colour: `dangerink` (#C0392B light,
         // #EE8B76 dark) is 5.44:1 on the white chip and 5.87:1 on the dark one.
@@ -590,6 +843,23 @@ impl Panels {
             // "Open" only when there is a file to open: a button that does
             // nothing on a half-written download is worse than no button.
             let action = if download.done { "Open" } else { "Reveal" };
+            let second: (&str, Box<dyn Fn(&AppRef)>) = if !download.done && !download.failed {
+                let id = download.id;
+                ("Cancel", Box::new(move |_app: &AppRef| {
+                    crate::web::cancel_download(id);
+                }))
+            } else {
+                ("Remove", Box::new(move |app: &AppRef| {
+                    // Removes the row, not the file. Deleting someone's file from
+                    // a list of records is not what "Remove" means here.
+                    {
+                        let mut state = app.state.borrow_mut();
+                        state.downloads.retain(|kept| kept.path != remove_path);
+                        Records::save_downloads(&state.downloads);
+                    }
+                    app.toggle_panel_switch(PanelKind::Downloads);
+                }))
+            };
             let row = self.row_with(app, &download.name, &sub, action, {
                 let path = download.path.clone();
                 let finished = download.done;
@@ -602,16 +872,7 @@ impl Panels {
                     };
                     let _ = std::process::Command::new("xdg-open").arg(target).spawn();
                 }
-            }, Some(("Remove", Box::new(move |app: &AppRef| {
-                // Removes the row, not the file. Deleting someone's file from
-                // a list of records is not what "Remove" means here.
-                {
-                    let mut state = app.state.borrow_mut();
-                    state.downloads.retain(|kept| kept.path != remove_path);
-                    Records::save_downloads(&state.downloads);
-                }
-                app.toggle_panel_switch(PanelKind::Downloads);
-            }))));
+            }, Some(second));
             list.add(&row);
         }
         if shown == 0 {
@@ -648,7 +909,9 @@ impl Panels {
             let mut notes = vec![entry.why_not.replace('\n', " ")];
             notes.extend(crate::extensions::not_drawn(&entry));
             notes.retain(|note| !note.trim().is_empty());
-            let subtitle = if entry.runs {
+            let subtitle = if entry.partial {
+                format!("{}  ·  loads on the sites it asks for  ·  {}", entry.version, notes.join("; "))
+            } else if entry.runs {
                 format!("{}  ·  runs on the sites it asks for  ·  {}", entry.version, notes.join("; "))
             } else {
                 format!("{}  ·  {}", entry.version, notes.join("; "))
@@ -707,9 +970,28 @@ impl Panels {
         how.set_xalign(0.0);
         list.add(&how);
 
+        // Firefox's store, one click away. It opens in a tab like any other
+        // page. An .xpi fetched from it lands in the download hook in web.rs,
+        // which hands it to the same installer as a file chosen below, so an
+        // add-on from the store and one from disk get the same checks.
+        let firefox = self.link_row(
+            app,
+            "Firefox Add-ons",
+            "addons.mozilla.org, in a new tab. Add to Firefox installs it here.",
+            "Open",
+            move |app: &AppRef| {
+                app.toggle_panel_switch(PanelKind::Extensions);
+                app.new_tab(Some("https://addons.mozilla.org/firefox/extensions/"), false, true);
+            },
+        );
+        list.add(&firefox);
+
         let field = gtk::Entry::new();
         field.set_placeholder_text(Some("A .crx, an .xpi, or a folder with a manifest.json"));
         field.set_margin_bottom(8);
+        if let Some(access) = field.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Extension path or archive");
+        }
         let app_field = app.weak();
         field.connect_activate(move |field| {
             let Some(app) = app_field.upgrade() else { return };
@@ -742,7 +1024,9 @@ impl Panels {
                     }
                 }
                 dialog.destroy();
+                EXTENSION_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
             });
+            EXTENSION_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
             dialog.show();
         });
         list.add(&choose);
@@ -843,7 +1127,7 @@ impl Panels {
         list.add(&self.setting_switch(
             app,
             "Use less memory",
-            "Disables accelerated compositing on the next launch. This can reduce memory use, but image-heavy pages may paint more slowly.",
+            "Disables GPU compositing on the next launch. Makes WebGL, video, and animated pages slower.",
             prefs.low_memory,
             |app, on| {
                 app.prefs.borrow_mut().low_memory = on;
@@ -898,10 +1182,18 @@ impl Panels {
         let sub = gtk::Label::new(Some("What words in the field search with"));
         crate::ui::class(&sub, "settingdesc");
         sub.set_xalign(0.0);
+        sub.set_line_wrap(true);
         texts.add(&title);
         texts.add(&sub);
         engine_row.add(&texts);
         let combo = gtk::ComboBoxText::new();
+        if let Some(access) = combo.accessible() {
+            use gtk::atk::prelude::AtkObjectExt;
+            access.set_name("Search engine");
+            if let Some(label_access) = title.accessible() {
+                access.add_relationship(gtk::atk::RelationType::LabelledBy, &label_access);
+            }
+        }
         for engine in crate::store::Prefs::engines() {
             combo.append_text(engine);
         }
@@ -921,6 +1213,15 @@ impl Panels {
         }
         engine_row.add(&combo);
         list.add(&engine_row);
+
+        list.add(&self.setting_switch(app, "Suggestions from your search engine", "What you type is sent to the engine as you type.", prefs.engine_suggestions, |app, on| {
+            app.prefs.borrow_mut().engine_suggestions = on;
+            app.prefs.borrow().save();
+        }));
+
+        // Keyword shortcuts belong with the engine: both decide where typed
+        // words go. See src/keyword.rs.
+        list.add(&crate::keyword::settings_section(app));
 
         // This row is about the page in front of you, not about a tab
         // setting, so it gets a head of its own rather than trailing TABS.
@@ -953,6 +1254,7 @@ impl Panels {
         let unhide_sub = gtk::Label::new(Some(&hidden_sentence(&hidden, count)));
         crate::ui::class(&unhide_sub, "settingdesc");
         unhide_sub.set_xalign(0.0);
+        unhide_sub.set_line_wrap(true);
         unhide_text.add(&unhide_title);
         unhide_text.add(&unhide_sub);
         crate::ui::pack(&unhide_row, &unhide_text, true);
@@ -972,12 +1274,16 @@ impl Panels {
         crate::ui::pack(&unhide_row, &show_all, false);
         list.add(&unhide_row);
 
+        list.add(&crate::permissions::settings_section(app));
+        list.add(&crate::import::settings_row(app));
+
         let about = gtk::Label::new(Some(&format!(
             "Search {} · WebKitGTK · Rust · this machine only",
             env!("CARGO_PKG_VERSION")
         )));
         crate::ui::class(&about, "settingdesc");
         about.set_xalign(0.0);
+        about.set_line_wrap(true);
         about.set_margin_top(16);
         list.add(&about);
 
@@ -994,34 +1300,34 @@ impl Panels {
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // The sheet is `keys::SHEET`: the same table the bench presses and the
         // tests check, so what is drawn here cannot advertise a dead key.
-        let mut section = "";
-        for (_, key, what, ..) in crate::keys::SHEET {
-            let group = match *what {
-                "New tab" | "Private tab" | "Close tab" | "Reopen the last closed tab" | "Next tab" | "Previous tab" | "Jump to a tab" => "TABS",
-                "Back" | "Forward" | "Reload" | "Reload past the cache" | "Reading mode (again to leave)" | "Keep this page" | "Find in the page" | "Next match" | "Previous match" | "Copy the address" | "The page's own source" | "Full screen" | "Hide something on this site" | "Show what is hidden here" => "PAGE",
-                "History" | "Downloads" | "Bookmarks" | "Settings" | "This list" | "The field" => "BROWSER",
-                _ => section,
-            };
-            if group != section {
-                section = group;
-                let head = gtk::Label::new(Some(section));
-                crate::ui::class(&head, "group");
-                head.set_xalign(0.0);
-                list.add(&head);
+        for section in ["BROWSER", "TABS", "PAGE"] {
+            let mut headed = false;
+            for (_, key, what, ..) in crate::keys::SHEET {
+                if shortcut_section(what) != section {
+                    continue;
+                }
+                if !headed {
+                    headed = true;
+                    let head = gtk::Label::new(Some(section));
+                    crate::ui::class(&head, "group");
+                    head.set_xalign(0.0);
+                    list.add(&head);
+                }
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+                row.set_margin_top(4);
+                row.set_margin_bottom(4);
+                let keycap = gtk::Label::new(Some(key));
+                crate::ui::class(&keycap, "keycap");
+                keycap.set_xalign(0.0);
+                keycap.set_size_request(150, -1);
+                crate::ui::pack(&row, &keycap, false);
+                let label = gtk::Label::new(Some(what));
+                crate::ui::class(&label, "setting");
+                label.set_xalign(0.0);
+                label.set_line_wrap(true);
+                crate::ui::pack(&row, &label, true);
+                list.add(&row);
             }
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-            row.set_margin_top(4);
-            row.set_margin_bottom(4);
-            let keycap = gtk::Label::new(Some(key));
-            crate::ui::class(&keycap, "keycap");
-            keycap.set_xalign(0.0);
-            keycap.set_size_request(150, -1);
-            crate::ui::pack(&row, &keycap, false);
-            let label = gtk::Label::new(Some(what));
-            crate::ui::class(&label, "setting");
-            label.set_xalign(0.0);
-            crate::ui::pack(&row, &label, true);
-            list.add(&row);
         }
         // 28 rows are taller than the card's tallest allowed height, so the
         // sheet scrolls like every other panel instead of losing its last rows.
@@ -1115,6 +1421,14 @@ impl Panels {
         row.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
         row.set_can_focus(true);
         row.set_tooltip_text(Some(title));
+        if let Some(access) = row.accessible() {
+            let name = if subtitle.is_empty() {
+                title.to_string()
+            } else {
+                format!("{title} — {subtitle}")
+            };
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
+        }
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         hbox.set_margin_top(7);
         hbox.set_margin_bottom(7);
@@ -1211,8 +1525,7 @@ pub fn refresh_downloads(app: &AppRef) {
     if app.panels.borrow().open.as_ref() != Some(&PanelKind::Downloads) {
         return;
     }
-    let text = app.panels.borrow().filter.borrow().clone();
-    app.filter_panel(PanelKind::Downloads, &text);
+    app.panels.borrow_mut().refresh_downloads_open(app);
 }
 
 /// Install a local extension from a typed path or a native chooser.
@@ -1260,6 +1573,42 @@ mod tests {
     #[test]
     fn a_tab_with_no_page_says_so() {
         assert_eq!(hidden_sentence("", 3), "Nothing to hide yet: this tab has no page of its own");
+    }
+
+    #[test]
+    fn card_width_clamps_to_narrow_page_and_caps_at_680() {
+        assert_eq!(panel_card_width(1268), 680);
+        assert_eq!(panel_card_width(704), 680);
+        assert_eq!(panel_card_width(568), 544);
+        assert_eq!(panel_card_width(240), 280);
+    }
+
+    #[test]
+    fn shortcuts_group_under_expected_sections() {
+        let find_what = |verb: &str| {
+            crate::keys::SHEET
+                .iter()
+                .find(|row| row.0 == verb)
+                .map(|row| row.2)
+                .unwrap_or_else(|| panic!("missing verb {verb}"))
+        };
+        assert_eq!(shortcut_section(find_what("sitecard")), "PAGE");
+        assert_eq!(shortcut_section(find_what("print")), "PAGE");
+        assert_eq!(shortcut_section(find_what("inspector")), "PAGE");
+        assert_eq!(shortcut_section(find_what("inspectorctrl")), "PAGE");
+        assert_eq!(shortcut_section(find_what("zoomin")), "PAGE");
+        assert_eq!(shortcut_section(find_what("escape")), "BROWSER");
+        assert_eq!(shortcut_section(find_what("panelleft")), "BROWSER");
+        assert_eq!(shortcut_section(find_what("panelright")), "BROWSER");
+        assert_eq!(shortcut_section(find_what("panelfocus")), "BROWSER");
+        assert_eq!(shortcut_section(find_what("pagedown")), "TABS");
+        assert_eq!(shortcut_section(find_what("pageup")), "TABS");
+        for (_, _, what, ..) in crate::keys::SHEET {
+            assert!(
+                matches!(shortcut_section(what), "BROWSER" | "TABS" | "PAGE"),
+                "unexpected section for {what}"
+            );
+        }
     }
 }
 
@@ -1313,12 +1662,14 @@ mod download_words {
 
     fn rec(got: u64, total: u64, done: bool, failed: bool) -> DownloadRec {
         DownloadRec {
+            id: 0,
             name: "file.pdf".into(),
             path: "/home/you/Downloads/file.pdf".into(),
             done,
             failed,
             got,
             total,
+            private: false,
         }
     }
 

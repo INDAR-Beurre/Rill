@@ -10,6 +10,7 @@ The point is that the browser tells the difference and can be seen to.
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import sys
@@ -18,7 +19,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from bench import Bench, BenchError  # noqa: E402
+from bench import Bench, BenchError, DEFAULT_SOCKET  # noqa: E402
 
 MARKER_JS = "document.documentElement.setAttribute('data-search-ext', 'marker');"
 MARKER_CSS = (
@@ -110,8 +111,14 @@ class Run:
                 self.browser.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.browser.kill()
+                self.browser.wait()
         if self.server:
             self.server.terminate()
+        socket_path = pathlib.Path(
+            self.bench.path if self.bench else os.environ.get("SEARCH_BENCH_SOCKET", DEFAULT_SOCKET)
+        )
+        socket_path.unlink(missing_ok=True)
+        shutil.rmtree(self.home, ignore_errors=True)
 
     def page(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
@@ -119,47 +126,48 @@ class Run:
 
 def main():
     work = pathlib.Path(tempfile.mkdtemp(prefix="search-ext-build-"))
-    marker = work / "marker"
-    bg_only = work / "background"
-    other_site = work / "other"
-
-    build(
-        marker,
-        manifest(
-            "Marker",
-            description="Marks the page so the loader can be seen working.",
-            content_scripts=[
-                {
-                    "matches": ["*://127.0.0.1/*"],
-                    "js": ["marker.js"],
-                    "css": ["marker.css"],
-                    "run_at": "document_end",
-                }
-            ],
-        ),
-        {"marker.js": MARKER_JS, "marker.css": MARKER_CSS},
-    )
-    build(
-        bg_only,
-        manifest(
-            "Background Only",
-            background={"service_worker": "bg.js"},
-            permissions=["tabs", "cookies"],
-        ),
-        {"bg.js": "chrome.tabs.query({}, () => {});"},
-    )
-    build(
-        other_site,
-        manifest(
-            "Other Site",
-            content_scripts=[{"matches": ["*://example.com/*"], "js": ["x.js"]}],
-        ),
-        {"x.js": "document.documentElement.setAttribute('data-search-ext', 'other');"},
-    )
-
-    run = Run()
-    run.start_server()
+    run = None
     try:
+        marker = work / "marker"
+        bg_only = work / "background"
+        other_site = work / "other"
+
+        build(
+            marker,
+            manifest(
+                "Marker",
+                description="Marks the page so the loader can be seen working.",
+                content_scripts=[
+                    {
+                        "matches": ["*://127.0.0.1/*"],
+                        "js": ["marker.js"],
+                        "css": ["marker.css"],
+                        "run_at": "document_end",
+                    }
+                ],
+            ),
+            {"marker.js": MARKER_JS, "marker.css": MARKER_CSS},
+        )
+        build(
+            bg_only,
+            manifest(
+                "Background Only",
+                background={"service_worker": "bg.js"},
+                permissions=["tabs", "cookies"],
+            ),
+            {"bg.js": "chrome.tabs.query({}, () => {});"},
+        )
+        build(
+            other_site,
+            manifest(
+                "Other Site",
+                content_scripts=[{"matches": ["*://example.com/*"], "js": ["x.js"]}],
+            ),
+            {"x.js": "document.documentElement.setAttribute('data-search-ext', 'other');"},
+        )
+
+        run = Run()
+        run.start_server()
         run.start_browser()
         self_bench = run.bench
 
@@ -205,7 +213,9 @@ def main():
             seen,
         )
     finally:
-        run.stop()
+        if run is not None:
+            run.stop()
+        shutil.rmtree(work, ignore_errors=True)
 
     print("all extension checks passed" if not run.failures else f"{len(run.failures)} failed")
     return 1 if run.failures else 0

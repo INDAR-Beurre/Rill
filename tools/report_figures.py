@@ -269,7 +269,14 @@ def check(found):
                 break
         if not keys:
             continue
-        numbers = re.findall(r"\d+(?:\.\d+)?", cell)
+        # A leading minus belongs to the figure: "-0.1 MB of its own" is -0.1,
+        # not 0.1. Reading it unsigned made the idle drift look 200% out of a
+        # report that agreed with it. The sign counts only when nothing word-like
+        # sits before it, so a range such as "3-5" still reads as 3 and 5.
+        numbers = [
+            n.replace("−", "-")
+            for n in re.findall(r"(?<![\w.])[-+−]?\d+(?:\.\d+)?", cell)
+        ]
         # A cell that names its figures is read by name, not by position.
         # "mean 1.0 ms, p95 2.5 ms, worst 26 ms" would otherwise be read as the
         # three numbers 1.0, 95 and 2.5, because the 95 in "p95" is a number too.
@@ -359,15 +366,13 @@ def main(argv):
             (ROOT / "docs" / "LIMITS.md", r"once it settles \| \d+ MB resident", f"once it settles | {settle['pss_mb']:.0f} MB resident"),
             (ROOT / "docs" / "LIMITS.md", r"tab switch \| mean [^|]+", f"tab switch | mean {mean('tab switches stay quick')} ms, p95 {switch_p95} ms, worst {float(worst('tab switches stay quick')):.0f} ms over 300 switches"),
             (ROOT / "docs" / "LIMITS.md", r"a panel opening \| mean [^|]+", f"a panel opening | mean {panel_mean:.0f} ms, worst {panel_worst:.0f} ms over 80"),
+            (ROOT / "README.md", r"about \d+(?:\.\d+)? MB total PSS", f"about {idle['pss_mb']:.0f} MB total PSS"),
+            (ROOT / "README.md", r"\d+(?:\.\d+)? MB anonymous PSS", f"{idle['anon_mb']:.1f} MB anonymous PSS"),
         ]
         for path, pattern, replacement in updates:
             text = path.read_text()
             assert re.search(pattern, text), f"no prose anchor {pattern} in {path}"
             path.write_text(re.sub(pattern, replacement, text, count=1))
-        readme = ROOT / "README.md"
-        text = re.sub(r"\d+(?:\.\d+)? MB proportional resident memory", f"{idle['pss_mb']:.1f} MB proportional resident memory", readme.read_text())
-        text = re.sub(r"\d+(?:\.\d+)? MB was this browser's own", f"{idle['anon_mb']:.1f} MB was this browser's own", text)
-        readme.write_text(text)
         print("updated latest measured figures; run --check")
         return 0
 

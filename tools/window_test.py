@@ -162,6 +162,8 @@ class Window:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+            self.proc.wait()
+        SOCKET.unlink(missing_ok=True)
 
 
 def main():
@@ -252,6 +254,7 @@ def main():
     finally:
         if window is not None:
             window.close()
+        SOCKET.unlink(missing_ok=True)
         shutil.rmtree(home, ignore_errors=True)
 
     passed = sum(1 for _, ok, _ in results if ok)

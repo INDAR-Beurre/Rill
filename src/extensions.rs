@@ -11,7 +11,6 @@
 // `tools/extensions.py` says so when it loads one instead of pretending.
 use crate::files;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,10 +52,13 @@ pub struct Manifest {
     /// Chrome: `content_scripts`. Firefox: `content_scripts` too.
     #[serde(default)]
     pub content_scripts: Vec<ContentScript>,
-    /// Firefox only: style sheets by host, which are the same idea as a
-    /// content script that injects CSS.
+    /// Firefox only: style sheets by host. Read as any JSON so an unusual shape
+    /// cannot stop the whole add-on from installing; its contents are not used.
+    #[serde(default, rename = "user_scripts")]
+    _user_scripts: serde_json::Value,
+    /// The locale that `__MSG_key__` names resolve in.
     #[serde(default)]
-    pub user_scripts: BTreeMap<String, Vec<String>>,
+    pub default_locale: Option<String>,
     /// Chrome's MV3 background worker, Firefox's background scripts. Read so
     /// the browser can say honestly whether an extension will work.
     #[serde(default)]
@@ -71,12 +73,40 @@ pub struct Manifest {
     pub options_page: Option<String>,
     #[serde(default)]
     pub action: Option<serde_json::Value>,
+    /// Firefox: `browser_specific_settings.gecko.id`, the add-on's own name
+    /// for itself, such as `uBlock0@raymondhill.net`. It stays the same
+    /// whatever the downloaded file is called.
+    #[serde(default)]
+    pub browser_specific_settings: Option<serde_json::Value>,
+    /// The older name for the same block, still used by some add-ons on
+    /// addons.mozilla.org. Kept as its own field, not as a serde alias: a
+    /// manifest that has both keys would otherwise fail to parse as a
+    /// duplicate field.
+    #[serde(default)]
+    pub applications: Option<serde_json::Value>,
+}
+
+impl Manifest {
+    /// The Firefox add-on id, if the manifest declares one.
+    pub fn gecko_id(&self) -> Option<String> {
+        [&self.browser_specific_settings, &self.applications]
+            .into_iter()
+            .flatten()
+            .filter_map(|block| block.get("gecko")?.get("id")?.as_str())
+            .map(|id| id.trim().to_string())
+            .find(|id| !id.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ContentScript {
     #[serde(default)]
     pub matches: Vec<String>,
+    /// Addresses the script must stay off even when `matches` covers them,
+    /// such as an add-on that runs everywhere except its own vendor's site.
+    /// Handed to WebKit as the block list next to the allow list.
+    #[serde(default)]
+    pub exclude_matches: Vec<String>,
     #[serde(default)]
     pub js: Vec<String>,
     #[serde(default)]
@@ -102,8 +132,16 @@ pub struct Installed {
     pub source: String,
     /// Whether it does anything in this browser, and why not.
     pub runs: bool,
+    /// Loads and injects, but part of it (a background page, or an API call
+    /// in a content script) does not run here. The panel says so.
+    #[serde(default)]
+    pub partial: bool,
     pub why_not: String,
     pub enabled: bool,
+    /// The Firefox add-on id, kept so a download of the same add-on finds
+    /// the copy it replaces, whatever file it came in.
+    #[serde(default)]
+    pub gecko_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -123,7 +161,15 @@ fn root_at(base: &Path) -> PathBuf {
 }
 
 fn registry_at(base: &Path) -> Registry {
-    files::read_json(&registry_path(base)).unwrap_or_default()
+    let mut registry: Registry = files::read_json(&registry_path(base)).unwrap_or_default();
+    // Entries saved before the Firefox id was kept get it from their own
+    // manifest, so a re-download still finds the copy it replaces.
+    for entry in &mut registry.extensions {
+        if entry.gecko_id.is_none() {
+            entry.gecko_id = read_manifest(Path::new(&entry.path)).and_then(|m| m.gecko_id());
+        }
+    }
+    registry
 }
 
 fn save_at(base: &Path, registry: &Registry) {
@@ -297,20 +343,55 @@ pub fn matches(patterns: &[String], url: &str) -> bool {
     patterns.iter().any(|pattern| pattern_matches(pattern, url))
 }
 
+/// The manifest, or the reason it could not be read, with the parser's own
+/// message: a manifest with a trailing comma says where it went wrong.
+fn parse_manifest(folder: &Path) -> Result<Manifest, String> {
+    let raw = std::fs::read_to_string(folder.join("manifest.json"))
+        .map_err(|error| format!("no readable manifest.json ({error})"))?;
+    let mut manifest: Manifest =
+        serde_json::from_str(&raw).map_err(|error| format!("manifest.json does not parse: {error}"))?;
+    localize(&mut manifest, folder);
+    Ok(manifest)
+}
+
 fn read_manifest(folder: &Path) -> Option<Manifest> {
-    let raw = std::fs::read_to_string(folder.join("manifest.json")).ok()?;
-    // Chrome allows a comment or two in a manifest; Firefox's are strict JSON.
-    serde_json::from_str(&raw).ok()
+    parse_manifest(folder).ok()
+}
+
+/// Resolves `__MSG_key__` in the name and description from the default
+/// locale's messages.json, the way Chrome and Firefox do. A key that cannot be
+/// found is left as it is.
+fn localize(manifest: &mut Manifest, folder: &Path) {
+    let Some(locale) = manifest.default_locale.clone() else { return };
+    // `inside` keeps the locale a single folder, so `../` in it cannot leave.
+    let Some(path) = inside(folder, &format!("_locales/{locale}/messages.json")) else { return };
+    let Ok(raw) = std::fs::read_to_string(path) else { return };
+    let Ok(messages) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    let resolve = |text: &str| -> String {
+        let Some(key) = text.strip_prefix("__MSG_").and_then(|rest| rest.strip_suffix("__")) else {
+            return text.to_string();
+        };
+        // Chrome matches message keys without regard to case.
+        messages
+            .as_object()
+            .and_then(|map| map.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)))
+            .and_then(|(_, value)| value.get("message")?.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| text.to_string())
+    };
+    manifest.name = resolve(&manifest.name);
+    manifest.description = resolve(&manifest.description);
 }
 
 /// A folder to unpack into, made fresh so two installs at once cannot share it.
 fn unique_temp(prefix: &str) -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
     static COUNTER: AtomicUsize = AtomicUsize::new(1);
     let base = std::env::temp_dir();
     for _ in 0..64 {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = base.join(format!("{prefix}-{}-{n}", std::process::id()));
-        match std::fs::create_dir(&path) {
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("{}: {error}", path.display())),
@@ -382,6 +463,90 @@ pub fn install(source: &Path) -> Result<Installed, String> {
     install_at(&files::data_dir(), source)
 }
 
+/// Whether a download address is the Firefox add-ons store, reached over
+/// HTTPS. Only an add-on fetched from there is offered for installing. Any
+/// other `.xpi` stays in Downloads as a plain file: a page that sends the
+/// browser to `evil.example/x.xpi` gets a download, not an install.
+pub fn from_store(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("https://") else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    // The store's own links carry no user name and no port other than 443.
+    // `addons.mozilla.org@evil.example` and `addons.mozilla.org.evil.example`
+    // both fail here.
+    matches!(authority.as_str(), "addons.mozilla.org" | "addons.mozilla.org:443")
+}
+
+/// What an archive would install, read without installing it: what the
+/// confirm card shows before the person says yes.
+#[derive(Debug, Clone)]
+pub struct Offer {
+    pub name: String,
+    pub version: String,
+    /// The add-on's own claimed id. It is a claim: nothing here checks a
+    /// signature, which is why replacing an installed add-on is said out loud.
+    pub gecko_id: Option<String>,
+    /// Every site pattern its scripts and styles would run on, sorted, once each.
+    pub hosts: Vec<String>,
+    pub runs: bool,
+    pub why_not: String,
+    /// The add-on already installed under the same id, which this one would
+    /// replace.
+    pub replaces: Option<Installed>,
+}
+
+pub fn inspect(source: &Path) -> Result<Offer, String> {
+    inspect_at(&files::data_dir(), source)
+}
+
+fn inspect_at(base: &Path, source: &Path) -> Result<Offer, String> {
+    let (folder, _scratch) = if source.is_dir() {
+        (source.to_path_buf(), None)
+    } else {
+        let scratch = unpack(source)?;
+        let path = scratch.path.clone();
+        (path, Some(scratch))
+    };
+    let manifest = parse_manifest(&folder).map_err(|why| format!("{}: {why}", source.display()))?;
+    if manifest.name.trim().is_empty() {
+        return Err("the manifest has no name".to_string());
+    }
+    if !matches!(manifest.manifest_version, 2 | 3) {
+        return Err(format!(
+            "manifest_version {} is not one this browser knows: only 2 and 3 are",
+            manifest.manifest_version
+        ));
+    }
+    let id = id_for(&manifest, source);
+    let mut hosts: Vec<String> = manifest
+        .content_scripts
+        .iter()
+        .filter(|script| !script.js.is_empty() || !script.css.is_empty())
+        .flat_map(|script| script.matches.iter().cloned())
+        .chain(manifest.host_permissions.iter().cloned())
+        .map(|pattern| pattern.trim().to_string())
+        .filter(|pattern| !pattern.is_empty())
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    let (runs, _partial, why_not) = capability(&manifest, &folder);
+    let gecko_id = manifest.gecko_id();
+    // The same add-on is the same Firefox id, so a download of it finds the
+    // copy it replaces, even under an id made before the gecko id was kept.
+    let replaces = registry_at(base)
+        .extensions
+        .into_iter()
+        .find(|e| e.id == id || (gecko_id.is_some() && e.gecko_id == gecko_id));
+    Ok(Offer {
+        gecko_id,
+        name: manifest.name,
+        version: manifest.version,
+        hosts,
+        runs,
+        why_not,
+        replaces,
+    })
+}
+
 fn install_at(base: &Path, source: &Path) -> Result<Installed, String> {
     // An unpacked folder is used where it is; an archive is expanded into a
     // temporary folder that is thrown away once the copy is made.
@@ -424,7 +589,8 @@ fn install_at(base: &Path, source: &Path) -> Result<Installed, String> {
         return Err(why);
     }
 
-    let (runs, why_not) = capability(&manifest);
+    let (runs, partial, why_not) = capability(&manifest, &folder);
+    let gecko_id = manifest.gecko_id();
     let entry = Installed {
         id,
         name: manifest.name,
@@ -433,22 +599,24 @@ fn install_at(base: &Path, source: &Path) -> Result<Installed, String> {
         path: target.to_string_lossy().to_string(),
         source: source.to_string_lossy().to_string(),
         runs,
+        partial,
         why_not,
         enabled: true,
+        gecko_id: gecko_id.clone(),
     };
     let mut registry = registry_at(base);
     // An extension already recorded under an older id, from before the id
     // carried where it came from, is still the same extension: installing it
     // again replaces that entry instead of leaving a second copy of it in the
-    // list, pointing at a folder that is no longer being updated.
+    // list, pointing at a folder that is no longer being updated. A Firefox
+    // add-on is matched by its gecko id, whatever file it came in.
     let stale: Vec<String> = registry
         .extensions
         .iter()
         .filter(|e| {
             e.id != entry.id
-                && e.name == entry.name
-                && e.version == entry.version
-                && e.source == entry.source
+                && ((gecko_id.is_some() && e.gecko_id == gecko_id)
+                    || (e.name == entry.name && e.version == entry.version && e.source == entry.source))
         })
         .map(|e| e.id.clone())
         .collect();
@@ -511,6 +679,18 @@ fn fingerprint(parts: &[&str]) -> String {
 }
 
 fn id_for(manifest: &Manifest, origin: &Path) -> String {
+    // A Firefox add-on names itself. Using that name means the same add-on
+    // gets the same id whichever file it came from. Downloading it twice from
+    // the store saves "ublock_origin-1.76.6.xpi" and then
+    // "ublock_origin-1.76.6 (1).xpi". Before this change the two paths hashed
+    // to two ids, so the second download became a second install. The
+    // version is left out on purpose: a newer version of the same add-on
+    // replaces the older one instead of sitting beside it.
+    // A Firefox add-on is named by its own id alone: the name and version are
+    // left out, so the same add-on gets the same id from any file it came in.
+    if let Some(gecko) = manifest.gecko_id() {
+        return fingerprint(&["gecko", &gecko]);
+    }
     let origin = std::fs::canonicalize(origin).unwrap_or_else(|_| origin.to_path_buf());
     let origin = origin.to_string_lossy().to_string();
     format!(
@@ -538,7 +718,55 @@ const UNAVAILABLE: &[(&str, &str)] = &[
     ("management", "managing other extensions"),
 ];
 
-fn capability(manifest: &Manifest) -> (bool, String) {
+/// Whether a content script touches `browser.` or `chrome.` as a name of its
+/// own, such as `browser.runtime` or `chrome.storage`, which this engine lacks.
+///
+/// Only a call counts: the name must stand on its own (not the tail of a word,
+/// a path or a host, so `https://chrome.google.com` is not one), it must be
+/// followed by a lowercase API name (so "tell the browser. Then" is not one),
+/// and it must not sit in a comment. A `//` right after a colon is a URL's,
+/// not a comment's, so minified code with an address earlier on the same line
+/// is still read.
+fn calls_api(text: &str) -> bool {
+    text.lines().any(|line| {
+        let code = line.trim_start();
+        if code.starts_with("//") || code.starts_with("/*") || code.starts_with('*') {
+            return false;
+        }
+        ["browser.", "chrome."].iter().any(|prefix| {
+            line.match_indices(prefix).any(|(at, _)| {
+                let before = &line[..at];
+                let joined = before
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | ':' | '-'));
+                let in_comment = before
+                    .match_indices("//")
+                    .any(|(i, _)| !before[..i].ends_with(':'));
+                let names_api = line[at + prefix.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase());
+                !joined && !in_comment && names_api
+            })
+        })
+    })
+}
+
+/// Whether the content scripts of an extension call an API this engine lacks.
+fn content_calls_api(manifest: &Manifest, folder: &Path) -> bool {
+    manifest
+        .content_scripts
+        .iter()
+        .flat_map(|script| script.js.iter())
+        .filter_map(|file| inside(folder, file))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .any(|text| calls_api(&text))
+}
+
+/// What this extension does here: whether it runs at all, whether part of it
+/// is missing (`partial`), and the words the panel and the card show.
+fn capability(manifest: &Manifest, folder: &Path) -> (bool, bool, String) {
     let missing: Vec<&str> = UNAVAILABLE
         .iter()
         .filter(|(name, _)| manifest.permissions.iter().any(|p| p == name))
@@ -553,9 +781,11 @@ fn capability(manifest: &Manifest) -> (bool, String) {
         .content_scripts
         .iter()
         .any(|s| !s.js.is_empty() || !s.css.is_empty());
-    let has_user_scripts = !manifest.user_scripts.is_empty();
     let has_background = manifest.background.is_some();
-    let (runs, base) = if has_scripts || has_user_scripts {
+    // Partial means it loads and injects, but a part of it is missing: a
+    // background page that never starts, or a content script that calls an
+    // API that is not here. Both are said before the person installs.
+    let (runs, partial, base) = if has_scripts {
         if has_background {
             // Both halves, said plainly: the part that runs, and the part that
             // does not, including the consequence people notice first, which is
@@ -563,21 +793,35 @@ fn capability(manifest: &Manifest) -> (bool, String) {
             // for an answer that never comes.
             (
                 true,
+                true,
                 "its content scripts and styles run; its background page never starts, because this \
                  engine has no WebExtensions API, so nothing that happens only there happens, and a \
                  content script that asks it for an answer gets none",
             )
+        } else if content_calls_api(manifest, folder) {
+            (
+                true,
+                true,
+                "its content scripts and styles run, but they call browser or chrome APIs this engine \
+                 does not have, so those calls fail",
+            )
         } else {
-            (true, "")
+            (true, false, "")
         }
     } else if has_background {
         (
+            false,
             false,
             "everything it does is in a background page, which this engine cannot start: WebKitGTK has \
              no WebExtensions API, so chrome.runtime, chrome.tabs and the rest of chrome.* are missing",
         )
     } else {
-        (false, "it declares no content scripts, so there is nothing this engine can run")
+        (false, false, "it declares no content scripts, so there is nothing this engine can run")
+    };
+    let base = if partial && !base.is_empty() {
+        format!("loads, but its main part does not run here: {base}")
+    } else {
+        base.to_string()
     };
     let why = match (base.is_empty(), also.is_empty()) {
         (true, true) => String::new(),
@@ -585,7 +829,7 @@ fn capability(manifest: &Manifest) -> (bool, String) {
         (true, false) => also,
         (false, false) => format!("{base}; {also}"),
     };
-    (runs, why)
+    (runs, partial, why)
 }
 
 fn unpack(source: &Path) -> Result<Scratch, String> {
@@ -672,6 +916,20 @@ fn unpack(source: &Path) -> Result<Scratch, String> {
                 MAX_ENTRY / (1024 * 1024)
             ));
         }
+        // Critic 7, round 2: the declared size is only the archive's claim. An
+        // archive of thousands of entries that each declare 0 bytes but inflate
+        // to the per-file cap would pass a total built from claims alone and
+        // fill the disk. So the claim for this entry is swapped for the bytes
+        // really written, and the whole archive is checked against what is on
+        // disk.
+        total = total.saturating_sub(declared).saturating_add(written);
+        if total > MAX_TOTAL {
+            return Err(format!(
+                "{} unpacks to more than the {} MB an extension may hold",
+                source.display(),
+                MAX_TOTAL / (1024 * 1024)
+            ));
+        }
     }
     Ok(scratch)
 }
@@ -726,13 +984,15 @@ fn set_enabled_at(base: &Path, id: &str, on: bool) {
             // claim to run something whose files were deleted or edited.
             match read_manifest(Path::new(&extension.path)) {
                 Some(manifest) => {
-                    let (runs, why_not) = capability(&manifest);
+                    let (runs, partial, why_not) = capability(&manifest, Path::new(&extension.path));
                     extension.runs = runs;
+                    extension.partial = partial;
                     extension.why_not = why_not;
                     extension.enabled = true;
                 }
                 None => {
                     extension.runs = false;
+                    extension.partial = false;
                     extension.why_not =
                         "its files are gone from the data folder, so there is nothing to run; install it again"
                             .to_string();
@@ -781,8 +1041,10 @@ fn remove_at(base: &Path, id: &str) {
 /// decides frame by frame, which is what makes a content script follow a page
 /// as it navigates instead of only working on the address it was loaded at.
 pub struct Installable {
-    /// (source, allow list, before the document or after it, every frame)
-    pub scripts: Vec<(String, Vec<String>, bool, bool)>,
+    /// (source, allow list, block list, before the document or after it,
+    /// every frame). The block list comes from `exclude_matches` and wins
+    /// over the allow list, as it does in Firefox and Chrome.
+    pub scripts: Vec<(String, Vec<String>, Vec<String>, bool, bool)>,
 }
 
 /// A manifest names its files by relative path and a manifest is not trusted,
@@ -850,7 +1112,13 @@ fn allow_list(pattern: &str) -> Vec<String> {
 /// where an extension's CSS belongs, and it is what the CSS in a Chrome content
 /// script amounts to.
 fn css_script(css: &str) -> String {
-    let escaped = css.replace('\\', "\\\\").replace('`', "\\`").replace("</", "<\\/");
+    // A backslash is doubled first, so the escapes added after it are not
+    // doubled too. `${` would start a template substitution, so it is escaped.
+    let escaped = css
+        .replace('\\', "\\\\")
+        .replace('`', "\\`")
+        .replace("${", "\\${")
+        .replace("</", "<\\/");
     format!(
         r#"(function () {{
   const text = `{escaped}`;
@@ -870,9 +1138,10 @@ fn css_script(css: &str) -> String {
   document.addEventListener('DOMContentLoaded', put, {{ once: true }});
 }})();"#,
         escaped = escaped,
-        hash = css.bytes().map(|b| b as u32).sum::<u32>() % 1_000_000
+        hash = fingerprint(&[css])
     )
 }
+
 
 pub fn installable() -> Installable {
     installable_at(&files::data_dir())
@@ -888,11 +1157,21 @@ fn installable_at(base: &Path) -> Installable {
             if allow.is_empty() {
                 continue;
             }
+            // Expanded the same way as the allow list, so `*.example.com`
+            // keeps the script off the base domain too. A pattern this file
+            // cannot read expands to nothing and blocks nothing.
+            let block: Vec<String> = script.exclude_matches.iter().flat_map(|p| allow_list(p)).collect();
             let at_start = script.run_at.as_deref() == Some("document_start");
             for file in &script.js {
                 let Some(path) = inside(&folder, file) else { continue };
                 if let Ok(text) = std::fs::read_to_string(&path) {
-                    out.scripts.push((text, allow.clone(), at_start, script.all_frames.unwrap_or(false)));
+                    out.scripts.push((
+                        text,
+                        allow.clone(),
+                        block.clone(),
+                        at_start,
+                        script.all_frames.unwrap_or(false),
+                    ));
                 }
             }
             for file in &script.css {
@@ -903,26 +1182,10 @@ fn installable_at(base: &Path) -> Installable {
                     out.scripts.push((
                         css_script(&text),
                         allow.clone(),
+                        block.clone(),
                         true,
                         script.all_frames.unwrap_or(false),
                     ));
-                }
-            }
-        }
-        // Firefox's user_scripts, which name an address pattern and a file.
-        for (pattern, files) in &manifest.user_scripts {
-            let allow = allow_list(pattern);
-            if allow.is_empty() {
-                continue;
-            }
-            for file in files {
-                let Some(path) = inside(&folder, file) else { continue };
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if file.ends_with(".css") {
-                        out.scripts.push((css_script(&text), allow.clone(), true, false));
-                    } else {
-                        out.scripts.push((text, allow.clone(), false, false));
-                    }
                 }
             }
         }
@@ -984,8 +1247,7 @@ fn here_at(base: &Path, url: &str) -> Vec<String> {
         let acts = manifest
             .content_scripts
             .iter()
-            .any(|script| matches(&script.matches, url))
-            || manifest.user_scripts.keys().any(|pattern| pattern_matches(pattern, url));
+            .any(|script| matches(&script.matches, url));
         if acts {
             names.push(entry.name);
         }
@@ -1313,8 +1575,10 @@ mod tests {
             path: old_folder.to_string_lossy().to_string(),
             source: folder.to_string_lossy().to_string(),
             runs: true,
+            partial: false,
             why_not: String::new(),
             enabled: true,
+            gecko_id: None,
         });
         save_at(temp.path(), &registry);
 
@@ -1323,6 +1587,179 @@ mod tests {
         assert_eq!(registry.extensions.len(), 1, "one Marker, not two");
         assert_eq!(registry.extensions[0].id, entry.id);
         assert!(!old_folder.exists(), "the folder nobody points at is gone");
+    }
+
+    #[test]
+    fn a_firefox_add_on_downloaded_twice_is_one_install() {
+        let temp = Temp::new("gecko-twice");
+        // The store saves the second download as "name (1).xpi". Two folders
+        // stand in for the two files: same add-on, different paths.
+        let addon = serde_json::json!({
+            "manifest_version": 2,
+            "name": "uBlock Origin",
+            "version": "1.76.6",
+            "browser_specific_settings": { "gecko": { "id": "uBlock0@raymondhill.net" } }
+        });
+        let one = write_folder(temp.path(), "ublock_origin-1.76.6", addon.clone(), &[("a.js", "1;")]);
+        let two = write_folder(temp.path(), "ublock_origin-1.76.6 (1)", addon, &[("a.js", "2;")]);
+        let first = install_at(temp.path(), &one).expect("the first download");
+        let second = install_at(temp.path(), &two).expect("the second download");
+        assert_eq!(first.id, second.id, "the add-on's own id decides, not the file name");
+        let registry = registry_at(temp.path());
+        assert_eq!(registry.extensions.len(), 1, "one uBlock Origin, not two");
+        let installed: Vec<_> = std::fs::read_dir(root_at(temp.path()))
+            .expect("the extensions folder")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .collect();
+        assert_eq!(installed.len(), 1, "one folder on disk");
+        let copied = std::fs::read_to_string(Path::new(&second.path).join("a.js")).expect("the copy");
+        assert_eq!(copied, "2;", "the later download is the one kept");
+    }
+
+    #[test]
+    fn a_newer_version_of_a_firefox_add_on_replaces_the_older() {
+        let temp = Temp::new("gecko-update");
+        let with_version = |version: &str| {
+            serde_json::json!({
+                "manifest_version": 2,
+                "name": "Marker",
+                "version": version,
+                "browser_specific_settings": { "gecko": { "id": "marker@example.org" } }
+            })
+        };
+        let old = write_folder(temp.path(), "old", with_version("1.0"), &[]);
+        let new = write_folder(temp.path(), "new", with_version("2.0"), &[]);
+        let first = install_at(temp.path(), &old).expect("1.0");
+        let second = install_at(temp.path(), &new).expect("2.0");
+        assert_eq!(first.id, second.id);
+        let registry = registry_at(temp.path());
+        assert_eq!(registry.extensions.len(), 1);
+        assert_eq!(registry.extensions[0].version, "2.0");
+    }
+
+    #[test]
+    fn only_the_add_ons_store_over_https_is_the_store() {
+        assert!(from_store("https://addons.mozilla.org/firefox/downloads/file/1/ublock_origin-1.76.6.xpi"));
+        assert!(from_store("https://addons.mozilla.org:443/x.xpi"));
+        assert!(from_store("https://ADDONS.MOZILLA.ORG/x.xpi"));
+        assert!(from_store("https://addons.mozilla.org?x=1"));
+        // Plain HTTP, a look-alike host, a user name in front, another port,
+        // another site, and nothing at all are all refused.
+        assert!(!from_store("http://addons.mozilla.org/x.xpi"));
+        assert!(!from_store("https://addons.mozilla.org.evil.example/x.xpi"));
+        assert!(!from_store("https://addons.mozilla.org@evil.example/x.xpi"));
+        assert!(!from_store("https://addons.mozilla.org:8443/x.xpi"));
+        assert!(!from_store("https://evil.example/addons.mozilla.org/x.xpi"));
+        assert!(!from_store("https://xaddons.mozilla.org/x.xpi"));
+        assert!(!from_store(""));
+    }
+
+    #[test]
+    fn inspecting_an_add_on_installs_nothing_and_lists_its_sites() {
+        let temp = Temp::new("inspect");
+        let addon = serde_json::json!({
+            "manifest_version": 2,
+            "name": "Marker",
+            "version": "1.0",
+            "browser_specific_settings": { "gecko": { "id": "marker@example.org" } },
+            "content_scripts": [
+                { "matches": ["https://b.example/*", "https://a.example/*"], "js": ["a.js"] },
+                { "matches": ["https://a.example/*"], "css": ["a.css"] },
+                { "matches": ["https://nothing.example/*"] }
+            ]
+        });
+        let folder = write_folder(temp.path(), "marker", addon, &[("a.js", "1;"), ("a.css", "p{}")]);
+        let offer = inspect_at(temp.path(), &folder).expect("an offer");
+        assert_eq!(offer.name, "Marker");
+        assert_eq!(offer.gecko_id.as_deref(), Some("marker@example.org"));
+        assert_eq!(offer.hosts, vec!["https://a.example/*".to_string(), "https://b.example/*".to_string()]);
+        assert!(offer.runs);
+        assert!(offer.replaces.is_none());
+        assert!(registry_at(temp.path()).extensions.is_empty(), "nothing recorded");
+        assert!(!root_at(temp.path()).exists(), "nothing copied");
+    }
+
+    #[test]
+    fn inspecting_names_the_add_on_it_would_replace() {
+        let temp = Temp::new("inspect-replace");
+        let addon = |name: &str| {
+            serde_json::json!({
+                "manifest_version": 2,
+                "name": name,
+                "version": "1.0",
+                "browser_specific_settings": { "gecko": { "id": "uBlock0@raymondhill.net" } },
+                "content_scripts": [{ "matches": ["<all_urls>"], "js": ["a.js"] }]
+            })
+        };
+        let real = write_folder(temp.path(), "real", addon("uBlock Origin"), &[("a.js", "1;")]);
+        install_at(temp.path(), &real).expect("the real one");
+        let fake = write_folder(temp.path(), "fake", addon("uBlock Origin"), &[("a.js", "evil();")]);
+        let offer = inspect_at(temp.path(), &fake).expect("an offer");
+        let old = offer.replaces.as_ref().expect("the installed one is named");
+        assert_eq!(old.name, "uBlock Origin");
+        let message = crate::permissions::addon_message("addons.mozilla.org", &offer);
+        assert!(message.contains("from addons.mozilla.org"), "{message}");
+        assert!(message.contains("every page you visit"), "{message}");
+        assert!(message.contains("It replaces uBlock Origin 1.0"), "{message}");
+        assert!(message.contains("nothing here checks a signature"), "{message}");
+        // Still only one install on disk, and it is the real one: reading the
+        // offer replaced nothing.
+        let registry = registry_at(temp.path());
+        assert_eq!(registry.extensions.len(), 1);
+        let copied = std::fs::read_to_string(Path::new(&registry.extensions[0].path).join("a.js")).expect("the copy");
+        assert_eq!(copied, "1;");
+    }
+
+    #[test]
+    fn the_confirm_card_lists_a_few_sites_and_counts_the_rest() {
+        let offer = Offer {
+            name: "Many".to_string(),
+            version: "2.0".to_string(),
+            gecko_id: None,
+            hosts: (1..=7).map(|n| format!("https://s{n}.example/*")).collect(),
+            runs: true,
+            why_not: String::new(),
+            replaces: None,
+        };
+        let message = crate::permissions::addon_message("", &offer);
+        assert!(message.starts_with("Install Many 2.0 from an unknown address?"), "{message}");
+        assert!(message.contains("https://s5.example/*, and 2 more."), "{message}");
+        assert!(!message.contains("s6.example"), "{message}");
+        assert!(!message.contains("replaces"), "{message}");
+    }
+
+    #[test]
+    fn the_older_applications_key_is_read_too() {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 2,
+            "name": "Old style",
+            "version": "1.0",
+            "applications": { "gecko": { "id": "old@example.org" } }
+        }))
+        .expect("a manifest");
+        assert_eq!(manifest.gecko_id().as_deref(), Some("old@example.org"));
+
+        // Both keys present must still parse; the newer one wins.
+        let both: Manifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 2,
+            "name": "Both",
+            "version": "1.0",
+            "browser_specific_settings": { "gecko": { "id": "new@example.org" } },
+            "applications": { "gecko": { "id": "old@example.org" } }
+        }))
+        .expect("a manifest with both keys");
+        assert_eq!(both.gecko_id().as_deref(), Some("new@example.org"));
+
+        // A blank id is no id: the install falls back to name, version and source.
+        let blank: Manifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 2,
+            "name": "Blank",
+            "version": "1.0",
+            "browser_specific_settings": { "gecko": { "id": "  " } }
+        }))
+        .expect("a manifest with a blank id");
+        assert_eq!(blank.gecko_id(), None);
     }
 
     #[test]
@@ -1378,8 +1815,10 @@ mod tests {
             path: outside.to_string_lossy().to_string(),
             source: String::new(),
             runs: true,
+            partial: false,
             why_not: String::new(),
             enabled: true,
+            gecko_id: None,
         });
         save_at(temp.path(), &registry);
         remove_at(temp.path(), "evil-1_0-00000000");
@@ -1598,7 +2037,7 @@ mod tests {
             background: Some(serde_json::json!({ "service_worker": "bg.js" })),
             ..Default::default()
         };
-        let (runs, why) = capability(&manifest);
+        let (runs, _partial, why) = capability(&manifest, Path::new(""));
         assert!(!runs);
         assert!(why.contains("background"), "{why}");
         // The reason names the missing API rather than only saying "no".
@@ -1619,7 +2058,7 @@ mod tests {
             permissions: vec!["tabs".into(), "storage".into()],
             ..Default::default()
         };
-        let (runs, why) = capability(&manifest);
+        let (runs, _partial, why) = capability(&manifest, Path::new(""));
         assert!(runs, "the content half runs");
         assert!(why.contains("content scripts"), "{why}");
         assert!(why.contains("background page never starts"), "{why}");
@@ -1641,7 +2080,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (runs, why) = capability(&manifest);
+        let (runs, _partial, why) = capability(&manifest, Path::new(""));
         assert!(runs, "{why}");
         // Nothing to apologise for, so nothing is said.
         assert!(why.is_empty(), "{why}");
@@ -1650,7 +2089,7 @@ mod tests {
     #[test]
     fn an_extension_with_nothing_runnable_is_told_why() {
         let manifest = Manifest { name: "Empty".into(), ..Default::default() };
-        let (runs, why) = capability(&manifest);
+        let (runs, _partial, why) = capability(&manifest, Path::new(""));
         assert!(!runs);
         assert!(why.contains("no content scripts"), "{why}");
     }
@@ -1682,4 +2121,256 @@ mod tests {
         assert!(!notes.iter().any(|note| note.contains("runs on")), "{notes:?}");
     }
 
+    #[test]
+    fn a_content_script_that_calls_a_browser_api_is_partial() {
+        let temp = Temp::new("partial-api");
+        let folder = write_folder(
+            temp.path(),
+            "api-user",
+            serde_json::json!({
+                "manifest_version": 3,
+                "name": "Bitwarden-like",
+                "version": "1.0",
+                "content_scripts": [{ "matches": ["<all_urls>"], "js": ["cs.js"] }]
+            }),
+            &[("cs.js", "browser.runtime.sendMessage({ x: 1 }); const u = 'chrome.google.com';")],
+        );
+        let (runs, _partial, why) = capability(&parse_manifest(&folder).expect("a manifest"), &folder);
+        assert!(runs, "{why}");
+        assert!(why.contains("loads, but its main part does not run here"), "{why}");
+        // A plain content script with no API call is not partial.
+        std::fs::write(folder.join("cs.js"), "document.title = 'x';").expect("a file");
+        let (_, _, plain) = capability(&parse_manifest(&folder).expect("a manifest"), &folder);
+        assert!(plain.is_empty(), "{plain}");
+    }
+
+    /// Only a real call marks an add-on partial. Comments, sentences that end
+    /// on the word, and web addresses are not calls, and a URL earlier on a
+    /// minified line does not hide a call after it.
+    #[test]
+    fn only_a_real_api_call_counts_not_a_comment_a_sentence_or_an_address() {
+        // Not calls.
+        assert!(!calls_api("// uses browser.runtime to talk to the page"));
+        assert!(!calls_api("/* chrome.storage is not used here */"));
+        assert!(!calls_api(" * browser.runtime is described below"));
+        assert!(!calls_api("x = 1; // see chrome.tabs in the docs"));
+        assert!(!calls_api("const store = 'https://chrome.google.com/webstore';"));
+        assert!(!calls_api("label.textContent = 'Please tell the browser. Then reload';"));
+        assert!(!calls_api("document.title = 'plain';"));
+        // Calls.
+        assert!(calls_api("chrome.storage.local.get('k', done);"));
+        assert!(calls_api("  browser.runtime.sendMessage({ kind: 'hello' });"));
+        assert!(calls_api(
+            "fetch('https://a.example/x');browser.runtime.sendMessage(1)"
+        ));
+        // A call on a later line is still found after a comment line.
+        assert!(calls_api("// header\nchrome.runtime.connect();"));
+    }
+
+    /// exclude_matches keeps a script off the sites it names: they go to the
+    /// engine as a block list, expanded the same way as the allow list, and a
+    /// script that excludes nothing gets an empty block list.
+    #[test]
+    fn excluded_sites_are_handed_on_as_a_block_list() {
+        let temp = Temp::new("exclude");
+        let folder = write_folder(
+            temp.path(),
+            "exclude",
+            serde_json::json!({
+                "manifest_version": 3,
+                "name": "Everywhere but admin",
+                "version": "1.0",
+                "content_scripts": [
+                    {
+                        "matches": ["*://*.example.com/*"],
+                        "exclude_matches": ["*://admin.example.com/*"],
+                        "js": ["a.js"]
+                    },
+                    { "matches": ["https://other.example/*"], "js": ["b.js"] }
+                ]
+            }),
+            &[("a.js", "1;"), ("b.js", "2;")],
+        );
+        install_at(temp.path(), &folder).expect("an install");
+        let scripts = installable_at(temp.path()).scripts;
+        let (_, allow, block, _, _) = scripts
+            .iter()
+            .find(|(text, ..)| text == "1;")
+            .expect("the first script is handed on");
+        assert!(allow.contains(&"https://*.example.com/*".to_string()), "{allow:?}");
+        assert!(block.contains(&"http://admin.example.com/*".to_string()), "{block:?}");
+        assert!(block.contains(&"https://admin.example.com/*".to_string()), "{block:?}");
+        let (_, _, plain_block, _, _) = scripts
+            .iter()
+            .find(|(text, ..)| text == "2;")
+            .expect("the second script is handed on");
+        assert!(plain_block.is_empty(), "{plain_block:?}");
+    }
+
+    #[test]
+    fn a_background_page_makes_an_extension_partial_and_the_card_says_so() {
+        let temp = Temp::new("partial-bg");
+        let folder = write_folder(
+            temp.path(),
+            "bg-user",
+            serde_json::json!({
+                "manifest_version": 3,
+                "name": "Dark Reader-like",
+                "version": "4.9",
+                "background": { "service_worker": "bg.js" },
+                "content_scripts": [{ "matches": ["<all_urls>"], "js": ["cs.js"] }]
+            }),
+            &[("cs.js", "1;")],
+        );
+        let (runs, partial, why) = capability(&parse_manifest(&folder).expect("a manifest"), &folder);
+        assert!(runs && partial, "{why}");
+        assert!(why.starts_with("loads, but its main part does not run here"), "{why}");
+    }
+
+    #[test]
+    fn a_manifest_with_a_trailing_comma_says_where_it_failed() {
+        let temp = Temp::new("bad-json");
+        let folder = temp.path().join("broken");
+        std::fs::create_dir_all(&folder).expect("a folder");
+        std::fs::write(folder.join("manifest.json"), "{ \"name\": \"Bad\", }").expect("a manifest");
+        let why = parse_manifest(&folder).expect_err("a broken manifest is refused");
+        assert!(why.starts_with("manifest.json does not parse:"), "{why}");
+        assert!(!why.contains("has no readable"), "{why}");
+    }
+
+    #[test]
+    fn a_manifest_with_an_odd_user_scripts_still_installs() {
+        let temp = Temp::new("odd-user-scripts");
+        let folder = write_folder(
+            temp.path(),
+            "odd",
+            serde_json::json!({
+                "manifest_version": 2,
+                "name": "Odd",
+                "version": "1.0",
+                "user_scripts": ["not", "a", "map"]
+            }),
+            &[],
+        );
+        assert!(install_at(temp.path(), &folder).is_ok());
+    }
+
+    #[test]
+    fn a_name_in_a_locale_is_resolved_from_the_default_locale() {
+        let temp = Temp::new("locale");
+        let folder = write_folder(
+            temp.path(),
+            "bitwarden-like",
+            serde_json::json!({
+                "manifest_version": 3,
+                "name": "__MSG_extName__",
+                "version": "2024.1",
+                "description": "__MSG_extDesc__",
+                "default_locale": "en"
+            }),
+            &[(
+                "_locales/en/messages.json",
+                r#"{ "extName": { "message": "Bitwarden" }, "extDesc": { "message": "A password manager" } }"#,
+            )],
+        );
+        let entry = install_at(temp.path(), &folder).expect("an install");
+        assert_eq!(entry.name, "Bitwarden");
+        assert_eq!(entry.description, "A password manager");
+    }
+
+    #[test]
+    fn an_unknown_locale_key_is_left_as_it_is() {
+        let temp = Temp::new("locale-missing");
+        let folder = write_folder(
+            temp.path(),
+            "uBlock-like",
+            serde_json::json!({
+                "manifest_version": 3,
+                "name": "__MSG_extName__",
+                "version": "1.0",
+                "default_locale": "en"
+            }),
+            &[],
+        );
+        let manifest = parse_manifest(&folder).expect("a manifest");
+        assert_eq!(manifest.name, "__MSG_extName__");
+    }
+
+    #[test]
+    fn a_firefox_add_on_gets_one_id_whatever_its_name() {
+        let first = Manifest {
+            name: "uBlock Origin".into(),
+            version: "1.76.6".into(),
+            browser_specific_settings: Some(serde_json::json!({ "gecko": { "id": "uBlock0@raymondhill.net" } })),
+            ..Default::default()
+        };
+        let renamed = Manifest { name: "uBlock Origin (Beta)".into(), version: "1.77".into(), ..first.clone() };
+        let origin = Path::new("/dl/x.xpi");
+        assert_eq!(id_for(&first, origin), id_for(&renamed, origin));
+        assert!(!id_for(&first, origin).contains("ublock"), "{}", id_for(&first, origin));
+    }
+
+    #[test]
+    fn a_firefox_add_on_under_an_older_id_is_replaced_not_duplicated() {
+        let temp = Temp::new("gecko-migrate");
+        let addon = serde_json::json!({
+            "manifest_version": 2,
+            "name": "uBlock Origin",
+            "version": "1.76.6",
+            "browser_specific_settings": { "gecko": { "id": "uBlock0@raymondhill.net" } }
+        });
+        let folder = write_folder(temp.path(), "ublock", addon.clone(), &[("a.js", "1;")]);
+        // An entry made before the gecko id was kept: its own id, no gecko_id.
+        let old_folder = root_at(temp.path()).join("ublock-old");
+        std::fs::create_dir_all(&old_folder).expect("the old folder");
+        std::fs::write(old_folder.join("manifest.json"), addon.to_string()).expect("a manifest");
+        let mut registry = Registry::default();
+        registry.extensions.push(Installed {
+            id: "ublock-old".to_string(),
+            name: "uBlock Origin".to_string(),
+            version: "1.76.5".to_string(),
+            description: String::new(),
+            path: old_folder.to_string_lossy().to_string(),
+            source: "elsewhere".to_string(),
+            runs: true,
+            partial: false,
+            why_not: String::new(),
+            enabled: true,
+            gecko_id: None,
+        });
+        save_at(temp.path(), &registry);
+        let offer = inspect_at(temp.path(), &folder).expect("an inspect");
+        assert!(offer.replaces.is_some(), "the old copy is named as replaced");
+        install_at(temp.path(), &folder).expect("an install");
+        let registry = registry_at(temp.path());
+        assert_eq!(registry.extensions.len(), 1, "one uBlock Origin, not two");
+        assert!(!old_folder.exists(), "the old folder is gone");
+    }
+
+    #[test]
+    fn a_style_sheet_with_a_template_or_a_backslash_is_escaped() {
+        let script = css_script("a::before { content: '${x}'; } b { c: `d`; }\\");
+        assert!(script.contains("\\${x}"), "{script}");
+        assert!(script.contains("\\`d\\`"), "{script}");
+        assert!(script.contains("\\\\\\\\") || script.contains("\\\\"), "{script}");
+        // A real hash, so two sheets with the same byte total do not share an id.
+        let a = css_script("a{color:red}");
+        let b = css_script("a{color:blue}");
+        assert_ne!(a, b);
+        assert_ne!(
+            a.split("__search_ext_style_").nth(1).and_then(|s| s.split('\'').next()),
+            b.split("__search_ext_style_").nth(1).and_then(|s| s.split('\'').next())
+        );
+    }
+
+    #[test]
+    fn unique_temp_creates_owner_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp("search-ext-test").expect("temp dir");
+        let mode = std::fs::metadata(&dir).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
 }
+

@@ -131,6 +131,15 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
         elif route == "/missing":
             self.send("not found", status=404, kind="text/plain")
+        elif route == "/status":
+            # An error status that carries a page of its own, the way a
+            # Cloudflare check, GitHub's 404 or a sign-in screen does. The
+            # browser has to show this page, not replace it with its own.
+            code = int(query.get("code", ["403"])[0])
+            if code < 400 or code > 599:
+                code = 403
+            self.send(page(f"Status {code}", f"<p id='site-error'>The site's own {code} page.</p>",
+                           banner=False), status=code)
         elif route == "/banner":
             # A page whose whole content is the kind of thing the blocker hides,
             # next to one thing it must leave alone. The two are told apart by
@@ -171,6 +180,13 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/popup":
             self.send(page("Popup", "<p><button id='go' onclick=\"window.open('/plain','_blank')\">"
                                     "Open one</button></p>", banner=False))
+        elif route == "/popup-auto":
+            # Asks for a window with no click at all: the browser must refuse it.
+            self.send(page("Popup without a click",
+                           "<script>window.onload = () => window.open('/popup-target');</script>",
+                           banner=False))
+        elif route == "/popup-target":
+            self.send(page("Popup target", "<p>opened by a page, not a click</p>", banner=False))
         elif route == "/download":
             payload = b"search-download-fixture\n" * 4096
             self.send(payload, kind="application/octet-stream",
@@ -188,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                                f"<li><a href='{name}'>{name}</a></li>" for name in
                                ["plain", "long", "big", "images", "slow", "stall", "redirect?n=3",
                                 "loop", "missing", "js-busy", "js-leak", "frames", "popup",
-                                "download", "form", "fonts", "banner", "cookie"]
+                                "popup-auto", "download", "form", "fonts", "banner", "cookie"]
                            ) + "</ul>"))
 
 

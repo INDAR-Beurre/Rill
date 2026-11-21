@@ -25,12 +25,26 @@ pub enum Icon {
     Mask,
 }
 
+/// Read the widget's live CSS foreground color, falling back to `fallback` if transparent.
+pub(crate) fn set_source_color(widget: &impl IsA<gtk::Widget>, cr: &cairo::Context, fallback: Rgb) {
+    let rgba = widget.style_context().color(widget.state_flags());
+    if rgba.alpha() > 0.0 {
+        cr.set_source_rgba(rgba.red(), rgba.green(), rgba.blue(), rgba.alpha());
+    } else {
+        cr.set_source_rgb(
+            fallback.0 as f64 / 255.0,
+            fallback.1 as f64 / 255.0,
+            fallback.2 as f64 / 255.0,
+        );
+    }
+}
+
 pub fn area(kind: Icon, size: i32, color: Rgb) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_size_request(size, size);
-    area.connect_draw(move |_, cr| {
+    area.connect_draw(move |widget, cr| {
         let w = size as f64;
-        cr.set_source_rgb(color.0 as f64 / 255.0, color.1 as f64 / 255.0, color.2 as f64 / 255.0);
+        set_source_color(widget, cr, color);
         cr.set_line_width(1.5);
         cr.set_line_cap(cairo::LineCap::Round);
         cr.set_line_join(cairo::LineJoin::Round);

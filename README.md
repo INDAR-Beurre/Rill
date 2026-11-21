@@ -2,37 +2,49 @@
 
 ![Search for Linux: the page is the product](docs/hero.svg)
 
-### A small, quiet WebKit browser for Linux.
+### A small, quiet, native WebKit browser for Linux.
 
-**Vertical tabs · Rust shell · Shared WebKit engine · Local-first**
+**Edge-to-edge chrome · Vertical tabs · VSync motion · Local-first · Shared WebKitGTK engine**
 
-[![Rust](https://img.shields.io/badge/Rust-native-38bdf8?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-38bdf8?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
 [![WebKitGTK](https://img.shields.io/badge/WebKitGTK-4.1-14b8a6?style=flat-square)](docs/ARCHITECTURE.md)
+[![Tests](https://img.shields.io/badge/Tests-269%20unit%20%C2%B7%20117%20stress-22c55e?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/MIT-license-a5b4fc?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/Linux-Wayland%20%2F%20X11-818cf8?style=flat-square&logo=linux&logoColor=white)](#build-and-run)
+[![Platform](https://img.shields.io/badge/Linux-Wayland%20%2F%20X11-818cf8?style=flat-square&logo=linux&logoColor=white)](#build-from-source)
 
-[Explore the browser](#the-browser) · [Run the AppImage](#appimage) · [Build it](#build-and-run) · [Architecture](#architecture) · [Testing](#testing)
+[Highlights](#highlights) · [Screenshots](#screenshots) · [AppImage](#appimage) · [Build](#build-from-source) · [Shortcuts](#keyboard-shortcuts) · [Architecture](#architecture) · [Testing](#testing)
 
 </div>
 
 ---
 
-## The browser
+**Search** is an independent Linux implementation of [Office Commun's Search](https://github.com/driceroland/Search), written in Rust with GTK 3 and WebKitGTK 4.1. No Electron, no bundled Chromium, no account, and no top toolbar clutter — just a foldable column of vertical tabs and the web page.
 
-No toolbar. No account. No bundled Chromium. A column of tabs and the page.
+## Highlights
+
+- **Edge-to-edge interface**: No top chrome strip or tab bar clutter. A clean, foldable vertical tab column (`Ctrl S`), pinned pages, and a single keyboard-first omnibox (`Ctrl L`).
+- **Fluid native motion**: Driven by a custom VSync `gdk::FrameClock` engine (`src/motion.rs`) and GTK CSS transitions — smooth overlay slides/fades, 90 ms tab crossfades, animated sidebar folding, floating hover controls, and a 3 px top page-load progress bar.
+- **Built for the real web**: Persistent SQLite cookies in normal tabs (strictly isolated ephemeral storage in private tabs), WebRTC, `prefers-color-scheme` sync, locale-derived `Accept-Language` and spellcheck, clipboard permission prompts, and server-suggested download filenames.
+- **Engine-level privacy**: EasyList and EasyPrivacy compiled into **15,775 WebKit content-blocker rules** across 3 lists (`network`, global cosmetic, and domain-scoped `if-domain` rules) enforced inside WebKit before requests leave the browser.
+- **Fast and lazy by default**: Restored background tabs stay asleep with zero web process until selected. Tab switches average **1.0 ms** (**1.7 ms p95**, **6.5 ms worst** over 300 switches).
+- **Power features without bloat**: `Shift` + click link peek cards, `Ctrl I` site security/zoom/permissions/data card, sanitized reading mode (`Ctrl Shift R`), persistent element hiding in an isolated script world (`Ctrl Shift H`), closed-tab stack (`Ctrl Shift T`), `.crx`/`.xpi`/unpacked content-script extensions, and 6-browser import (Firefox, Chromium, Chrome, Brave, Edge, Vivaldi).
+
+> **Explicit scope & limits.** Search has no cloud sync, user accounts, built-in password manager, multi-window mode, or DRM/EME playback. Read [differences from the original](docs/DIFFERENCES.md) and [technical limits](docs/LIMITS.md).
+
+## Screenshots
 
 <table>
   <tr>
-    <td width="50%"><strong>Light</strong><br><sub>Quiet chrome, readable pages.</sub></td>
-    <td width="50%"><strong>Dark</strong><br><sub>The same interface, after hours.</sub></td>
+    <td width="50%"><strong>Light</strong><br><sub>Edge-to-edge page, quiet vertical tab column.</sub></td>
+    <td width="50%"><strong>Dark</strong><br><sub>Synced desktop/app theme while respecting each site's own colors.</sub></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/light.png" alt="Search in light mode with vertical tabs"></td>
     <td><img src="docs/screenshots/dark.png" alt="Search in dark mode with vertical tabs"></td>
   </tr>
   <tr>
-    <td><strong>One field</strong><br><sub>Addresses, search, history and open tabs.</sub></td>
-    <td><strong>Pinned pages</strong><br><sub>Daily pages stay within reach.</sub></td>
+    <td><strong>Omnibox</strong> (<code>Ctrl L</code>)<br><sub>Addresses, search suggestions, history, bookmarks, and open tabs in one place.</sub></td>
+    <td><strong>Pinned pages</strong><br><sub>Daily sites stay compact at the top of the column.</sub></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/omnibox.png" alt="Address field with suggestions"></td>
@@ -41,7 +53,7 @@ No toolbar. No account. No bundled Chromium. A column of tabs and the page.
 </table>
 
 <details>
-<summary><strong>More real screenshots: reading, history and settings</strong></summary>
+<summary><strong>More screenshots: Reading mode, History, and Settings</strong></summary>
 <br>
 <table>
   <tr>
@@ -49,8 +61,8 @@ No toolbar. No account. No bundled Chromium. A column of tabs and the page.
     <td><img src="docs/screenshots/history.png" alt="History panel"></td>
   </tr>
   <tr>
-    <td align="center"><strong>Reading mode</strong><br><sub>The article, set in the browser's own type.</sub></td>
-    <td align="center"><strong>History</strong><br><sub>Local, searchable and under your control.</sub></td>
+    <td align="center"><strong>Reading mode</strong> (<code>Ctrl Shift R</code>)<br><sub>Sanitized article typography without page clutter.</sub></td>
+    <td align="center"><strong>History</strong> (<code>Ctrl H</code> / <code>Ctrl Y</code>)<br><sub>Local, fast, and searchable.</sub></td>
   </tr>
 </table>
 
@@ -58,104 +70,40 @@ No toolbar. No account. No bundled Chromium. A column of tabs and the page.
 
 </details>
 
-## What it does
-
-| Area | What you get |
-|---|---|
-| **Browse** | Vertical tabs, pinned pages, session restore, lazy restored tabs, window-size memory. |
-| **Search** | One field for addresses and words. Suggestions come from your tabs, history and bookmarks. |
-| **Privacy** | EasyList and EasyPrivacy enforced by WebKit before requests are made. No telemetry. |
-| **Reading** | Distraction-free articles, in-page find, bookmarks and a searchable local history. |
-| **Control** | Hide page elements persistently, private tabs, light/dark appearance, keyboard-first controls. |
-| **Extensions** | `.crx`, `.xpi` and unpacked folders: content scripts, styles and options pages within WebKit's limits. |
-
-> **A real browser, with explicit limits.** No sync, cloud account, password manager, multiple windows or full WebExtensions API. DRM video is unavailable. Read [differences from the original](docs/DIFFERENCES.md) and [technical limits](docs/LIMITS.md).
-
-## Why this architecture
-
-```text
-┌─────────────────────── Search ───────────────────────┐
-│ Rust application + GTK 3 interface                  │
-│ tabs · omnibox · panels · reader · local JSON state │
-└───────────────────────┬──────────────────────────────┘
-                        │ distribution libraries
-┌───────────────────────▼──────────────────────────────┐
-│ WebKitGTK 4.1                                       │
-│ web process · network process · content blocking    │
-└─────────────────────────────────────────────────────┘
-```
-
-- **No second engine.** WebKitGTK comes from your distribution, not a bundled Chromium download.
-- **A tab starts on demand.** Restored background tabs do not create a web process until selected.
-- **Local by default.** Tabs, history, bookmarks and hidden elements are small JSON files in your own folders.
-- **One concern per module.** Browser behavior, rendering, UI, panels, extensions, storage and tests remain inspectable.
-
-### Languages
-
-Measured across `src/`, `tools/` and `assets/` in this checkout:
-
-| Language | Share | Role |
-|---|---:|---|
-| 🦀 **Rust** | **76.9%** | Browser, native UI, state, networking integration and tests. |
-| 🐍 **Python** | **19.6%** | Browser automation, stress tests, fixtures and visual evidence. |
-| 🐚 **Shell** | **2.6%** | Reproducible screenshot capture and developer workflows. |
-| 🟨 **JavaScript** | **1.0%** | Reading mode and page-side behavior. |
-
-## Project structure
-
-```text
-search-linux/
-├── src/                 Rust browser and GTK interface
-│   ├── app.rs          Tabs, actions and application state
-│   ├── web.rs          WebKit views, navigation and downloads
-│   ├── ui.rs           Native widgets and window chrome
-│   ├── panels.rs       History, settings, shortcuts and extensions
-│   ├── reader.rs       Reading-mode integration
-│   └── bench.rs        Automation socket used by the test suite
-├── assets/
-│   ├── reader.js       Page-side reading mode
-│   └── shield/         Compiled content-blocking rules
-├── tools/
-│   ├── stress.py       Browser stress, behavior and memory checks
-│   ├── shots.sh        Light/dark screenshot evidence
-│   ├── fixtures.py     Local hostile and ordinary test pages
-│   └── bench.py        Automation client
-├── docs/               Architecture, limits, screenshots and decisions
-├── reference/          Original-browser visual references
-└── council/            Verified review rounds and evidence
-```
-
 ## AppImage
 
-An x86_64 / AMD64 AppImage bundles Search, WebKitGTK, its process helpers and the GTK runtime. No installation, root access or bundled Chromium.
+An **x86_64 / AMD64** AppImage bundles Search, WebKitGTK 4.1, its process helpers, GStreamer plugins, fonts, and the GTK 3 runtime. No installation or root access required.
 
 ```sh
 chmod +x Search-1.0.1-x86_64.AppImage
 ./Search-1.0.1-x86_64.AppImage
 ```
 
-The current artifact passed **101/101** packaged-browser checks. It was built with glibc 2.44; older distributions need a build on an older glibc. This is not a 32-bit i686 build. See [AppImage instructions and verification](packaging/README.md).
+You can also rebuild it directly from this repository:
 
-## Build and run
+```sh
+tools/appimage.sh
+```
+
+See [packaging/README.md](packaging/README.md) for verification, desktop-entry installation, and glibc compatibility notes.
+
+## Build from source
 
 ### Requirements
 
-- Rust **1.75+**
-- GTK **3**
-- WebKitGTK **4.1**
+- **Rust 1.75+**
+- **GTK 3** and **WebKitGTK 4.1** (`webkit2gtk-4.1` on Arch, `libwebkit2gtk-4.1-dev` on Debian/Ubuntu)
 - A Wayland or X11 session
-
-Arch package: `webkit2gtk-4.1`. Debian/Ubuntu package: `libwebkit2gtk-4.1-dev`.
 
 ```sh
 cargo build --release
 ./target/release/search
 ```
 
-No Node. No bundler. No submodule. The stripped release binary is about **2.8 MB**.
+No Node, no JS bundler, no submodules. The stripped release binary is **~3.8 MB**.
 
 <details>
-<summary><strong>Install a launcher and handle web links</strong></summary>
+<summary><strong>Install desktop launcher &amp; handle HTTP/HTTPS links</strong></summary>
 
 ```sh
 cargo install --path . --root ~/.local
@@ -171,51 +119,66 @@ Categories=Network;WebBrowser;
 MimeType=x-scheme-handler/http;x-scheme-handler/https;
 EOF
 xdg-mime default search.desktop x-scheme-handler/https
+xdg-mime default search.desktop x-scheme-handler/http
 ```
 
-There is no Flatpak or native installer yet. For a source build, use one binary plus one desktop file.
-
 </details>
+
+## Keyboard shortcuts
+
+| Navigation & Tabs | Key | Page, Panels & Tools | Key |
+|---|---|---|---|
+| Address / search field | `Ctrl L` | Find in page | `Ctrl F` |
+| New tab / Private tab | `Ctrl T` / `Ctrl Shift N` | Reading mode | `Ctrl Shift R` |
+| Close / Reopen tab | `Ctrl W` / `Ctrl Shift T` | Site info, zoom & permissions | `Ctrl I` |
+| Next / Previous tab | `Ctrl Tab` / `Ctrl Shift Tab` | Peek link in floating card | `Shift` + click |
+| Switch tab by typing | `Ctrl K` | Bookmark page | `Ctrl D` |
+| Duplicate tab | `Ctrl Shift K` | History / Downloads | `Ctrl H` (`Ctrl Y`) / `Ctrl J` |
+| Fold / unfold tab column | `Ctrl S` | Hide element / Restore hidden | `Ctrl Shift H` / `Ctrl Shift U` |
+| Settings / All shortcuts | `Ctrl ,` / `Ctrl /` | Dismiss current overlay | `Escape` |
+
+## Architecture
+
+```text
+┌─────────────────────── Search (Rust + GTK 3) ───────────────────────┐
+│ app.rs · ui.rs · motion.rs · omnibox.rs · panels.rs · sitecard.rs   │
+│ peek.rs · curtain.rs · extensions.rs · store.rs · reader.rs         │
+└──────────────────────────────────┬──────────────────────────────────┘
+                                   │ distribution WebKitGTK 4.1
+┌──────────────────────────────────▼──────────────────────────────────┐
+│ WebKitWebView · WebKitNetworkProcess · UserContentFilterStore       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+- **Codebase**: 34 Rust modules in `src/` (**22,972 lines** total — **81.3% Rust**, **15.3% Python**, **2.6% Shell**, **0.8% JS** across `src/`, `tools/`, and `assets/`).
+- **Key directories**:
+  - `src/` — Browser state (`app.rs`), WebKit integration (`web.rs`), GTK widgets (`ui.rs`), VSync motion (`motion.rs`), overlays (`omnibox.rs`, `panels.rs`, `peek.rs`, `sitecard.rs`, `find.rs`, `dialogs.rs`, `permissions.rs`), privacy/blocking (`shield.rs`, `curtain.rs`, `extensions.rs`), and test socket (`bench.rs`).
+  - `assets/` — Sanitized reading mode (`reader.js`) and compiled content-blocker lists (`shield/network.json`, `shield/hide-0.json`, `shield/hide-sites.json`).
+  - `tools/` — Stress & memory suite (`stress.py`), visual verification (`shots.sh`), shield compiler & checker (`build_shield.py`, `check_shield.py`), extension tests (`extensions.py`), AppImage packager (`appimage.sh`), and figure checker (`report_figures.py`).
+  - `docs/` — [Architecture](docs/ARCHITECTURE.md), [Technical Limits](docs/LIMITS.md), [Testing](docs/TESTING.md), and [Differences](docs/DIFFERENCES.md).
 
 ## Testing
 
 ```sh
-cargo test --release
-python3 tools/stress.py
-python3 tools/extensions.py
-python3 tools/check_shield.py
-tools/shots.sh council/latest
+cargo test --release                     # 269 unit tests (1 ignored, 0 failed)
+python3 tools/stress.py                  # 117/117 end-to-end & memory checks
+GDK_BACKEND=wayland python3 tools/extensions.py
+python3 tools/check_shield.py            # 15,775 WebKit rules across 3 lists, 0 rejected
+tools/shots.sh council/latest            # 18/18 light states + pixel checks
 SHOT_DARK=1 tools/shots.sh council/latest-dark
-python3 tools/report_figures.py --check
+python3 tools/report_figures.py --check  # Verify docs match build/stress-report.json
 ```
 
-The stress suite drives real browser behavior: many tabs, hostile pages, redirects, stalled loads, downloads, privacy, reading mode, keyboard actions, panels, scrolling and memory pressure. It writes `build/stress-report.json` and exits non-zero on failure.
-
-Latest verified candidate: **123 Rust tests and 101/101 browser checks**. Screenshots above come from the corresponding light and dark evidence runs.
+Screenshots in `docs/screenshots/` come from the verified `council/round-47` and `council/round-47-dark` runs.
 
 ## Memory, honestly
 
-**The requested ~100 MB total-RAM target is not met.** The latest full-suite sample measured **210.5 MB total PSS** for one idle tab, including **91.7 MB anonymous PSS**. Total memory varies with WebKit, graphics initialization, page content and host state.
+**The requested ~100 MB total-RAM target is not met.** The latest full-suite sample measured **about 227 MB total PSS** (218.1 MB exact) for one idle tab, including **96.5 MB anonymous PSS** (see `idle one tab` in [docs/LIMITS.md](docs/LIMITS.md)). Total memory varies with WebKit, graphics initialization, page content, and host state.
 
-The suite records both figures and includes `target_pss_mb: 100` plus `target_met`. It does not present anonymous memory as total memory. Settings → **Use less memory** reduces compositing cost on the next launch, but does not make the total target pass.
-
-See [docs/LIMITS.md](docs/LIMITS.md) for the exact measurement, process model, multi-tab cost and known tradeoffs.
-
-## Keyboard essentials
-
-| Action | Key | Action | Key |
-|---|---|---|---|
-| Address/search field | `Ctrl L` | New tab | `Ctrl T` |
-| Private tab | `Ctrl Shift N` | Close tab | `Ctrl W` |
-| Next / previous tab | `Ctrl Tab` / `Ctrl Shift Tab` | Reopen tab | `Ctrl Shift T` |
-| Reading mode | `Ctrl Shift R` | Find in page | `Ctrl F` |
-| Bookmark | `Ctrl D` | History | `Ctrl Y` |
-| Downloads | `Ctrl J` | Settings | `Ctrl ,` |
-| Hide an element | `Ctrl Shift H` | Restore hidden elements | `Ctrl Shift U` |
-| All shortcuts | `Ctrl /` | Close the current overlay | `Escape` |
+The suite records both numbers with `target_pss_mb: 100` and `target_met: false` rather than reporting anonymous memory as total RAM. Settings → **Use less memory** disables GPU compositing on the next launch, trading rendering speed for lower memory.
 
 ## Origin and license
 
-Search was created for macOS by [Office Commun](https://officecommun.com), at [driceroland/Search](https://github.com/driceroland/Search). This is an independent Linux implementation in Rust, using the same interface idea and WebKitGTK.
+Search was created for macOS by [Office Commun](https://officecommun.com) ([driceroland/Search](https://github.com/driceroland/Search)). This is an independent Linux implementation in Rust using GTK 3 and WebKitGTK 4.1.
 
-MIT. See [LICENSE](LICENSE). Contribution workflow: [CONTRIBUTING.md](CONTRIBUTING.md). Release history: [CHANGELOG.md](CHANGELOG.md).
+Licensed under [MIT](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).

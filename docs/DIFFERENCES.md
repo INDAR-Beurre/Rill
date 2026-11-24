@@ -14,7 +14,7 @@ builds, and a browser that looks like a Mac on Linux looks like a port.
 The Mac window is an `NSWindow` with real traffic lights, a real titlebar, and
 the system's own window shadows and corners. On Linux the browser draws its own:
 a `GtkWindow` with no desktop titlebar, a zero-height client-side `HeaderBar`
-kept alive only so a drag can move the window, and three 22px marks drawn by
+kept alive only so a drag can move the window, and three 28px marks drawn by
 `ui::window_controls` in `GtkEventBox`es, wired to close, minimise and maximise.
 The marks are drawn glyphs, not coloured circles, and each carries a tooltip and
 an accessible name because there is no text in it to read.
@@ -25,11 +25,23 @@ is that window rules, snapping and the system menu come from the compositor
 rather than from the header, and window shadows differ between GNOME, KDE and
 whatever else is running.
 
-There is no top bar (`deskband`) above the page viewport: the window controls
-and navigation buttons (`helm`) sit in the tab column's top band (`topband`),
-and the page runs edge-to-edge beside the column. Only the bookmarks row
-(`bmarkbar`, hidden when empty) and a 3px floating load-progress bar overlaid at
-the top of the page viewport (`page_overlay`) ever appear above the page.
+The redesigned Linux interface deliberately moves beyond visual fidelity to
+the original. A permanent 72px toolbar holds the address display, navigation,
+site information, reading/bookmark controls, and window buttons. The tab
+column's top band is a brand/drag handle instead of a hiding place for hover-only
+navigation. Both surfaces can move the window; video fullscreen hides the
+toolbar and column together.
+
+The start page is native GTK, with editorial serif typography and a Cairo
+orbital illustration—not a remote site or an embedded HTML dashboard. Its
+search field works directly, and `Ctrl L` retains the shared omnibox. Personal
+bookmarks and recent pages appear only in ordinary browsing; empty profiles
+get explicitly labeled curated links.
+
+Panels use a navigation rail and ruled content sections. On smaller windows,
+the rail becomes compact icon navigation and settings controls reflow. Light
+and dark colors are intentional paper/charcoal palettes rather than the Mac
+build's neutral-grayscale tokens.
 
 ## Motion and animations
 
@@ -55,15 +67,17 @@ will fail only here.
 
 Memory is the visible consequence. Safari's WebKit shares a great deal between
 processes because the OS was built for it; on Linux each WebKit process maps the
-same shared libraries again, which is why proportional resident memory was 226.7 MB for one tab in the latest passing run while the browser's own
+same shared libraries again. That is why one tab used 218.6 MB of total proportional resident memory in the round-76 quick run
+(`council/round-76/stress-report-slide-quick.json`, which passes the 230 MB WebKitGTK floor but still misses the original ~100 MB request), while the browser's own
 anonymous memory is 49 to 119 MB depending on
 the page and the host.
 
 ## Keys, menus and the system
 
 - `Cmd` becomes `Ctrl`. Every other modifier pair is kept.
-- The Mac build has a real menu bar in the system menu. Here the menu is one
-  button at the foot of the column, because there is no system menu to put it in.
+- The Mac build has a real menu bar in the system menu. Here a toolbar menu
+  exposes all browser actions, and the column footer offers direct Settings,
+  Library, History, and Downloads access.
 - Services, Share, Handoff, iCloud tabs, Spaces and full-screen gestures are not
   ported. They are Mac surface with no Linux equivalent in this build.
 - Downloads go to the XDG download directory (`~/Downloads` by default), not to

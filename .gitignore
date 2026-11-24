@@ -20,3 +20,15 @@ council/round-*/
 # python bytecode from the tools
 __pycache__/
 *.pyc
+council/round-r1/
+council/round-r2/
+council/round-r3/
+council/round-r4/
+council/round-r5/
+council/round-r6/
+council/round-r1-dark/
+council/round-r2-dark/
+council/round-r3-dark/
+council/round-r4-dark/
+council/round-r5-dark/
+council/round-r6-dark/

@@ -94,7 +94,7 @@ fn take() -> Option<Peek> {
     PEEK.with(|p| p.borrow_mut().take())
 }
 
-fn showing() -> bool {
+pub(crate) fn showing() -> bool {
     PEEK.with(|p| p.borrow().as_ref().is_some_and(|peek| peek.card.is_visible()))
 }
 
@@ -110,10 +110,15 @@ pub fn relayout(app: &App) {
     PEEK.with(|p| {
         let borrow = p.borrow();
         let Some(peek) = borrow.as_ref() else { return };
+        // The band is where the page starts under the toolbar (the same one
+        // Find uses). With 0 the card was centred on the whole overlay, so on a
+        // short window its top could slide up under the toolbar (Gemini R59
+        // fix 6). toolbar_band is 0 in fullscreen, so the card still uses the
+        // full height there.
         let (start, end, top, bottom) = card_margins(
             app.ui.overlay.allocated_width(),
             app.ui.overlay.allocated_height(),
-            0,
+            crate::find::toolbar_band(&app.ui),
             page_left(app),
         );
         peek.card.set_margin_start(start);
@@ -194,10 +199,12 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
         .translate_coordinates(&app.ui.overlay, 0, 0)
         .map(|(x, _)| x)
         .unwrap_or_else(|| page_left(app));
+    // Start below the toolbar, as relayout does, so the first frame and every
+    // later relayout agree and the card does not jump when the window resizes.
     let (start, end, top, bottom) = card_margins(
         app.ui.overlay.allocated_width(),
         app.ui.overlay.allocated_height(),
-        0,
+        crate::find::toolbar_band(&app.ui),
         opener_left,
     );
     card.set_margin_start(start);
@@ -239,7 +246,10 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
 
     app.ui.overlay.add_overlay(&card);
     card.show_all();
-    crate::motion::pop_card_in(&card, top, 18, 190);
+    // The peek card arrives on the shared entrance role (180ms) and travels
+    // the shared 8px, the same as every other card, instead of its own
+    // 18px and 190ms.
+    crate::motion::pop_card_in(&card, top, crate::motion::dur::TRAVEL, crate::motion::dur::ENTER);
     keep.grab_focus();
     view.load_uri(url);
     PEEK.with(|p| {
@@ -298,12 +308,25 @@ fn dismiss(app: &App) {
     crate::permissions::focus_page(app);
     let overlay = app.ui.overlay.clone();
     let Peek { card, view, .. } = peek;
-    let card_for_done = card.clone();
-    crate::motion::fade_out_then(&card, 110, move || {
-        overlay.remove(&card_for_done);
-        // SAFETY: the view has just left its container and nothing else holds it
-        // beyond this scope. close_tab destroys its views the same way.
-        unsafe { view.destroy() };
+    // Retire the page now, not after the fade. A dismissed peek must not keep
+    // loading, running script or holding its WebView for the EXIT fade. The
+    // card keeps its current size, so the header and frame fade out without
+    // collapsing around the missing page.
+    view.stop_loading();
+    card.set_size_request(card.allocated_width(), card.allocated_height());
+    card.remove(&view);
+    // SAFETY: the view has just left its container and nothing else holds it
+    // beyond this scope. close_tab destroys its views the same way.
+    unsafe { view.destroy() };
+    drop(view);
+    // The completion holds only weak handles, so a cancelled fade or another
+    // teardown does not keep the card or the overlay alive.
+    let card_weak = card.downgrade();
+    let overlay_weak = overlay.downgrade();
+    crate::motion::fade_out_then(&card, crate::motion::dur::EXIT, move || {
+        if let (Some(overlay), Some(card)) = (overlay_weak.upgrade(), card_weak.upgrade()) {
+            overlay.remove(&card);
+        }
     });
 }
 
@@ -336,7 +359,34 @@ fn keep_peek(app: &AppRef) {
     if let Some(title) = view.title() {
         app.set_title(id, &title);
     }
+    // The tab callbacks are attached after the peek has already been loading,
+    // so they miss any signals that fired before. Copy the view's current
+    // state into the new tab: back/forward, loading and progress. If the page
+    // had already finished, the Finished signal will never come again, so the
+    // visit is recorded here. Otherwise a kept page would never reach history.
+    let loading = view.is_loading();
+    app.sync_nav(id, &view);
+    app.set_loading(id, loading);
+    if loading {
+        app.set_load_progress(id, view.estimated_load_progress());
+    } else {
+        app.set_load_progress(id, 1.0);
+        app.record_visit(id);
+    }
     app.select(id);
+}
+
+/// Presses Keep on the open peek, the same as clicking the card's Keep button.
+/// The bench socket cannot send a pointer click, so the stress suite reaches
+/// Keep through this. It runs the same keep_peek the button runs. Returns false
+/// when no peek is open, so a test cannot pass by pressing a button that is
+/// not there.
+pub fn keep(app: &AppRef) -> bool {
+    if !PEEK.with(|p| p.borrow().is_some()) {
+        return false;
+    }
+    keep_peek(app);
+    true
 }
 
 /// Escape closes the peek when it is up and the field, find bar, and panels are not.

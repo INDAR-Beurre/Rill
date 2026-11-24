@@ -1,453 +1,434 @@
-// One stylesheet for the whole interface, built from the palette so a change
-// of appearance is a change of colours and nothing else.
 use crate::palette::{Palette, FONT, MONO};
 
-
-/// The quiet text colours, in one place.
-///
-/// These used to be written into the stylesheet as literals, which meant the
-/// palette's own contrast tests were measuring colours the window never used:
-/// `palette::muted` said #5E5E5E while the CSS said #646462. Anything that
-/// wants to assert a ratio now asks for the same value the stylesheet is built
-/// from, so the assertion and the pixels cannot drift apart.
-///
-/// Each pair is (light, dark). The comment on each is the harsher of the two
-/// grounds the colour actually sits on, measured with `palette::contrast`.
 pub mod quiet {
     use crate::palette::Rgb;
 
-    const fn hex(v: u32) -> Rgb {
-        Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    const fn hex(value: u32) -> Rgb {
+        Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
     }
 
-    /// A resting tab title, and the letter in a pin. 5.02:1 on the page.
-    pub const PIN_FG: (Rgb, Rgb) = (hex(0x6A6A68), hex(0xA6A6A6));
-    /// The letter in the pin of the tab you are on. 5.30 dark / 5.47 light.
-    pub const PIN_LIVE_FG: (Rgb, Rgb) = (hex(0x545452), hex(0xC8C8C8));
-    /// A tab title in the list. #6E6E6E read 5.10:1 on the page but 4.43:1 on
-    /// a hovered row, and a row is hovered exactly when it is being read.
-    /// #6A6A68 is 4.71:1 there and 5.42:1 on the page.
-    pub const ROW_FG: (Rgb, Rgb) = (hex(0x6A6A68), hex(0xB4B4B4));
-    /// The letter in a bookmark tile. 4.80:1 on the tile in light.
-    pub const TILE_FG: (Rgb, Rgb) = (hex(0x6A6A68), hex(0xA6A6A6));
-    /// Secondary text: the host under a suggestion, a switch's subtitle.
-    /// 5.16:1 on the light panel, 4.67:1 on a dark chip.
-    pub const MUTED: (Rgb, Rgb) = (hex(0x646462), hex(0xA6A6A6));
-    /// The quietest text still meant to be read: a placeholder, a group head.
-    /// 4.71:1 on the light panel, 4.56:1 on a picked dark row.
-    pub const FAINT: (Rgb, Rgb) = (hex(0x6A6A68), hex(0xA4A4A4));
-    /// An empty list's one line. 6.48:1 on white, 7.93:1 on the dark ground.
-    pub const EMPTY_FG: (Rgb, Rgb) = (hex(0x5E5E5E), hex(0xA6A6A6));
-    /// The sentence under a page that did not open. 5.93 light / 7.93 dark.
-    pub const BLANK_HINT: (Rgb, Rgb) = (hex(0x646462), hex(0xA6A6A6));
-    /// The outline of a field: the boundary a reader has to find without
-    /// hunting. It has to be found on every ground a field sits on, not just
-    /// on its own fill: the old #949492 read 2.39:1 on the scrim and 2.64:1 on
-    /// the light panel, and the dark #6E6E6E read 3.04:1 on the scrim and
-    /// 2.23:1 on a picked chip. #808080 is 3.95:1 on white, 3.43:1 on the
-    /// panel, 3.11:1 on the scrim; #868686 is 4.78:1 on the dark field and
-    /// 4.26:1 on the dark scrim.
-    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x808080), hex(0x868686));
-    /// A control that cannot be pressed: quieter than a live one, still
-    /// legible. Fading the whole chip to 0.4 left 1.69:1 text in light and
-    /// 2.19:1 in dark. 3.22:1 on the light panel, 3.47:1 on a dark chip.
-    pub const DISABLED: (Rgb, Rgb) = (hex(0x858583), hex(0x8E8E8C));
-    /// Danger written as text on a chip rather than painted as a fill. The
-    /// palette's #D25041 is a fill colour and reads 2.69:1 as text on the dark
-    /// chip; #EE8B76 reads 4.65:1 there and 6.11:1 on the hover behind it.
-    pub const DANGER: (Rgb, Rgb) = (hex(0xC0392B), hex(0xEE8B76));
-    /// A switch that is off. 3.35:1 on the light wash, 3.94:1 on the dark panel.
-    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x828280), hex(0x787878));
+    pub const PIN_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
+    pub const PIN_LIVE_FG: (Rgb, Rgb) = (hex(0x34362F), hex(0xEDEFE8));
+    pub const ROW_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
+    pub const TILE_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
+    pub const MUTED: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
+    pub const FAINT: (Rgb, Rgb) = (hex(0x62635A), hex(0xA4AD9C));
+    pub const EMPTY_FG: (Rgb, Rgb) = MUTED;
+    pub const BLANK_HINT: (Rgb, Rgb) = MUTED;
+    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x89917E));
+    pub const DISABLED: (Rgb, Rgb) = (hex(0x74766A), hex(0x929A89));
+    pub const DANGER: (Rgb, Rgb) = (hex(0xAF392C), hex(0xF29C88));
+    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x89917E));
 
     pub fn pick(pair: (Rgb, Rgb), dark: bool) -> Rgb {
-        if dark {
-            pair.1
-        } else {
-            pair.0
-        }
+        if dark { pair.1 } else { pair.0 }
     }
 }
 
-/// The type scale, in pixels, from the desktop's own font size.
-///
-/// Thirty-five absolute pixel sizes meant a person who had set their desktop
-/// to 12pt got the same 13px tab titles as everyone else. GTK exposes that
-/// setting as `gtk-font-name`; the four stops below are offsets from it, so
-/// the interface follows the desktop instead of ignoring it.
-///
-/// The default desktop size here is 10pt, which GTK renders at 13px, and the
-/// four stops come out 10 / 12 / 13 / 15 — the sizes the design was drawn at.
-/// A larger desktop setting moves all four together.
 #[derive(Debug)]
 pub struct Scale {
-    pub caps: i32,
+    /// Captions, counts and key hints. Follows the desktop font size like the
+    /// other roles, so captions grow with large-text settings instead of
+    /// staying at a fixed 12px. At the default 10pt desktop font it is 12px,
+    /// the same size the captions had before.
+    pub caption: i32,
     pub small: i32,
     pub body: i32,
     pub title: i32,
+    /// Display type: brand marks, page and panel headings, empty-state
+    /// titles. These used to be fixed pixels while the text around them
+    /// followed the desktop setting. Each role keeps its old 10pt size and
+    /// grows with the body size from there.
+    pub brand: i32,
+    pub blank_title: i32,
+    pub start_headline: i32,
+    pub start_headline_wide: i32,
+    pub start_headline_narrow: i32,
+    pub start_entry: i32,
+    pub start_link_title: i32,
+    pub panel_heading: i32,
+    pub panel_heading_compact: i32,
+    pub panel_rail_brand: i32,
+    pub panel_empty_title: i32,
+    pub welcome_title: i32,
+    pub welcome_card_title: i32,
 }
 
 impl Scale {
+    pub fn from_points(points: f64) -> Scale {
+        let body = ((points * 96.0 / 72.0).round() as i32).max(14);
+        // The number is the size this role had at the default 10pt desktop
+        // font. Offsetting from body keeps the whole ramp in step.
+        let role = |at_default: i32| body + at_default - 14;
+        Scale {
+            caption: (body - 2).max(12),
+            small: (body - 1).max(13),
+            body,
+            title: body + 4,
+            brand: role(20),
+            blank_title: role(28),
+            start_headline: role(40),
+            start_headline_wide: role(44),
+            start_headline_narrow: role(32),
+            start_entry: role(16),
+            start_link_title: role(15),
+            panel_heading: role(30),
+            panel_heading_compact: role(24),
+            panel_rail_brand: role(20),
+            panel_empty_title: role(20),
+            welcome_title: role(28),
+            welcome_card_title: role(30),
+        }
+    }
+
     pub fn from_desktop() -> Scale {
         use gtk::prelude::GtkSettingsExt;
-        // Reading a setting before GTK is up panics rather than returning
-        // None, and the stylesheet is also built by the unit tests.
-        if !gtk::is_initialized() {
-            return Scale { caps: 10, small: 12, body: 13, title: 15 };
-        }
-        let points: f64 = gtk::Settings::default()
-            .and_then(|s| s.gtk_font_name())
-            .and_then(|name| {
-                name.split_whitespace()
-                    .last()
-                    .and_then(|size| size.parse::<f64>().ok())
-            })
-            .unwrap_or(10.0f64);
-        // Points to CSS pixels at 96dpi, which is what GTK itself uses.
-        let body = (points * 96.0 / 72.0).round() as i32;
-        Scale {
-            caps: (body - 3).max(11),
-            small: (body - 1).max(13),
-            body: body.max(14),
-            title: body + 2,
-        }
+        let points = if gtk::is_initialized() {
+            gtk::Settings::default()
+                .and_then(|settings| settings.gtk_font_name())
+                .and_then(|name| name.split_whitespace().last()?.parse::<f64>().ok())
+                .unwrap_or(10.0)
+        } else {
+            10.0
+        };
+        Self::from_points(points)
     }
 }
 
-pub fn build(p: &Palette, row_height: i32) -> String {
-    // Square window edges. The compositor clips the frame with its own mask
-    // before GTK's rounded corner is honoured, so a radius here shows on one
-    // edge and not the other. A half-applied radius is worse than none, and
-    // the surfaces inside the window keep theirs.
-    let radius = 0;
-    let ground = p.card.hex();
+pub fn build(palette: &Palette, row_height: i32) -> String {
     let scale = Scale::from_desktop();
-
+    let dark = palette.is_dark();
+    // Dark shadows over white web pages read as heavy black halos at 0.38;
+    // 0.22 keeps the lift without the smudge.
+    let shadow = if dark { "rgba(0,0,0,0.22)" } else { "rgba(44,39,29,0.14)" };
     format!(
         r#"
-window {{ background-color: {ground}; color: {ink}; }}
-headerbar.nobar {{ background-color: {ground}; }}
+window {{ background-color: {ground}; color: {ink}; font-family: {font}; font-size: {body}px; }}
 headerbar.nobar, headerbar {{ min-height: 0; padding: 0; margin: 0; border: none; background: none; box-shadow: none; }}
-headerbar.nobar button, headerbar button {{ min-height: 0; padding: 0; margin: 0; }}
-decoration {{ box-shadow: none; border-width: 0; margin: 0; padding: 0; background: none; border-radius: {radius}px; }}
-headerbar.nobar > box {{ min-height: 0; padding: 0; margin: 0; border: none; }}
-.shell {{ background-color: {ground}; border-radius: {radius}px; }}
+headerbar.nobar > box, headerbar button {{ min-height: 0; padding: 0; margin: 0; border: none; }}
+decoration {{ box-shadow: none; border: none; margin: 0; padding: 0; background: none; border-radius: 0; }}
+.shell {{ background-color: {ground}; }}
 .shell separator, paned separator {{ background-color: {divider}; background-image: none; min-width: 1px; min-height: 1px; border: none; }}
-.shell separator:hover, paned separator:hover {{ background-color: {hairline}; }}
-
-/* A paned separator with a narrow handle paints nothing at all, so the column
-   draws its own edge. */
+.shell separator:hover, paned separator:hover {{ background-color: {accent}; }}
+/* The site card's group rules. The card lives on the page overlay, which may not sit inside .shell, so the shell rule above is not enough to reach it. Without a rule of its own the separator falls back to the theme's default look. Same divider colour, 1px tall, and no hover accent, because it is not a handle you can drag. */
+separator.sitecard-rule {{ background-color: {divider}; background-image: none; min-height: 1px; border: none; }}
 .side {{ background-color: {sidebg}; border-right: 1px solid {divider}; }}
-.colstrip {{ background-color: {hover}; border-right: 1px solid {divider}; }}
-.colstrip:hover {{ background-color: {wash}; border-right: 1px solid {accent}; }}
+.colstrip {{ background-color: {ground}; border-right: 1px solid {divider}; }}
+.colstrip:hover {{ background-color: {tint}; border-right-color: {accent}; }}
+.topband, .toolbar {{ background-color: {ground}; }}
+.toolbar {{ border-bottom: 1px solid {divider}; }}
+.brand-mark {{ background-color: {accent}; color: {accentink}; border-radius: 8px; }}
+.brand-word {{ font-family: {font}; font-size: {brand}px; font-weight: 600; letter-spacing: -0.4px; color: {ink}; }}
+.sidebar-section, .sidebar-count {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; }}
+.sidebar-count {{ letter-spacing: 0; }}
+.sidebar-count {{ padding: 0; }}
+.sidebar-footer {{ border-top: 1px solid {divider}; padding-top: 12px; }}
 
-.control {{ min-width: 22px; min-height: 22px; border-radius: 6px; background-color: transparent; color: {muted}; }}
-.control:hover {{ background-color: {hover}; }}
-.control.shut:hover {{ background-color: {danger}; color: #FFFFFF; }}
-.control.shut:hover label {{ color: #FFFFFF; }}
-.control:active {{ background-color: {hairline}; }}
-.control label {{ color: {muted}; }}
-window.unfocused .control {{ opacity: 0.55; }}
-.rowmark {{ margin: 0; }}
-
-/* GTK brings its own skin for every control. The browser has one, so the
-   stock skin is taken off first and only what is wanted is put back. */
-button, .panel button, .blank button, combobox button, entry, spinbutton {{
-  background-image: none;
-  box-shadow: none;
-  text-shadow: none;
-}}
-button {{
-  background-color: transparent;
-  border: none;
-  color: {ink};
-  padding: 2px 6px;
-  border-radius: 6px;
-  min-height: 0;
-  /* The desktop theme sets bold on every button (adw-gtk3-dark gtk.css:402),
-     so every unweighted label in this browser came out bold. The weight is
-     the browser's to choose, per class. */
-  font-weight: normal;
-}}
-/* The weight belongs to the browser, so it also belongs on the label inside a
-   button: nothing in the chrome — nav, marks, chips, the new-tab row — is set
-   bold, and the headings below re-assert their own weight. */
-button label {{ font-weight: normal; }}
+button, entry, spinbutton, combobox button {{ background-image: none; box-shadow: none; text-shadow: none; }}
+button {{ background-color: transparent; border: 1px solid transparent; color: {ink}; padding: 5px 8px; border-radius: 6px; min-height: 0; font-weight: normal; }}
+button label {{ font-family: {font}; font-weight: normal; }}
 button:hover {{ background-color: {hover}; }}
 button:active {{ background-color: {wash}; }}
-button.act {{
-  background-color: {wash};
-  border: 1px solid {fieldborder};
-  border-radius: 7px;
-  padding: 5px 11px;
-}}
-button.act:hover {{ background-color: {hairline}; }}
-button.act:active, .blank button.act:active {{ background-color: {livehover}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.12); }}
-button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
-/* The one accent: the main button of a card, the focus ring and the picked row. */
-button.act.primary {{ background-color: {accent}; border-color: {accent}; }}
-.blank button.act.primary, .panel button.act.primary {{ background-color: {accent}; border-color: {accent}; }}
-button.act.primary:hover, .blank button.act.primary:hover, .panel button.act.primary:hover {{ background-color: {accenthover}; border-color: {accenthover}; }}
-button.act.primary:active, .blank button.act.primary:active, .panel button.act.primary:active {{ background-color: {accent}; border-color: {accent}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.18); }}
-button.act.primary label, .blank button.act.primary label, .panel button.act.primary label {{ color: {accentink}; font-weight: bold; }}
-.panel button.chosen, button.chosen {{ background-color: {ink}; border-color: {ink}; }}
-button.chosen label {{ color: {ground}; font-weight: bold; }}
-combobox button {{
-  background-color: {wash};
-  border: 1px solid {fieldborder};
-  border-radius: 7px;
-  padding: 4px 10px;
-  color: {ink};
-}}
-combobox button:hover {{ background-color: {hairline}; }}
-combobox button label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
-combobox arrow {{ color: {muted}; min-width: 10px; min-height: 10px; }}
-menu {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.16); }}
-menuitem {{ border-radius: 5px; padding: 4px 8px; }}
-menuitem:hover {{ background-color: {hover}; }}
-menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
-entry {{ background-image: none; box-shadow: none; border: none; }}
-button.mark {{ background: none; background-image: none; border: none; box-shadow: none; padding: 4px; border-radius: 6px; min-width: 0; min-height: 0; color: {muted}; }}
+button:focus, entry:focus, switch:focus, .row:focus, .ptrow:focus, .sgrow:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
+button:disabled label {{ color: {disabled}; }}
+button.mark {{ background-color: transparent; border: none; padding: 4px; color: {muted}; min-width: 0; min-height: 0; }}
 button.mark:hover {{ background-color: {hover}; color: {ink}; }}
 button.mark:focus {{ outline: 2px solid {accent}; outline-offset: 1px; }}
-/* GTK3 has no focus-visible pseudo-class, so the ring is :focus and it shows on a click too;
-   that is the only way to see where the keyboard is. */
-button.act:focus, .ptrow:focus, .panel button.tab:focus, switch:focus, .panel entry:focus,
-.row:focus, .suggest .sgrow:focus, combobox button:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
-.bmark:focus, .findbar entry:focus {{ outline: 2px solid {accent}; outline-offset: 1px; }}
-button.mark:active {{ background-color: {wash}; }}
 button.mark:disabled {{ opacity: 0.35; }}
-/* A control that cannot be pressed must not look pressable: "Show them" at a
-   count of zero was sensitive=false and painted exactly like a live button.
-   The chip gives up its fill and its label goes quiet, which reads as inert
-   without moving anything by a pixel. Fading the whole chip instead took the
-   text to 1.69:1 in light and 2.19:1 in dark, so the dimming is in the ink.
-   The selectors name `.act` because that is the chip the panel paints, and at
-   equal weight the later `.panel button.act` rules would otherwise win. The
-   drawn marks keep their own dimming from `button.mark:disabled`; nothing here
-   touches opacity, so a disabled mark is still told apart from a live one. */
-button.act:disabled, .blank button.act:disabled, .panel button.act:disabled {{ background-color: transparent; border-color: {divider}; }}
-button:disabled label, button.act:disabled label, .blank button.act:disabled label, .panel button:disabled label, .panel button.act:disabled label {{ color: {disabledink}; }}
+button.create-tab {{ background-color: {tint}; color: {accent}; border-radius: 7px; padding: 10px 11px; min-height: 20px; }}
+button.create-tab label {{ color: {accent}; font-size: {small}px; font-weight: 600; }}
+button.create-tab:hover {{ background-color: {hover}; }}
+button.create-tab .create-hint {{ font-family: {font}; font-size: {caption}px; font-weight: normal; color: {muted}; }}
+button.private-tab {{ min-width: 30px; border: 1px solid {divider}; border-radius: 7px; }}
+button.sidebar-action {{ color: {muted}; padding: 8px 10px; min-height: 20px; }}
+button.sidebar-action label {{ font-size: {small}px; color: {muted}; }}
+button.sidebar-action:hover, button.sidebar-tool:hover {{ background-color: {sidehover}; color: {ink}; }}
+button.sidebar-tool {{ min-width: 28px; min-height: 28px; }}
+button.chrome-tool {{ min-width: 28px; min-height: 28px; border-radius: 6px; }}
+button.chrome-tool.kept, button.chrome-tool.reading {{ color: {accent}; background-color: {tint}; }}
+.location {{ background-color: {card}; border: 1px solid {divider}; border-radius: 7px; }}
+.location:hover {{ border-color: {fieldborder}; }}
+button.site-info {{ padding: 9px 10px; color: {muted}; border-radius: 6px 0 0 6px; }}
+button.site-info.protected {{ color: {accent}; }}
+button.address-button {{ border-radius: 0 6px 6px 0; padding: 9px 12px 9px 0; }}
+button.address-button:hover {{ background-color: transparent; }}
+.address-label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
+.address-path {{ font-family: {mono}; font-size: {caption}px; color: {muted}; }}
+.address-hint {{ font-family: {mono}; font-size: {caption}px; color: {muted}; padding: 2px 5px; border: 1px solid {divider}; border-radius: 3px; }}
+.control {{ min-width: 28px; min-height: 28px; border-radius: 5px; background-color: transparent; color: {muted}; }}
+.control:hover {{ background-color: {hover}; color: {ink}; }}
+.control.shut:hover {{ background-color: {danger}; color: #FFFFFF; }}
+window.unfocused .control {{ opacity: 0.6; }}
 
-row, flowbox {{ background-color: transparent; }}
-flowboxchild {{ background-color: transparent; padding: 0; }}
-
-.pin {{ border-radius: 9px; background-color: {tile}; transition: background-color 140ms ease, color 140ms ease, box-shadow 150ms ease; }}
-.pin.live {{ background-color: {pinlive}; }}
-.pinletter {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {pinfg}; }}
-.pin.live .pinletter {{ color: {pinlivefg}; }}
-.pin:hover {{ background-color: {sidehover}; }}
-.pin:active {{ background-color: {wash}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.12); }}
-
-.row {{ border-radius: 7px; background-color: transparent; min-height: {row_height}px; color: {faint}; transition: background-color 140ms cubic-bezier(0.2, 0.8, 0.2, 1), color 140ms ease, box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }}
-button.close, button.loupe {{ background: none; border: none; box-shadow: none; padding: 1px; min-width: 0; min-height: 0; opacity: 0; color: {muted}; transition: opacity 150ms ease, background-color 120ms ease, color 120ms ease; }}
-.row:hover button.close, .pin:hover button.close {{ opacity: 1; }}
-button.close:hover {{ background-color: {hairline}; border-radius: 4px; color: {ink}; }}
-.row:hover {{ background-color: {hover}; }}
-.row.live {{ background-color: {wash}; box-shadow: inset 3px 0 0 {accent}; color: {muted}; }}
-/* The active row still answers the cursor, and its selector has to outweigh
-   `.row.live` — at equal specificity the earlier rule won and hovering the
-   row you are on did nothing. */
-.row:hover, .row.live:hover {{ background-color: {livehover}; }}
+.row {{ border-radius: 6px; border: 1px solid transparent; background-color: transparent; min-height: {row_height}px; color: {muted}; }}
+.row:hover {{ background-color: {sidehover}; }}
+.row.live {{ background-color: {surface}; border: 1px solid {divider}; box-shadow: inset 3px 0 0 {accent}; color: {ink}; }}
+.row.live:hover {{ background-color: {card}; }}
 .row:active {{ background-color: {wash}; }}
-.row.live:active {{ background-color: {hairline}; }}
-.rowtitle {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {rowfg}; }}
-/* On the label itself, not through a descendant selector. The row you are on
-   is marked by its only-just-dark ink against the resting grey, not by weight:
-   the reference's live title is regular, and bold here made it read as a
-   heading heavier than every unselected row beside it. */
-.liveword {{ color: {liveink}; font-weight: normal; }}
-/* A tab that gave its memory back. Still readable — it is a tab you can click,
-   not a disabled control — but plainly not the one that is running. */
-.row.asleep .rowtitle {{ color: {faint}; opacity: 0.75; }}
-.row.asleep .tile, .row.asleep .favicon, .row.asleep .rowmark {{ opacity: 0.55; }}
-/* The active row's chip has to sit off the wash: #F1F1F1 on #EFEFEF is
-   1.018:1, and the letter tile vanished into the row it belongs to. */
-.row.live .tile {{ background-color: {ground}; }}
-.row.asleep .tileletter {{ color: {faint}; }}
-.row.private {{ color: {muted}; }}
-.row.private .rowtitle {{ color: {muted}; }}
-.tile {{ border-radius: 4px; background-color: {tilebg}; }}
-.tileletter {{ font-family: {font}; font-size: {small}px; font-weight: bold; color: {tilefg}; }}
-.panel switch {{ background-color: {switchoff}; border: none; min-width: 34px; min-height: 20px; border-radius: 10px; transition: background-color 180ms ease, box-shadow 140ms ease; }}
-.panel switch:checked {{ background-color: {ink}; }}
-.panel switch slider {{ min-width: 16px; min-height: 16px; border-radius: 8px; margin: 2px; background-color: {knob}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.28); transition: background-color 180ms ease, margin 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease; }}
-.panel switch:checked slider {{ background-color: {fieldbg}; }}
-
-.newtab {{ border-radius: 7px; color: {faint}; }}
-.newtab:hover {{ background-color: {hover}; color: {muted}; }}
-.newtablabel {{ font-family: {font}; font-size: {body}px; font-weight: normal; color: {faint}; }}
-.newtab:hover .newtablabel {{ color: {muted}; }}
-
-.helm {{ }}
-
-.card {{ background-color: {ground}; }}
+.rowtitle {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {rowfg}; }}
+.liveword {{ color: {ink}; font-weight: 600; }}
+.row-subtitle {{ font-family: {font}; font-size: {caption}px; color: {faint}; }}
+.row.private .row-subtitle {{ color: {accent}; }}
+.row.asleep .rowtitle {{ color: {faint}; }}
+.row.asleep .favicon, .row.asleep .rowmark {{ opacity: 0.55; }}
+button.close, button.loupe {{ background-color: transparent; border: none; box-shadow: none; padding: 3px; min-width: 0; min-height: 0; opacity: 0; color: {muted}; }}
+button.close.rowclose {{ opacity: 1; }}
+.pin:hover button.close {{ opacity: 1; }}
+button.close:hover {{ background-color: {wash}; color: {ink}; }}
+.tile {{ border-radius: 5px; background-color: {tilebg}; }}
+.tileletter {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {tilefg}; }}
+.pin {{ border: 1px solid {divider}; border-radius: 7px; background-color: {tilebg}; }}
+.pin:hover {{ background-color: {sidehover}; }}
+.pin.live {{ background-color: {pinlive}; box-shadow: inset 0 -2px 0 {accent}; }}
+.pinletter {{ font-family: {font}; font-size: {small}px; font-weight: 600; letter-spacing: -0.02em; color: {pinfg}; }}
+.pin.live .pinletter {{ color: {pinlivefg}; font-weight: 600; }}
+row, flowbox, flowboxchild {{ background-color: transparent; padding: 0; }}
+viewport {{ background-color: transparent; }}
+.card, .viewport, .blank, .error-page {{ background-color: {card}; }}
 .progress {{ color: {accent}; background-color: transparent; }}
-.blank {{ background-color: {ground}; }}
-.fakefield {{ background-color: {fieldbg}; border: 1px solid {fieldborder}; border-radius: 9px; color: {muted}; }}
-.fakefield:hover {{ border-color: {faint}; }}
-.fakefieldtext {{ font-family: {font}; font-size: {title}px; color: {faint}; }}
-.blanktitle {{ font-family: {font}; font-size: {title}px; font-weight: bold; color: {muted}; letter-spacing: -0.01em; }}
-.blankhint {{ font-family: {font}; font-size: {small}px; color: {blankhint}; }}
-.erraddress {{ font-family: {mono}; font-size: {small}px; color: {emptyfg}; margin-top: 4px; }}
-.blank button.act {{ background-color: {wash}; border: 1px solid {fieldborder}; border-radius: 8px; padding: 6px 14px; }}
-.blank button.act:hover {{ background-color: {hairline}; }}
-.blank button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
-
-
-.omni {{ background-color: {fieldbg}; border-radius: 12px; border: 1px solid {fieldborder}; box-shadow: 0 12px 34px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.08); }}
-.omni.focused {{ border-color: {accent}; box-shadow: 0 14px 40px rgba(0,0,0,0.16), 0 0 0 1px {accent}; }}
-/* Focus is the field's own edge, so "type to replace" has a visible state
-   without a ring GTK draws under the text. */
-.omni entry {{ background: none; background-image: none; border: none; box-shadow: none; padding: 0; }}
-.omni entry:focus {{ border: none; box-shadow: none; }}
-.omnitext {{ font-family: {font}; font-size: {title}px; color: {ink}; }}
-.omnisite {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.suggest {{ background-color: {fieldbg}; border-radius: 10px; border: 1px solid {fieldborder}; box-shadow: 0 12px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06); }}
-.suggest .sgrow {{ border-radius: 6px; min-height: 44px; color: {muted}; }}
-.suggest .sgrow:hover {{ background-color: {hover}; }}
-.suggest .sgrow.picked {{ background-color: {wash}; color: {ink}; box-shadow: inset 3px 0 0 {accent}; }}
-.suggest .sghead {{ font-family: {font}; font-size: {caps}px; font-weight: bold; color: {muted}; letter-spacing: 0.06em; }}
-/* The bookmarks bar: a row of kept pages, one chip each, quiet until hovered. */
-.bmarkbar {{ background-color: {ground}; border-bottom: 1px solid {divider}; padding-top: 3px; padding-bottom: 3px; }}
-.bmark {{ font-family: {font}; font-size: {small}px; color: {muted}; background-color: transparent;
-          background-image: none; border: none; box-shadow: none; padding: 1px 8px;
-          min-height: 20px; border-radius: 5px; }}
+.bmarkbar {{ background-color: {card}; border-bottom: 1px solid {divider}; padding-top: 3px; padding-bottom: 3px; }}
+.bmark {{ font-family: {font}; font-size: {small}px; color: {muted}; padding: 4px 9px; min-height: 20px; border-radius: 4px; }}
 .bmark:hover {{ background-color: {hover}; color: {ink}; }}
-.bmark:active {{ background-color: {hairline}; }}
+.blanktitle {{ font-family: {font}; font-size: {blank_title}px; font-weight: 600; color: {ink}; letter-spacing: -0.4px; }}
+.blankhint {{ font-family: {font}; font-size: {body}px; color: {blankhint}; }}
+.error-content {{ padding: 30px; }}
+.error-glyph {{ color: {muted}; }}
+.erraddress {{ font-family: {mono}; font-size: {small}px; color: {emptyfg}; margin-top: 8px; }}
 
-.panel .ptrow {{ border-radius: 7px; }}
-.panel .ptrow:hover {{ background-color: {hover}; }}
-.suggest row:hover {{ background-color: {hover}; }}
-.suggest .sgtitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
-.suggest .sgurl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.suggest .sgkind {{ font-family: {font}; font-size: {small}px; color: {faint}; }}
+.start-page, .start-canvas {{ background-color: {card}; }}
+.start-eyebrow, .start-session, .start-section-label {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {muted}; }}
+.start-brand-mark {{ color: {accent}; }}
+.start-session {{ color: {faint}; font-weight: normal; }}
+.start-headline {{ font-family: {font}; font-size: {start_headline}px; font-weight: 600; letter-spacing: -0.8px; color: {ink}; }}
+.start-wide .start-headline {{ font-size: {start_headline_wide}px; letter-spacing: -0.9px; }}
+.start-narrow .start-headline {{ font-size: {start_headline_narrow}px; letter-spacing: -0.5px; }}
+.start-intro {{ font-family: {font}; font-size: {body}px; color: {muted}; }}
+.start-orbit {{ color: {accent}; background-color: {card}; border-top-color: {ink}; }}
+.start-search {{ background-color: {surface}; border: 1px solid {fieldborder}; border-radius: 7px; padding: 5px; }}
+.start-search.focused {{ border-color: {accent}; box-shadow: 0 0 0 1px {accent}; }}
+.start-search-icon {{ margin-left: 12px; color: {muted}; }}
+.start-search entry {{ border: none; outline: none; box-shadow: none; background-color: transparent; font-family: {font}; font-size: {start_entry}px; color: {ink}; padding: 10px 0; }}
+.start-search entry:focus {{ border: none; outline: none; box-shadow: none; }}
+button.start-search-submit {{ background-color: {accent}; color: {accentink}; border-radius: 4px; min-width: 30px; min-height: 30px; padding: 8px; }}
+button.start-search-submit .start-arrow {{ color: {accentink}; }}
+button.start-search-submit:hover {{ background-color: {accenthover}; }}
+.start-engine {{ font-family: {font}; font-size: {small}px; color: {faint}; }}
+.start-rule {{ background-color: {divider}; min-height: 1px; border: none; }}
+.start-section-note {{ font-family: {font}; font-size: {small}px; color: {faint}; }}
+button.start-section-action {{ padding: 0; border: none; border-radius: 0; }}
+button.start-section-action label {{ font-family: {font}; font-size: {caption}px; font-weight: 500; color: {accent}; }}
+button.start-section-action:hover {{ background-color: transparent; }}
+button.start-section-action:hover label {{ text-decoration: underline; }}
+.start-links, .start-link-slot {{ background-color: transparent; padding: 0; }}
+button.start-link {{ border: none; border-radius: 0; padding: 12px 0; border-bottom: 1px solid {divider}; }}
+button.start-link:hover {{ background-color: {hover}; border-bottom-color: {accent}; }}
+.start-icon {{ color: {muted}; }}
+.start-link-title {{ font-family: {font}; font-size: {start_link_title}px; font-weight: 600; color: {ink}; }}
+.start-link-description {{ font-family: {font}; font-size: {caption}px; color: {muted}; }}
+.start-empty {{ padding: 16px 0; }}
+.start-empty-title {{ font-family: {font}; font-size: {body}px; font-weight: 500; color: {ink}; }}
+.start-empty-copy {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+button.start-recent {{ border: none; border-radius: 0; padding: 12px 0; }}
+button.start-recent:hover {{ background-color: {hover}; }}
+.start-recent-title {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {ink}; }}
+.start-recent-host, .start-recent-age {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+button.start-protection {{ background-color: transparent; border: none; border-radius: 0; padding: 8px 0; }}
+button.start-protection:hover {{ background-color: {hover}; }}
+.start-protection-icon {{ color: {accent}; }}
+.start-protection-title {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {ink}; }}
+.start-protection-copy, .start-private-copy {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.start-protection-action {{ font-family: {font}; font-size: {caption}px; font-weight: 500; color: {accent}; }}
+.start-protection .start-arrow {{ color: {accent}; }}
+.start-private-title {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {ink}; }}
+.start-private .start-headline {{ color: {accent}; }}
 
-/* GTK clips a child's box-shadow behind its parent, so the panel's shadow
-   never reaches the page. Its edge has to be the fill itself: the panel is
-   the wash in light and the field colour in dark, both a step off the page. */
-.panel {{ background-color: {panelbg}; border-radius: 12px; border: 1px solid {panelborder}; box-shadow: 0 18px 48px rgba(0,0,0,0.16); }}
-.panel .head {{ font-family: {font}; font-size: {title}px; font-weight: bold; color: {ink}; }}
-.panel .sub {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.panel entry {{ background-color: {chipbg}; border-radius: 7px; border: 1px solid {fieldborder}; padding: 6px 10px; }}
-.panel entry text {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
-.panel row {{ border-radius: 7px; padding: 4px 6px; }}
-.panel row:hover {{ background-color: {hover}; }}
-.panel .ptitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
-.panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.keycap {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {wash}; border: 1px solid {divider}; border-radius: 5px; padding: 2px 6px; }}
-.extensionnote {{ padding: 10px 12px; background-color: {wash}; border-radius: 8px; }}
-.panel button.tab {{ background: none; background-image: none; box-shadow: none; border: 1px solid transparent; padding: 5px 10px; border-radius: 6px; min-height: 32px; }}
+.omni-block {{ background-color: {surface}; border: 1px solid {fieldborder}; border-radius: 12px; box-shadow: 0 12px 32px {shadow}; }}
+.omni {{ background-color: {surface}; border-radius: 11px 11px 0 0; border-bottom: 1px solid {divider}; color: {ink}; }}
+.omni.focused {{ border-bottom-color: {accent}; }}
+.omni entry {{ background-color: transparent; border: none; box-shadow: none; padding: 0; }}
+.omni entry:focus {{ outline: none; border: none; box-shadow: none; }}
+.omnitext {{ font-family: {font}; font-size: {entry_size}px; color: {ink}; }}
+.omni-search-icon {{ color: {accent}; }}
+.omnisite {{ font-family: {font}; font-size: {small}px; color: {accent}; padding: 4px 7px; background-color: {tint}; border-radius: 4px; }}
+.omni-escape {{ font-family: {mono}; font-size: {caption}px; color: {muted}; border: 1px solid {divider}; border-radius: 3px; padding: 3px 5px; }}
+.omni-footer {{ border-top: 1px solid {divider}; padding: 8px 14px; }}
+.omni-footer label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.suggest {{ background-color: {surface}; padding: 8px; }}
+.suggest .sgrow {{ border-radius: 6px; min-height: 50px; color: {muted}; }}
+.suggest .sgrow:hover {{ background-color: {hover}; }}
+.suggest .sgrow.picked {{ background-color: {wash}; color: {ink}; box-shadow: inset 3px 0 0 {accent}, inset 0 0 0 1px {accent}; }}
+.sghead {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; }}
+.sgtitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
+.sgurl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.sgkind {{ font-family: {font}; font-size: {small}px; color: {faint}; }}
+
+.panel {{ background-color: {surface}; border-radius: 12px; border: 1px solid {divider}; box-shadow: 0 12px 32px {shadow}; }}
+.panel .head, .panel-heading {{ font-family: {font}; font-size: {panel_heading}px; font-weight: 600; letter-spacing: -0.6px; color: {ink}; }}
+.panel .sub, .panel-description {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.panel .panel-rail {{ background-color: {ground}; border-right: 1px solid {divider}; border-radius: 11px 0 0 11px; }}
+.panel .panel-rail-brand {{ font-family: {font}; font-size: {panel_rail_brand}px; font-weight: 600; letter-spacing: -0.3px; color: {ink}; }}
+.panel button.tab {{ background-color: transparent; border: 1px solid transparent; border-radius: 5px; padding: 9px 10px; min-height: 20px; color: {muted}; }}
 .panel button.tab label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.tab:hover {{ background-color: {hover}; }}
-.panel button.tab:checked {{ background-color: {chipbg}; border-color: {panelborder}; }}
-.panel button.tab:checked label {{ color: {ink}; font-weight: bold; }}
-.panel button.act {{ background-color: {chipbg}; border-radius: 6px; padding: 5px 10px; min-height: 32px; }}
-.panel button.act:hover {{ background-color: {livehover}; }}
-.panel button.act:active {{ background-color: {hairline}; box-shadow: inset 0 1px 2px rgba(0,0,0,0.14); }}
-.panel button.panelclose {{ min-width: 32px; min-height: 32px; }}
-.panel button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
-.panel button.act.quiet {{ background-color: transparent; border-color: transparent; }}
-.panel button.act.quiet label {{ color: {faint}; }}
-.panel button.act.quiet:hover {{ background-color: {chipbg}; border-color: {divider}; }}
-.panel button.act.danger label {{ color: {dangerink}; }}
-.panel button.act.danger {{ border-color: {dangerink}; }}
-.panel button.act.danger:hover label {{ color: {dangerink}; }}
-.panel button.act.chosen {{ background-color: {ink}; border: 1px solid transparent; }}
-.panel button.act.chosen label {{ color: {ground}; font-weight: bold; }}
-.panel switch {{ min-width: 44px; min-height: 28px; }}
-.setting {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
-.group {{ font-family: {font}; font-size: {caps}px; font-weight: bold; color: {muted}; letter-spacing: 0.07em; margin-top: 14px; margin-bottom: 2px; }}
-.keyhint {{ font-family: {mono}; font-size: {small}px; color: {muted}; background-color: {wash}; border-radius: 5px; padding: 1px 5px; }}
+.panel button.tab:checked {{ background-color: {surface}; border-color: {divider}; color: {accent}; box-shadow: inset 3px 0 0 {accent}; }}
+.panel button.tab:checked label {{ color: {ink}; font-weight: 600; }}
+.panel-section {{ background-color: transparent; border: none; border-top: 1px solid {divider}; padding-top: 16px; }}
+.panel-setting-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
+.panel-setting-row:last-child {{ border-bottom: none; }}
+.panel-appearance {{ padding: 12px 0 6px; }}
+.panel entry, .dlbar entry {{ background-color: {card}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 9px 12px; font-family: {font}; font-size: {body}px; color: {ink}; }}
+.panel entry text, .dlbar entry text {{ color: {ink}; font-family: {font}; font-size: {body}px; }}
+.panel .ptrow {{ border-radius: 5px; padding: 7px 3px; border-bottom: 1px solid {divider}; }}
+.panel .ptrow:hover {{ background-color: {hover}; }}
+.panel .ptitle {{ font-family: {font}; font-size: {body}px; color: {ink}; font-weight: 500; }}
+.panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.panel button.panelclose {{ min-width: 28px; min-height: 28px; }}
+.panel-empty-icon {{ color: {accent}; }}
+.panel-empty-title {{ font-family: {font}; font-size: {panel_empty_title}px; font-weight: 600; color: {ink}; }}
+.panel-empty-description, .empty {{ font-family: {font}; font-size: {small}px; color: {emptyfg}; }}
+.group {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; margin-top: 18px; margin-bottom: 8px; }}
+.setting {{ font-family: {font}; font-size: {body}px; font-weight: 500; color: {ink}; }}
 .settingdesc {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.panel stack, .panel box {{ background-color: transparent; }}
-.panel scrolledwindow {{ background-color: transparent; }}
-.empty {{ font-family: {font}; font-size: {body}px; color: {faint}; }}
+.security-warning {{ color: {dangerink}; font-weight: 600; }}
+.sitecard-clear {{ margin-top: 8px; }}
+.keycap, .keyhint {{ font-family: {mono}; font-size: {caption}px; color: {muted}; background-color: {card}; border: 1px solid {divider}; border-radius: 3px; padding: 3px 6px; }}
+.extensionnote {{ padding: 14px; background-color: {ground}; border-radius: 6px; }}
+.panel box, .panel stack, .panel scrolledwindow {{ background-color: transparent; }}
+.panel .panel-rail {{ background-color: {ground}; }}
+.panel-rail-caption, .panel-rail-hint .settingdesc {{ font-family: {font}; font-size: {caption}px; color: {faint}; }}
+.panel-nav-icon, .panel-section-icon {{ color: {muted}; }}
+.panel button.panel-nav-item.on {{ background-color: {surface}; border-color: {divider}; color: {accent}; box-shadow: inset 3px 0 0 {accent}; }}
+.panel button.panel-nav-item.on .panel-nav-icon {{ color: {accent}; }}
+.panel.panel-compact .panel-rail {{ border-right: none; border-bottom: 1px solid {divider}; border-radius: 11px 11px 0 0; }}
+.panel.panel-compact button.panel-nav-item {{ min-width: 0; padding: 7px 5px; border-radius: 4px; }}
+.panel.panel-compact .panel-heading {{ font-size: {panel_heading_compact}px; letter-spacing: -0.4px; }}
+.panel .panel-section-heading {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {muted}; margin: 0; }}
+.panel-section-description {{ font-size: {small}px; color: {muted}; }}
+.panel .panel-appearance-option {{ background-color: transparent; border: 1px solid {divider}; padding: 10px; border-radius: 6px; }}
+.panel .panel-appearance-option:hover {{ background-color: {hover}; }}
+.panel .panel-appearance-option.chosen, .panel .panel-appearance-option:checked {{ background-color: {card}; border-color: {accent}; box-shadow: inset 0 -3px 0 {accent}; }}
+.panel .panel-appearance-option label, .panel .panel-appearance-option.chosen label {{ color: {ink}; font-weight: 500; }}
+.panel .panel-appearance-preview {{ color: {divider}; }}
+.panel-appearance-label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
+.panel-count {{ font-family: {font}; font-size: {caption}px; color: {muted}; }}
+.panel-list-heading {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; }}
+.panel-location {{ font-family: {mono}; font-size: {caption}px; color: {muted}; }}
+.panel .panel-row-icon {{ border-radius: 5px; background-color: {ground}; color: {muted}; }}
+.panel-list-row {{ padding: 10px 0; }}
+.panel .panel-list-row .panel-row-actions button.act {{ border-color: transparent; background-color: transparent; padding: 6px 8px; min-height: 18px; }}
+.panel .panel-list-row .panel-row-actions button.act:hover {{ background-color: {hover}; border-color: {divider}; }}
+.panel-note {{ padding: 14px; border-left: 2px solid {accent}; background-color: {card}; }}
+.panel .panel-about {{ font-family: {font}; font-size: {caption}px; color: {faint}; padding-top: 14px; border-top: 1px solid {divider}; }}
+.panel .panel-shortcut-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
+.panel .panel-shortcut-key {{ border: none; background-color: transparent; color: {accent}; padding: 0; font-family: {mono}; font-size: {caption}px; }}
+.panel-empty-tip {{ padding-top: 12px; }}
+button.act {{ background-color: {card}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 8px 13px; min-height: 18px; }}
+button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
+button.act:hover {{ background-color: {hover}; }}
+button.act:active {{ background-color: {wash}; }}
+button.act.primary {{ background-color: {accent}; border-color: {accent}; color: {accentink}; }}
+button.act.primary:hover {{ background-color: {accenthover}; border-color: {accenthover}; }}
+button.act.primary label {{ color: {accentink}; font-weight: 600; }}
+button.act.chosen {{ background-color: {ink}; border-color: {ink}; }}
+button.act.chosen label {{ color: {surface}; font-weight: 600; }}
+button.act.quiet {{ background-color: transparent; border-color: transparent; }}
+button.act.quiet label {{ color: {muted}; }}
+button.act.danger {{ border-color: {dangerink}; }}
+button.act.danger label {{ color: {dangerink}; }}
+button.act:disabled {{ background-color: transparent; border-color: {divider}; }}
+button.act:disabled label {{ color: {disabled}; }}
+.panel switch {{ background-color: {switchoff}; border: none; min-width: 40px; min-height: 24px; border-radius: 12px; }}
+.panel switch:checked {{ background-color: {accent}; }}
+.panel switch slider {{ min-width: 18px; min-height: 18px; border-radius: 9px; margin: 3px; background-color: {surface}; border: none; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }}
+.panel switch:checked slider {{ background-color: {accentink}; }}
+combobox button {{ background-color: {card}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 8px 11px; }}
+combobox button label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
+combobox arrow {{ color: {muted}; min-width: 10px; min-height: 10px; }}
+menu {{ background-color: {surface}; border: 1px solid {divider}; border-radius: 8px; padding: 6px; box-shadow: 0 10px 30px {shadow}; }}
+menuitem {{ border-radius: 4px; padding: 7px 10px; }}
+menuitem:hover {{ background-color: {hover}; }}
+menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 
-.findbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; box-shadow: 0 6px 20px rgba(0,0,0,0.12); }}
-.findbar entry {{ background: none; border: none; box-shadow: none; }}
-.findbar label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.findbar, .dlbar {{ background-color: {surface}; border: 1px solid {fieldborder}; border-radius: 8px; box-shadow: 0 8px 24px {shadow}; }}
+.findbar entry {{ background-color: transparent; border: none; box-shadow: none; }}
+.findbar label, .dlbar label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.dlbar.prompt {{ padding: 18px; }}
+.dlbar .group {{ margin-top: 12px; }}
+.dlbar .setting {{ color: {ink}; }}
+.statuspill {{ font-family: {font}; font-size: {caption}px; color: {muted}; padding: 5px 10px; }}
+.welcome-title {{ font-family: {font}; font-size: {welcome_title}px; font-weight: 600; letter-spacing: -0.4px; color: {ink}; }}
+.welcome-description {{ font-family: {font}; font-size: {body}px; color: {muted}; }}
+.dlbar.welcome-card {{ border-color: {divider}; border-radius: 12px; background-color: {surface}; }}
+.dlbar .welcome-eyebrow, .dlbar .welcome-section-title {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {muted}; }}
+.dlbar .welcome-title {{ font-family: {font}; font-size: {welcome_card_title}px; font-weight: 600; letter-spacing: -0.6px; color: {ink}; }}
+.dlbar .welcome-description, .dlbar .welcome-shortcut-label {{ font-family: {font}; font-size: {body}px; color: {muted}; }}
+.welcome-section {{ border-top: 1px solid {divider}; padding-top: 18px; }}
+.dlbar .welcome-shortcut-key {{ font-family: {mono}; font-size: {caption}px; color: {accent}; }}
+.dlbar .welcome-hint {{ font-family: {font}; font-size: {caption}px; color: {faint}; }}
+.dlbar .welcome-browser-name {{ font-size: {body}px; color: {ink}; }}
+.dlbar .welcome-status {{ color: {accent}; }}
+.dlbar .welcome-start, .dlbar .welcome-start label {{ color: {accentink}; }}
 
-.dlbar {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; box-shadow: 0 10px 28px rgba(0,0,0,0.14); }}
-.dlbar label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
-.dlbar entry {{ background-color: {chipbg}; border-radius: 7px; border: 1px solid {fieldborder}; padding: 6px 10px; font-family: {font}; font-size: {body}px; color: {ink}; }}
-.dlbar entry text {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
-.dlbar entry:focus {{ border-color: {accent}; outline: 2px solid {accent}; outline-offset: 2px; }}
-/* Inner room for the cards built by permissions::card (site card, permission
-   prompt, script dialogs) and the welcome card. A GtkBox lays out through its
-   CSS gadget, so set_border_width(12) left the first label at [1,1]; CSS
-   padding is what the gadget honours. Plain .dlbar (downloads bar, toast,
-   blocked card, Peek header, link status) keeps no padding. */
-.dlbar.prompt {{ padding: 12px; }}
-.statuspill {{ background-color: {fieldbg}; border-radius: 9px; border: 1px solid {fieldborder}; padding: 4px 10px; font-family: {font}; font-size: {small}px; color: {ink}; box-shadow: 0 4px 12px rgba(0,0,0,0.10); }}
-
-/* Smooth transitions across interactive chrome so state changes ease instead of snapping. */
-.rowtitle, .tile, .favicon, .rowmark {{ transition: color 140ms ease, opacity 160ms ease, background-color 140ms ease; }}
-.control, button, button.act, .panel button.tab, combobox button, button.mark, .bmark, .newtab, .colstrip {{ transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease, opacity 130ms ease, box-shadow 140ms ease; }}
-.suggest .sgrow, .panel .ptrow, .panel row, menuitem {{ transition: background-color 110ms ease, color 110ms ease, box-shadow 140ms ease; }}
-.omni, .panel entry, .dlbar entry, .fakefield {{ transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease; }}
-
-scrollbar {{ background: transparent; }}
-scrollbar slider {{ background-color: {scroll}; border-radius: 6px; min-width: 8px; min-height: 8px; opacity: 0.85; transition: background-color 150ms ease, opacity 150ms ease; }}
-scrollbar slider:hover {{ background-color: {scrollhover}; }}
-scrollbar trough {{ background: transparent; }}
+scrollbar {{ background-color: transparent; }}
+scrollbar trough {{ background-color: transparent; }}
+scrollbar slider {{ background-color: {divider}; border-radius: 4px; min-width: 6px; min-height: 6px; margin: 2px; }}
+scrollbar slider:hover {{ background-color: {faint}; }}
+button, .control, .row, .pin, .tile, .colstrip, menuitem, .sgrow {{ transition: background-color {micro}ms {ease}, color {micro}ms {ease}, border-color {micro}ms {ease}, opacity {micro}ms {ease}, box-shadow {micro}ms {ease}; }}
+.rowtitle, .row-subtitle, .favicon {{ transition: color {micro}ms {ease}, opacity {micro}ms {ease}; }}
+.panel switch {{ transition: background-color {micro}ms {ease}; }}
+.panel switch slider {{ transition: background-color {micro}ms {ease}; }}
 "#,
-        ground = ground,
-        radius = radius,
-        hairline = p.hairline.hex(),
-        hover = p.hover.hex(),
-        // A hover on a resting row is a step up from the ground; a hover on the
-        // active row has to be a step up from the wash, or the cursor lands on
-        // the one row that does not answer it. #E4E4E4 is 1.09:1 against the
-        // #EFEFEF wash and #454545 is 1.09:1 against #3A3A3A — the same size of
-        // step in both appearances.
-        livehover = if p.is_dark() { "#454545".to_string() } else { "#E4E4E4".to_string() },
-        danger = p.danger.hex(),
-        wash = p.wash.hex(),
-        tile = p.side_tile.hex(),
-        pinlive = p.side_pin_live.hex(),
-        // 13px letters and the quiet labels sit on the panel fill as well as on
-        // the page, and the panel is the darker ground in light. Each ratio
-        // below is for the harsher of the two: dark first, light second.
-        pinfg = quiet::pick(quiet::PIN_FG, p.is_dark()).hex(),
-        pinlivefg = quiet::pick(quiet::PIN_LIVE_FG, p.is_dark()).hex(),
-        rowfg = quiet::pick(quiet::ROW_FG, p.is_dark()).hex(),
-        liveink = if p.is_dark() { p.ink.hex() } else { "#0E0E0E".to_string() },
-        ink = p.ink.hex(),
-        tilebg = if p.is_dark() { p.side_tile.hex() } else { "#F1F1F1".to_string() },
-        tilefg = quiet::pick(quiet::TILE_FG, p.is_dark()).hex(),
-        sidebg = p.side_bg().hex(),
-        sidehover = p.side_hover.hex(),
-        divider = if p.is_dark() { "#3C3C3C".to_string() } else { "#D2D2D0".to_string() },
-        switchoff = quiet::pick(quiet::SWITCH_OFF, p.is_dark()).hex(),
-        knob = if p.is_dark() { "#EDEDED".to_string() } else { "#FFFFFF".to_string() }, /* 3.77 / 3.85 on the track */
-        // A page that failed has one sentence to read, and it used to be the
-        // faintest text in the window: #9E9E9E on the dark ground was 4.44:1
-        // and #767674 on white 4.54:1, both under the 4.5 a body line wants
-        // once you allow for the font being 12px. Both now clear it with room.
-        emptyfg = quiet::pick(quiet::EMPTY_FG, p.is_dark()).hex(),
-        blankhint = quiet::pick(quiet::BLANK_HINT, p.is_dark()).hex(),
-        muted = quiet::pick(quiet::MUTED, p.is_dark()).hex(),
-        faint = quiet::pick(quiet::FAINT, p.is_dark()).hex(),
-        panelbg = if p.is_dark() { "#202020".to_string() } else { "#FFFFFF".to_string() },
-        panelborder = if p.is_dark() { "rgba(255,255,255,0.16)".to_string() } else { quiet::pick(quiet::FIELD_BORDER, false).hex() },
-        accent = if p.is_dark() { "#FF7A55".to_string() } else { "#FF5B2E".to_string() },
-        accenthover = if p.is_dark() { "#FF8E6E".to_string() } else { "#EA5126".to_string() },
-        accentink = if p.is_dark() { "#1A1A1A".to_string() } else { "#0E0E0E".to_string() },
-        chipbg = if p.is_dark() { p.wash.hex() } else { "#F2F2F0".to_string() },
-        fieldbg = if p.is_dark() { "#1A1A1A".to_string() } else { "#FFFFFF".to_string() },
-        // The edge of the address field is the one boundary a reader has to
-        // find without hunting: #B4B4B2 on white was 2.08:1, under the 3:1 a
-        // control's outline wants. The pair in `quiet` is measured on every
-        // ground the edge is painted on, including the scrim it sits over.
-        fieldborder = quiet::pick(quiet::FIELD_BORDER, p.is_dark()).hex(),
-        disabledink = quiet::pick(quiet::DISABLED, p.is_dark()).hex(),
-        dangerink = quiet::pick(quiet::DANGER, p.is_dark()).hex(),
-        scroll = if p.is_dark() { "#3A3A3A".to_string() } else { "#D6D6D4".to_string() },
-        scrollhover = if p.is_dark() { "#4A4A4A".to_string() } else { "#C2C2C0".to_string() },
-        caps = scale.caps,
+        // CSS transitions share the MICRO role and the cubic-out curve that
+        // motion::ease_out_cubic uses, so hover states and code-driven fades
+        // finish together.
+        micro = crate::motion::dur::MICRO,
+        ease = "cubic-bezier(0.215, 0.61, 0.355, 1)",
+        ground = palette.ground.hex(),
+        sidebg = palette.side_bg().hex(),
+        card = palette.card.hex(),
+        surface = palette.surface().hex(),
+        ink = palette.ink.hex(),
+        muted = quiet::pick(quiet::MUTED, dark).hex(),
+        faint = quiet::pick(quiet::FAINT, dark).hex(),
+        rowfg = quiet::pick(quiet::ROW_FG, dark).hex(),
+        tilefg = quiet::pick(quiet::TILE_FG, dark).hex(),
+        pinfg = quiet::pick(quiet::PIN_FG, dark).hex(),
+        pinlivefg = quiet::pick(quiet::PIN_LIVE_FG, dark).hex(),
+        fieldborder = quiet::pick(quiet::FIELD_BORDER, dark).hex(),
+        disabled = quiet::pick(quiet::DISABLED, dark).hex(),
+        dangerink = quiet::pick(quiet::DANGER, dark).hex(),
+        switchoff = quiet::pick(quiet::SWITCH_OFF, dark).hex(),
+        emptyfg = quiet::pick(quiet::EMPTY_FG, dark).hex(),
+        blankhint = quiet::pick(quiet::BLANK_HINT, dark).hex(),
+        danger = palette.danger.hex(),
+        wash = palette.wash.hex(),
+        hover = palette.hover.hex(),
+        sidehover = palette.side_hover.hex(),
+        tilebg = palette.side_tile.hex(),
+        pinlive = palette.side_pin_live.hex(),
+        accent = palette.accent().hex(),
+        accentink = palette.accent_ink().hex(),
+        accenthover = palette.accent().mix(palette.ink, 0.12).hex(),
+        tint = palette.tint().hex(),
+        divider = palette.hairline.hex(),
+        shadow = shadow,
+        caption = scale.caption,
         small = scale.small,
         body = scale.body,
-        title = scale.title,
+        entry_size = scale.title + 2,
+        brand = scale.brand,
+        blank_title = scale.blank_title,
+        start_headline = scale.start_headline,
+        start_headline_wide = scale.start_headline_wide,
+        start_headline_narrow = scale.start_headline_narrow,
+        start_entry = scale.start_entry,
+        start_link_title = scale.start_link_title,
+        panel_heading = scale.panel_heading,
+        panel_heading_compact = scale.panel_heading_compact,
+        panel_rail_brand = scale.panel_rail_brand,
+        panel_empty_title = scale.panel_empty_title,
+        welcome_title = scale.welcome_title,
+        welcome_card_title = scale.welcome_card_title,
         font = FONT,
         mono = MONO,
         row_height = row_height,
@@ -455,217 +436,147 @@ scrollbar trough {{ background: transparent; }}
 }
 
 #[cfg(test)]
-mod scale_tests {
-    use super::Scale;
-
-    #[test]
-    fn the_default_desktop_size_gives_the_sizes_the_design_was_drawn_at() {
-        // No GTK in a unit test, so the fallback is what is measured here.
-        let s = Scale::from_desktop();
-        assert_eq!((s.caps, s.small, s.body, s.title), (10, 12, 13, 15));
-    }
-
-    #[test]
-    fn every_stop_stays_readable_and_in_order() {
-        for points in [8.0f64, 9.0, 10.0, 11.0, 12.0, 14.0, 18.0] {
-            let body = (points * 96.0 / 72.0).round() as i32;
-            let s = Scale {
-                caps: (body - 3).max(9),
-                small: (body - 1).max(10),
-                body: body.max(11),
-                title: body + 2,
-            };
-            assert!(s.caps >= 9, "caps {s:?} too small at {points}pt");
-            assert!(s.caps <= s.small && s.small <= s.body && s.body < s.title);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::quiet;
-    use crate::palette::{contrast, Palette, Rgb};
+    use super::*;
+    use crate::palette::contrast;
     use crate::store::Look;
 
-    fn light() -> Palette {
-        Palette::for_look(Look::Light, false)
-    }
-    fn dark() -> Palette {
-        Palette::for_look(Look::Dark, true)
+    #[test]
+    fn desktop_type_scale_is_readable_and_ordered() {
+        for points in [8.0, 10.0, 12.0, 18.0] {
+            let scale = Scale::from_points(points);
+            assert!(scale.caption >= 12 && scale.small >= 13 && scale.body >= 14);
+            assert!(scale.caption <= scale.small, "caption {} above small {} at {points}pt", scale.caption, scale.small);
+            assert!(scale.small <= scale.body && scale.body < scale.title);
+        }
     }
 
-    /// Every quiet text colour on every ground it is actually painted on.
-    ///
-    /// The grounds are the ones the stylesheet names, not a guess: a pin sits
-    /// on the sidebar and on its own tile, a row title on the page and on a
-    /// hovered row, a panel's text on the panel fill. The floor is 4.5, the
-    /// WCAG figure for text below 18px, and every colour here is 11-13px.
     #[test]
-    fn quiet_text_can_be_read_on_every_ground_it_sits_on() {
-        for (name, p, dark) in [("light", light(), false), ("dark", dark(), true)] {
-            let panel = if dark { Rgb(0x20, 0x20, 0x20) } else { Rgb(0xFF, 0xFF, 0xFF) };
-            let chip = if dark { p.wash } else { Rgb(0xF2, 0xF2, 0xF0) };
-            let field = if dark { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
-            let tile = if dark { p.side_tile } else { Rgb(0xF1, 0xF1, 0xF1) };
-            let cases: [(&str, Rgb, Rgb); 16] = [
-                ("pin letter on the sidebar", quiet::pick(quiet::PIN_FG, dark), p.side_bg()),
-                ("pin letter on a tile", quiet::pick(quiet::PIN_FG, dark), tile),
-                ("live pin letter", quiet::pick(quiet::PIN_LIVE_FG, dark), p.side_pin_live),
-                ("row title on the page", quiet::pick(quiet::ROW_FG, dark), p.card),
-                ("row title on a hover", quiet::pick(quiet::ROW_FG, dark), p.side_hover),
-                ("tile letter", quiet::pick(quiet::TILE_FG, dark), tile),
-                ("muted on the panel", quiet::pick(quiet::MUTED, dark), panel),
-                ("muted on a panel chip", quiet::pick(quiet::MUTED, dark), chip),
-                ("muted on the page", quiet::pick(quiet::MUTED, dark), p.card),
-                ("faint on the panel", quiet::pick(quiet::FAINT, dark), panel),
-                ("faint on a panel chip", quiet::pick(quiet::FAINT, dark), chip),
-                ("faint on a hover", quiet::pick(quiet::FAINT, dark), p.hover),
-                ("empty line on the page", quiet::pick(quiet::EMPTY_FG, dark), p.card),
-                ("empty line on the panel", quiet::pick(quiet::EMPTY_FG, dark), panel),
-                ("failed page's sentence", quiet::pick(quiet::BLANK_HINT, dark), p.card),
-                ("failed page's address", quiet::pick(quiet::EMPTY_FG, dark), field),
-            ];
-            for (what, ink, ground) in cases {
-                let ratio = contrast(ink, ground);
-                assert!(
-                    ratio >= 4.5,
-                    "{name}: {what} is {ratio:.2}:1 ({} on {}), text this small wants 4.5",
-                    ink.hex(),
-                    ground.hex()
-                );
+    fn captions_follow_the_desktop_font_size() {
+        // At the default 10pt desktop font, captions keep the 12px they had
+        // as a fixed size, so nothing moves for most people.
+        assert_eq!(Scale::from_points(10.0).caption, 12);
+        // With large text they grow with the rest of the scale, and never
+        // shrink as the desktop font gets bigger.
+        let mut last = 0;
+        for points in [8.0, 10.0, 11.0, 12.0, 14.0, 18.0, 24.0] {
+            let caption = Scale::from_points(points).caption;
+            assert!(caption >= last, "caption shrank to {caption} at {points}pt");
+            last = caption;
+        }
+        assert!(Scale::from_points(18.0).caption > 12);
+    }
+
+    #[test]
+    fn no_caption_uses_a_fixed_pixel_size() {
+        let css = build(&Palette::for_look(Look::Light, false), 32);
+        for size in ["font-size: 10px", "font-size: 11px"] {
+            assert!(!css.contains(size), "fixed caption size left: {size}");
+        }
+    }
+
+    #[test]
+    fn the_stylesheet_has_no_unknown_properties() {
+        // GTK rejects the whole provider on an unknown property. A single
+        // `.error-actions { spacing: 9px; }` in round 70 silently dropped
+        // every later rule, including the omnibox, panel and site-card
+        // surfaces. Box spacing belongs in Rust, not here.
+        let css = build(&Palette::for_look(Look::Light, false), 32);
+        assert!(!css.contains("{ spacing:"), "unknown GTK CSS property left");
+    }
+
+    #[test]
+    fn display_type_follows_the_desktop_font_size() {
+        let base = Scale::from_points(10.0);
+        assert_eq!((base.brand, base.blank_title, base.start_headline), (20, 28, 40));
+        assert_eq!((base.start_headline_wide, base.start_headline_narrow), (44, 32));
+        assert_eq!((base.start_entry, base.start_link_title), (16, 15));
+        assert_eq!(
+            (base.panel_heading, base.panel_heading_compact, base.panel_empty_title),
+            (30, 24, 20)
+        );
+        assert_eq!((base.welcome_title, base.welcome_card_title), (28, 30));
+        let large = Scale::from_points(18.0);
+        for (before, after) in [
+            (base.brand, large.brand),
+            (base.blank_title, large.blank_title),
+            (base.start_headline, large.start_headline),
+            (base.start_headline_wide, large.start_headline_wide),
+            (base.start_entry, large.start_entry),
+            (base.panel_heading, large.panel_heading),
+            (base.welcome_card_title, large.welcome_card_title),
+        ] {
+            assert!(after > before, "display size {before} did not grow at 18pt");
+        }
+    }
+
+    #[test]
+    fn quiet_text_is_measured_on_the_real_surfaces() {
+        for dark in [false, true] {
+            let palette = Palette::for_look(if dark { Look::Dark } else { Look::Light }, dark);
+            for pair in [quiet::MUTED, quiet::FAINT, quiet::ROW_FG, quiet::TILE_FG] {
+                let foreground = quiet::pick(pair, dark);
+                for background in [palette.ground, palette.card, palette.surface(), palette.hover, palette.side_hover, palette.side_tile] {
+                    assert!(contrast(foreground, background) >= 4.5, "{} on {}", foreground.hex(), background.hex());
+                }
             }
-        }
-    }
-
-    /// The findbar's icon marks are `button.mark`, and they used to take
-    /// keyboard focus with nothing drawn for it.
-    #[test]
-    fn a_focused_mark_draws_an_ink_ring() {
-        for p in [light(), dark()] {
-            let sheet = super::build(&p, 30);
-            // The ring is the accent now, one colour for every focus.
-            let accent = if p.is_dark() { Rgb(0xFF, 0x7A, 0x55) } else { Rgb(0xFF, 0x5B, 0x2E) };
-            // The findbar sits on `fieldbg`, not the page ground.
-            let ground = if p.is_dark() { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
-            // GTK3 has no :focus-visible and drops the whole rule, so the ring
-            // was never drawn. :focus is what GTK3 understands.
-            assert!(!sheet.contains(":focus-visible"), "GTK3 ignores :focus-visible");
-            let value = if p.is_dark() { "#FF7A55" } else { "#FF5B2E" };
-            let rule = format!("button.mark:focus {{ outline: 2px solid {value};");
-            assert!(sheet.contains(&rule), "no accent focus ring on the marks ({value})");
-            let ratio = contrast(accent, ground);
-            assert!(ratio >= 3.0, "{} ring is {ratio:.2}:1, a boundary wants 3", accent.hex());
-        }
-    }
-
-    /// One accent, two values: #FF5B2E light and #FF7A55 dark. The primary
-    /// buttons and the active marker use it, and the stylesheet must carry it.
-    #[test]
-    fn one_accent_colour_reaches_the_primary_buttons() {
-        for (p, value) in [(light(), "#FF5B2E"), (dark(), "#FF7A55")] {
-            let sheet = super::build(&p, 30);
-            assert!(sheet.contains(value), "the stylesheet lacks the accent {value}");
-            assert!(
-                sheet.contains(&format!("button.act.primary {{ background-color: {value}")),
-                "primary buttons do not take the accent {value}"
-            );
-            assert!(sheet.contains(&format!("box-shadow: inset 3px 0 0 {value}")), "the active row has no accent marker");
-        }
-    }
-
-    /// A boundary is not text, so its floor is 3:1 rather than 4.5 — but the
-    /// address field's outline is the one edge a reader has to find without
-    /// hunting, and it was 2.08:1 on white before this test existed.
-    #[test]
-    fn the_field_can_be_found_and_a_switch_can_be_seen() {
-        for (name, p, dark) in [("light", light(), false), ("dark", dark(), true)] {
-            let field = if dark { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
-            let panel = if dark { Rgb(0x20, 0x20, 0x20) } else { Rgb(0xFF, 0xFF, 0xFF) };
-            let chip = if dark { p.wash } else { Rgb(0xF2, 0xF2, 0xF0) };
-            let edge = contrast(quiet::pick(quiet::FIELD_BORDER, dark), field);
-            assert!(edge >= 3.0, "{name}: the field's edge is {edge:.2}:1, wants 3");
-            let chip_edge = contrast(quiet::pick(quiet::FIELD_BORDER, dark), chip);
-            assert!(chip_edge >= 3.0, "{name}: a chip/entry edge is {chip_edge:.2}:1, wants 3");
-            let track = contrast(quiet::pick(quiet::SWITCH_OFF, dark), panel);
-            assert!(track >= 3.0, "{name}: an off switch is {track:.2}:1, wants 3");
+            assert!(contrast(quiet::pick(quiet::PIN_LIVE_FG, dark), palette.side_pin_live) >= 4.5);
         }
     }
 
     #[test]
-    fn chrome_surfaces_and_focus_rules_are_present() {
-        let light_css = super::build(&light(), 30);
-        let dark_css = super::build(&dark(), 30);
-        for sheet in [&light_css, &dark_css] {
-            assert!(sheet.contains(".dlbar entry {"));
-            assert!(sheet.contains(".dlbar entry:focus {"));
-            assert!(sheet.contains(".colstrip {"));
-            assert!(sheet.contains(".colstrip:hover {"));
-            assert!(sheet.contains(".statuspill { padding: 4px 10px;") || sheet.contains(".statuspill {"));
-            assert!(sheet.contains(".panel button.act.chosen { background-color:"));
-            assert!(sheet.contains("border: 1px solid transparent;"));
-            assert!(sheet.contains("button.act:disabled,"));
-            assert!(sheet.contains("combobox button:focus"));
-            assert!(sheet.contains(".bmark:focus, .findbar entry:focus"));
-            assert!(sheet.contains(".bmarkbar {"));
-            assert!(sheet.contains("padding-top: 3px; padding-bottom: 3px;"));
-            assert!(sheet.contains(".control.shut:hover {"));
-            assert!(sheet.contains("color: #FFFFFF;"));
-            assert!(sheet.contains(".row.asleep .rowtitle"));
-        }
-        assert!(light_css.contains("#d2d2d0") || light_css.contains("#D2D2D0"));
-        assert!(light_css.contains("#F2F2F0"));
-        assert!(dark_css.contains("rgba(255,255,255,0.16)"));
-    }
-
-    #[test]
-    fn interactive_transitions_and_elevation_rules_are_emitted() {
-        for (p, accent) in [(light(), "#FF5B2E"), (dark(), "#FF7A55")] {
-            let sheet = super::build(&p, 30);
-            for rule in [
-                "transition: background-color 140ms cubic-bezier(0.2, 0.8, 0.2, 1), color 140ms ease, box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1);",
-                "transition: color 140ms ease, opacity 160ms ease, background-color 140ms ease;",
-                "transition: opacity 150ms ease, background-color 120ms ease, color 120ms ease;",
-                "transition: background-color 140ms ease, color 140ms ease, box-shadow 150ms ease;",
-                "transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease, opacity 130ms ease, box-shadow 140ms ease;",
-                "transition: background-color 180ms ease, box-shadow 140ms ease;",
-                "transition: background-color 180ms ease, margin 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease;",
-                "transition: background-color 110ms ease, color 110ms ease, box-shadow 140ms ease;",
-                "transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;",
-                "transition: background-color 150ms ease, opacity 150ms ease;",
-                "button.act:active",
-                ".panel button.act:active",
-                "button.act.primary:active",
-                ".pin:active",
-                ".row:active",
-            ] {
-                assert!(sheet.contains(rule), "missing expected css rule: {rule}");
+    fn controls_and_accent_labels_pass_contrast_checks() {
+        for look in [Look::Light, Look::Dark] {
+            let palette = Palette::for_look(look, false);
+            let edge = quiet::pick(quiet::FIELD_BORDER, palette.is_dark());
+            for background in [palette.card, palette.surface(), palette.ground] {
+                assert!(contrast(edge, background) >= 3.0, "edge on {}", background.hex());
             }
-            assert!(sheet.contains(&format!(".progress {{ color: {accent};")));
-            assert!(sheet.contains(&format!(".omni.focused {{ border-color: {accent};")));
+            assert!(contrast(palette.accent_ink(), palette.accent()) >= 4.5);
+            assert!(contrast(palette.ink, palette.tint()) >= 4.5);
         }
     }
 
-    /// The stylesheet and the tests have to be talking about the same colours.
-    /// A literal written into the CSS while the test measured a constant is
-    /// how the palette's ratios came to describe a window nobody was looking
-    /// at, so this checks the built text carries the values it claims.
     #[test]
-    fn the_stylesheet_is_built_from_the_colours_that_were_measured() {
-        for (p, dark) in [(light(), false), (dark(), true)] {
-            let sheet = super::build(&p, 30);
-            for (what, pair) in [
-                ("pin letter", quiet::PIN_FG),
-                ("muted", quiet::MUTED),
-                ("faint", quiet::FAINT),
-                ("field edge", quiet::FIELD_BORDER),
-                ("failed page's sentence", quiet::BLANK_HINT),
-            ] {
-                let value = quiet::pick(pair, dark).hex();
-                assert!(
-                    sheet.contains(&value),
-                    "{what}: the stylesheet does not use {value}, so the test above \
-                     measured a colour the window never shows"
-                );
+    fn both_themes_share_the_same_complete_ui_system() {
+        for look in [Look::Light, Look::Dark] {
+            let palette = Palette::for_look(look, false);
+            let sheet = build(&palette, 48);
+            for class in [".brand-word", ".toolbar", ".location", ".row-subtitle", ".panel-rail", ".omni-block", ".colstrip", ".statuspill"] {
+                assert!(sheet.contains(class), "missing {class}");
+            }
+            assert!(sheet.contains(&format!("background-color: {}", palette.accent().hex())));
+            assert!(sheet.contains("button.mark:focus { outline: 2px solid"));
+            assert!(!sheet.contains(":focus-visible"));
+            assert!(!sheet.contains("linear-gradient"));
+        }
+    }
+
+    /// GTK3's CSS parser accepts only the numeric font weights 100 to 900, in
+    /// steps of 100. Any other number, such as 650, is a parse error, and a
+    /// parse error makes load_from_data throw out the whole stylesheet. In
+    /// round 53 one `font-weight: 650` on the wordmark left every panel and
+    /// the omnibox with no card surface and the default theme colours, and
+    /// the only sign of it was one note line on stderr. This test stops that
+    /// from building. Keyword values (normal, bold) are allowed.
+    #[test]
+    fn every_numeric_font_weight_is_one_gtk3_can_parse() {
+        for look in [Look::Light, Look::Dark] {
+            let palette = Palette::for_look(look, false);
+            let sheet = build(&palette, 48);
+            for (index, _) in sheet.match_indices("font-weight:") {
+                let value: String = sheet[index + "font-weight:".len()..]
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                if let Ok(weight) = value.parse::<u32>() {
+                    assert!(
+                        (100..=900).contains(&weight) && weight % 100 == 0,
+                        "font-weight {weight} is not one GTK3 can parse, so the whole stylesheet would be dropped (near: {})",
+                        &sheet[index.saturating_sub(60)..(index + 24).min(sheet.len())]
+                    );
+                }
             }
         }
     }

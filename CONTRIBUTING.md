@@ -23,7 +23,8 @@ If a picture changed, say so in the pull request and include it.
 
 ## What is not
 
-- Dependencies. This browser has eight and every one of them is a cost.
+- Dependencies. This browser has eleven direct ones (see `Cargo.toml`) and
+  every one of them is a cost.
 - Refactors without a behaviour or a bug behind them.
 - Any change that needs a design decision bigger than the diff: open an issue
   first.

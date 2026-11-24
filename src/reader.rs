@@ -87,10 +87,28 @@ pub fn enter(app: &AppRef, view: &webkit2gtk::WebView) {
                 Answer::Entered => {
                     app.reading_tabs.borrow_mut().insert(id);
                     app.reading.set(app.tab_reading(app.active_id()));
+                    // refresh_helm is the only place that puts `.reading` on
+                    // the toolbar's book button (src/app.rs refresh_helm).
+                    // Entering or leaving reader mode did not call it, so the
+                    // button kept its old tint until something else redrew
+                    // the toolbar (Gemini R60 bug 4). It is one class toggle
+                    // on widgets that already exist, with no new allocation.
+                    app.refresh_helm();
+                    // The find band depends on reading mode (it clears the
+                    // reader's exit pill), so an open Find bar moves now.
+                    app.layout_layers(
+                        gtk::prelude::WidgetExt::allocated_width(&app.ui.overlay),
+                        gtk::prelude::WidgetExt::allocated_height(&app.ui.overlay),
+                    );
                 }
                 Answer::Left => {
                     app.reading_tabs.borrow_mut().remove(&id);
                     app.reading.set(app.tab_reading(app.active_id()));
+                    app.refresh_helm();
+                    app.layout_layers(
+                        gtk::prelude::WidgetExt::allocated_width(&app.ui.overlay),
+                        gtk::prelude::WidgetExt::allocated_height(&app.ui.overlay),
+                    );
                 }
                 Answer::Empty => app.flash_error("Nothing to read on this page"),
                 // The page stayed in reading mode because it could not rebuild
@@ -139,6 +157,15 @@ mod tests {
         // and a host that only looks for `false` would read that as an entry.
         assert!(!script.contains("&& window.__searchReader("), "the call still short-circuits");
         assert!(script.contains("return 'missing'"), "absence is not stated");
+    }
+
+    #[test]
+    fn reading_text_has_visible_size_controls() {
+        let script = script_for(&Palette::for_look(Look::Light, false).reader());
+        assert!(script.contains("window.__searchReaderFont"), "no font helper");
+        assert!(script.contains("--search-reader-size"), "no size variable");
+        assert!(script.contains("Smaller reading text"), "no smaller control");
+        assert!(script.contains("Larger reading text"), "no larger control");
     }
 
     #[test]

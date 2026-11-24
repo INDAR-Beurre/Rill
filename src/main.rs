@@ -47,6 +47,7 @@ mod status;
 mod shield_assets;
 mod store;
 mod suggest;
+mod startpage;
 mod ui;
 mod web;
 
@@ -99,8 +100,14 @@ fn main() {
     // The low-memory switch also disables the compositing path. WebKit reads
     // these variables once, when its process is forked, so the setting in the
     // browser has to be read here, before the first window.
-    let low_memory = std::env::var_os("SEARCH_LOW_MEMORY").is_some()
-        || store::Prefs::load().low_memory;
+    //
+    // The preferences file is read once, here, and the same value is handed to
+    // the window below. Reading it a second time after GTK started parsed the
+    // same file twice on every launch, and a file changed between the two
+    // reads could give the engine one low-memory setting and the window
+    // another.
+    let mut prefs = store::Prefs::load();
+    let low_memory = std::env::var_os("SEARCH_LOW_MEMORY").is_some() || prefs.low_memory;
     if should_disable_dmabuf(
         low_memory,
         std::env::var_os("SEARCH_ENABLE_DMABUF").as_deref(),
@@ -110,6 +117,11 @@ fn main() {
     }
     if low_memory {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        // Settings in the page engine (page cache, cache model, spellcheck)
+        // read the profile from here, so the saved preference and the
+        // environment switch reach them the same way, and the preferences
+        // file is not read again for it.
+        std::env::set_var("SEARCH_LOW_MEMORY", "1");
     }
 
     if gtk::init().is_err() {
@@ -142,7 +154,6 @@ fn main() {
     let appearance = flag_value(&args, "--appearance");
     let fresh = flag(&args, "--fresh");
 
-    let mut prefs = store::Prefs::load();
     if fresh {
         prefs.skip_restore = true;
     }
@@ -179,7 +190,7 @@ fn main() {
     // show_all shows every child, including the bookmarks bar that was built
     // hidden, so the answer to "is there anything kept" has to be applied after
     // the window is shown rather than before it.
-    app.render_bmarks();
+    app.render();
     app.ui.window.present();
     if !fresh && !app.prefs.borrow().welcomed {
         welcome::show(&app);
@@ -223,7 +234,7 @@ fn main() {
     if let Some(size) = size {
         let parts: Vec<i32> = size.split('x').filter_map(|part| part.trim().parse().ok()).collect();
         if parts.len() == 2 {
-            app.ui.window.resize(parts[0], parts[1]);
+            app.ui.window.set_default_size(parts[0], parts[1]);
         }
     }
 

@@ -103,7 +103,13 @@ impl Key {
             return Intent::FullScreen;
         }
 
-        if self.ctrl {
+        // Ctrl with Alt held is not a browser shortcut. On many layouts AltGr
+        // arrives as Ctrl+Alt, so AltGr+L, AltGr+T or AltGr+7 is someone typing
+        // a character such as @, | or {. Matching those here opened the field,
+        // a new tab or jumped tabs in the middle of typing. They now reach the
+        // page or the field, and the `self.alt` check below returns Nothing for
+        // any that are left over.
+        if self.ctrl && !self.alt {
             let intent = match (name, self.shift) {
                 ("left", false) => Intent::PanelLeft,
                 ("right", false) => Intent::PanelRight,
@@ -155,7 +161,11 @@ impl Key {
             }
         }
 
-        if self.alt {
+        // Plain Alt+arrow is back and forward. Ctrl+Alt+arrow belongs to the
+        // desktop (switching workspaces on most setups), and AltGr reports as
+        // Ctrl+Alt on some layouts, so neither should move the page through
+        // its history.
+        if self.alt && !self.ctrl {
             match name {
                 "left" => return Intent::Back,
                 "right" => return Intent::Forward,
@@ -679,6 +689,31 @@ mod tests {
         assert_eq!(key("n", true, false, false).intent(), Intent::NewTab);
         assert_eq!(key("r", true, false, false).intent(), Intent::Reload);
         assert_eq!(key("b", true, false, false).intent(), Intent::Nothing);
+    }
+
+    #[test]
+    fn altgr_characters_are_not_browser_shortcuts() {
+        // On many layouts AltGr arrives as Ctrl+Alt. AltGr+L, AltGr+T, AltGr+Q
+        // and AltGr+7 type characters such as @, | or {, so they must reach the
+        // page or the field instead of opening the field, a tab or a jump.
+        assert_eq!(key("l", true, false, true).intent(), Intent::Nothing);
+        assert_eq!(key("t", true, false, true).intent(), Intent::Nothing);
+        assert_eq!(key("q", true, false, true).intent(), Intent::Nothing);
+        assert_eq!(key("7", true, false, true).intent(), Intent::Nothing);
+        assert_eq!(key("w", true, true, true).intent(), Intent::Nothing);
+        // Ctrl alone still reaches the same shortcuts.
+        assert_eq!(key("l", true, false, false).intent(), Intent::Omni);
+        assert_eq!(key("t", true, false, false).intent(), Intent::NewTab);
+        assert_eq!(key("7", true, false, false).intent(), Intent::Jump(7));
+        // Alt alone keeps Back and Forward.
+        assert_eq!(key("Left", false, false, true).intent(), Intent::Back);
+        assert_eq!(key("Right", false, false, true).intent(), Intent::Forward);
+        // Ctrl+Alt+arrow switches workspaces on most desktops, and AltGr can
+        // arrive as Ctrl+Alt, so neither may move the page through history.
+        assert_eq!(key("Left", true, false, true).intent(), Intent::Nothing);
+        assert_eq!(key("Right", true, false, true).intent(), Intent::Nothing);
+        assert_eq!(key("Left", true, true, true).intent(), Intent::Nothing);
+        assert_eq!(key("Right", true, true, true).intent(), Intent::Nothing);
     }
 
     #[test]

@@ -661,9 +661,31 @@ pub fn host_of(url: &str) -> String {
     host.split(':').next().unwrap_or(host).to_lowercase()
 }
 
+/// The path and query after the host, for telling same-site tabs apart and
+/// ranking a page whose address matches what was typed above one that only
+/// happens to have the word in its title. The query is case-sensitive in a
+/// URL, so unlike a host it is kept as written; callers lower-case for
+/// matching.
+pub fn location_of(url: &str) -> String {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let after_host = rest
+        .find(['/', '?', '#'])
+        .map(|at| &rest[at..])
+        .unwrap_or("/");
+    after_host.split('#').next().unwrap_or(after_host).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_location_keeps_the_path_that_distinguishes_same_host_tabs() {
+        assert_eq!(location_of("http://127.0.0.1:8099/office"), "/office");
+        assert_eq!(location_of("http://127.0.0.1:8099/titled?t=X"), "/titled?t=X");
+        assert_eq!(location_of("http://127.0.0.1:8099"), "/");
+        assert_eq!(location_of("about:blank"), "/");
+    }
 
     #[test]
     fn every_rule_list_is_a_json_array() {

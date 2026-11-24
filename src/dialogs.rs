@@ -68,12 +68,23 @@ struct Prompt {
     default: Option<gtk::Button>,
 }
 
+/// A native file chooser that a page opened, together with the tab that asked
+/// for it. dismiss() cancels it when that page goes away (close, sleep, crash,
+/// rebuild or a new load). Without this, a chooser left open over a page that
+/// had since been replaced would hand the picked file to whichever page was
+/// there by then.
+struct Chooser {
+    tab: TabId,
+    native: gtk::FileChooserNative,
+    request: FileChooserRequest,
+}
+
 thread_local! {
     // One dialog per tab. WebKit waits on the page's script, so a second one
     // while the first is open is answered Cancel instead of queued.
     static PENDING: RefCell<BTreeMap<TabId, Prompt>> = const { RefCell::new(BTreeMap::new()) };
     static HISTORY: RefCell<BTreeMap<TabId, History>> = const { RefCell::new(BTreeMap::new()) };
-    static CHOOSERS: RefCell<Vec<gtk::FileChooserNative>> = const { RefCell::new(Vec::new()) };
+    static CHOOSERS: RefCell<Vec<Chooser>> = const { RefCell::new(Vec::new()) };
 }
 
 fn pending(tab: TabId) -> bool {
@@ -100,6 +111,16 @@ pub fn on_dialog(app: &App, tab: TabId, view: &WebView, dialog: &ScriptDialog) -
         finish(dialog, false, None);
         return true;
     };
+    // The view that asked must still be this tab's view. If the tab has
+    // closed, or its view has been replaced, the card has nothing of its own
+    // to sit over and would show on top of whichever tab is on screen now.
+    // Answer the dialog the way a dismissed card does, so the page's script is
+    // released instead of left waiting. A leave-page check is allowed, so the
+    // closing view is not held open.
+    if app.view(tab).as_ref() != Some(view) {
+        finish(dialog, kind == Kind::LeavePage, None);
+        return true;
+    }
     let now = (glib::monotonic_time() / 1000) as i64;
     let (suppressed, stop_offered) = HISTORY.with(|h| {
         let mut h = h.borrow_mut();
@@ -196,7 +217,12 @@ pub fn on_dialog(app: &App, tab: TabId, view: &WebView, dialog: &ScriptDialog) -
     });
     sync_visible(app);
     if app.active_id() == tab {
-        crate::motion::pop_card_in(&card, crate::find::PAGE_TOP, -10, 155);
+        crate::motion::pop_card_in(
+            &card,
+            crate::find::PAGE_TOP,
+            -crate::motion::dur::TRAVEL,
+            crate::motion::dur::ENTER,
+        );
     }
     // A prompt starts in its field. Alert and confirm start on the default
     // button, the one the last choice names (OK).
@@ -226,6 +252,25 @@ pub fn dismiss(app: &App, tab: TabId) {
     HISTORY.with(|h| h.borrow_mut().remove(&tab));
     if pending(tab) {
         answer(app, tab, false);
+    }
+    cancel_choosers(tab);
+}
+
+/// Closes every file chooser that `tab`'s page opened and cancels its request,
+/// so the page's script is released and no file reaches a page that did not
+/// ask for it. Entries leave the list before the chooser is hidden, so a
+/// response that arrives afterwards finds nothing and does nothing.
+fn cancel_choosers(tab: TabId) {
+    let gone: Vec<Chooser> = CHOOSERS.with(|c| {
+        let mut c = c.borrow_mut();
+        let (gone, kept): (Vec<Chooser>, Vec<Chooser>) =
+            std::mem::take(&mut *c).into_iter().partition(|chooser| chooser.tab == tab);
+        *c = kept;
+        gone
+    });
+    for chooser in gone {
+        chooser.native.hide();
+        chooser.request.cancel();
     }
 }
 
@@ -258,6 +303,13 @@ pub fn focus_pending(_app: &App, tab: TabId) -> bool {
     };
     widget.grab_focus();
     true
+}
+
+/// Whether a dialog card is on screen for `tab`. Unlike focus_pending, this
+/// only asks and never moves focus, so a deferred focus elsewhere can use it to
+/// stand aside.
+pub fn showing(tab: TabId) -> bool {
+    PENDING.with(|p| p.borrow().get(&tab).is_some_and(|prompt| prompt.widget.is_visible()))
 }
 
 /// Escape cancels and Enter confirms the dialog on screen. The window sees
@@ -297,7 +349,7 @@ pub fn key(app: &App, event: &gtk::gdk::EventKey) -> bool {
 
 /// The file chooser is the desktop's own, shown over the browser window. It
 /// is kept until the person answers; nothing else holds it.
-pub fn on_file_chooser(app: &App, request: &FileChooserRequest) -> bool {
+pub fn on_file_chooser(app: &App, tab: TabId, view: &WebView, request: &FileChooserRequest) -> bool {
     let chooser = gtk::FileChooserNative::new(
         Some("Choose a file"),
         Some(&app.ui.window),
@@ -318,21 +370,41 @@ pub fn on_file_chooser(app: &App, request: &FileChooserRequest) -> bool {
         chooser.add_filter(filter);
     }
     let answered = request.clone();
+    let asked_by = view.downgrade();
+    let weak_app = app.weak();
     chooser.connect_response(move |chooser, response| {
+        // Out of the list first. If dismiss() already cancelled this chooser,
+        // the entry is gone and the request has been answered, so stop here.
+        let still_waiting = CHOOSERS.with(|c| {
+            let mut c = c.borrow_mut();
+            let before = c.len();
+            c.retain(|kept| &kept.native != chooser);
+            c.len() != before
+        });
+        if !still_waiting {
+            return;
+        }
+        // Files go only to the view that asked, and only while it is still
+        // the tab's live view. A replaced view gets a cancel.
+        let live = match (weak_app.upgrade(), asked_by.upgrade()) {
+            (Some(app), Some(view)) => app.view(tab).as_ref() == Some(&view),
+            _ => false,
+        };
         let files: Vec<String> = chooser
             .filenames()
             .iter()
             .filter_map(|path| path.to_str().map(String::from))
             .collect();
         let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-        if response == gtk::ResponseType::Accept && !refs.is_empty() {
+        if live && response == gtk::ResponseType::Accept && !refs.is_empty() {
             answered.select_files(&refs);
         } else {
             answered.cancel();
         }
-        CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != chooser));
     });
-    CHOOSERS.with(|c| c.borrow_mut().push(chooser.clone()));
+    CHOOSERS.with(|c| {
+        c.borrow_mut().push(Chooser { tab, native: chooser.clone(), request: request.clone() })
+    });
     chooser.show();
     true
 }

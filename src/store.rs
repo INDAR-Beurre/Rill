@@ -110,7 +110,7 @@ impl Default for Prefs {
             appearance: Look::System,
             sidebar: true,
             column_folded: false,
-            side_width: 232.0,
+            side_width: 264.0,
             roomy_tabs: false,
             shield: true,
             curtain: true,
@@ -159,9 +159,9 @@ impl Prefs {
 
     pub fn row_height(&self) -> i32 {
         if self.roomy_tabs {
-            44
+            60
         } else {
-            32
+            48
         }
     }
 
@@ -201,6 +201,11 @@ pub struct TabRecord {
     pub title: String,
     #[serde(default)]
     pub pinned: bool,
+    /// The tab that was on top when the session was saved, so a restart
+    /// shows the same page instead of always the first tab. Defaults to
+    /// false so session files written before this field still load.
+    #[serde(default)]
+    pub active: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -228,16 +233,32 @@ impl Records {
         files::read_json(&Self::file("session.json")).unwrap_or_default()
     }
 
-    pub fn save_session(tabs: &[TabRecord]) {
-        files::write_json(&Self::file("session.json"), &tabs.to_vec());
+    /// True when session.json reached the disk, or when a newer snapshot was
+    /// already there. The snapshot is numbered here, on the calling thread,
+    /// so a direct save (window close, pin, bench) always counts as newest.
+    pub fn save_session(tabs: &[TabRecord]) -> bool {
+        Self::save_session_at(tabs, files::snapshot_number())
+    }
+
+    /// Writes a session snapshot numbered earlier on the main thread. It is
+    /// safe to call from a worker: an older snapshot never replaces a newer one.
+    pub fn save_session_at(tabs: &[TabRecord], snapshot: u64) -> bool {
+        files::write_json_ordered(&Self::file("session.json"), &tabs.to_vec(), snapshot)
     }
 
     pub fn load_history() -> Vec<HistoryEntry> {
         files::read_json(&Self::file("history.json")).unwrap_or_default()
     }
 
-    pub fn save_history(history: &[HistoryEntry]) {
-        files::write_json(&Self::file("history.json"), &history.to_vec());
+    /// True when history.json reached the disk, or when a newer snapshot was
+    /// already there.
+    pub fn save_history(history: &[HistoryEntry]) -> bool {
+        Self::save_history_at(history, files::snapshot_number())
+    }
+
+    /// Writes a history snapshot numbered earlier on the main thread.
+    pub fn save_history_at(history: &[HistoryEntry], snapshot: u64) -> bool {
+        files::write_json_ordered(&Self::file("history.json"), &history.to_vec(), snapshot)
     }
 
     /// A visit is kept once per address, newest first, and the list is capped
@@ -307,11 +328,37 @@ impl Records {
 
     /// Site decisions, one per host and kind. Saved only for a non-private tab,
     /// which the caller checks before it calls this.
+    /// The remembered site decisions, kept in memory after the first read.
+    /// Every permission request, every site card and every Settings render used
+    /// to read and parse permissions.json from disk again (six call sites in
+    /// src/permissions.rs and src/sitecard.rs, Gemini R60 perf). The file is only
+    /// written through save_permissions, which updates this copy first, so the
+    /// copy and the file can't drift apart within one run. It lives on the GTK
+    /// main thread, the only thread that asks.
+    fn with_permission_cache<R>(
+        f: impl FnOnce(&mut Option<Vec<crate::permissions::Grant>>) -> R,
+    ) -> R {
+        thread_local! {
+            static GRANTS: std::cell::RefCell<Option<Vec<crate::permissions::Grant>>> =
+                std::cell::RefCell::new(None);
+        }
+        GRANTS.with(|cache| f(&mut cache.borrow_mut()))
+    }
+
     pub fn load_permissions() -> Vec<crate::permissions::Grant> {
-        files::read_json(&Self::file("permissions.json")).unwrap_or_default()
+        Self::with_permission_cache(|cache| {
+            cache
+                .get_or_insert_with(|| {
+                    files::read_json(&Self::file("permissions.json")).unwrap_or_default()
+                })
+                .clone()
+        })
     }
 
     pub fn save_permissions(grants: &[crate::permissions::Grant]) {
+        // The in-memory copy follows the decision even if the disk write fails,
+        // so the browser keeps honouring what the person just chose this run.
+        Self::with_permission_cache(|cache| *cache = Some(grants.to_vec()));
         files::write_json(&Self::file("permissions.json"), &grants.to_vec());
     }
 
@@ -319,8 +366,15 @@ impl Records {
         files::read_json(&Self::file("hidden.json")).unwrap_or_default()
     }
 
-    pub fn save_hidden(hidden: &BTreeMap<String, Vec<String>>) {
-        files::write_json(&Self::file("hidden.json"), hidden);
+    /// True when hidden.json reached the disk, or when a newer snapshot was
+    /// already there.
+    pub fn save_hidden(hidden: &BTreeMap<String, Vec<String>>) -> bool {
+        Self::save_hidden_at(hidden, files::snapshot_number())
+    }
+
+    /// Writes a hidden-list snapshot numbered earlier on the main thread.
+    pub fn save_hidden_at(hidden: &BTreeMap<String, Vec<String>>, snapshot: u64) -> bool {
+        files::write_json_ordered(&Self::file("hidden.json"), hidden, snapshot)
     }
 }
 

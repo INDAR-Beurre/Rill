@@ -25,9 +25,53 @@ pub struct FindBar {
 
 /// Position and width of the find bar inside the page viewport (`[column + 12, width - 12]`),
 /// sitting `PAGE_TOP` below `band`.
+/// Where the page starts, in overlay coordinates: just under the toolbar.
+/// Returns 0 when the toolbar is hidden or not mapped (fullscreen), so Find
+/// then sits at the top of the page as before.
+///
+/// While the active tab is in reading mode, the band also leaves room for the
+/// reader's exit pill. That pill is fixed at the same PAGE_TOP/PAGE_INSET
+/// corner (assets/reader.js), so without this Find covers it.
+pub fn toolbar_band(ui: &crate::ui::Ui) -> i32 {
+    let toolbar = if !ui.toolbar.is_visible() || !ui.toolbar.is_mapped() {
+        0
+    } else {
+        ui.toolbar
+            .translate_coordinates(&ui.overlay, 0, ui.toolbar.allocated_height())
+            .map(|(_, y)| y.max(0))
+            .unwrap_or(0)
+    };
+    let reading = crate::app::current().map(|app| app.reading.get()).unwrap_or(false);
+    toolbar + if reading { READER_EXIT_CLEARANCE } else { 0 }
+}
+
+/// The reader exit pill is at least 28px tall (assets/reader.js min-height).
+/// Find moves down by that height plus an 8px gap, so its top lands 8px below
+/// the pill's bottom edge and both keep the same right inset.
+pub const READER_EXIT_CLEARANCE: i32 = 28 + 8;
+
+/// The reader's text column (assets/reader.js max-width), centred in the page.
+pub const READER_MEASURE: i32 = 660;
+/// Narrowest the bar gets while reading before it gives up on the gutter: the
+/// entry, the count and both arrows still fit.
+pub const READING_BAR_MIN: i32 = 220;
+
+/// How wide the bar may be while reading so it stays in the right gutter beside
+/// the centred reader column, with an 8px gap. At 1500px with the 264px tab
+/// column the gutter is (1236 - 660) / 2 = 288, so the bar is 288 - 18 - 8 = 262
+/// and sits at x1220, clear of the column's right edge at x1212. Gemini R59 saw
+/// the 320px bar (x1162..1482) cut off "lazy" in 07c-reading-find.png.
+fn reading_bar_width(width: i32, column: i32) -> i32 {
+    let gutter = (width - column - READER_MEASURE) / 2;
+    (gutter - PAGE_INSET - 8).clamp(READING_BAR_MIN, BAR_WIDTH)
+}
+
 fn bar_plan(width: i32, band: i32, column: i32) -> (i32, i32, i32) {
     let avail = (width - column - 24).max(1);
-    let bar_width = BAR_WIDTH.min(avail);
+    // Tests have no app, so current() is None there and the plain width holds.
+    let reading = crate::app::current().map(|app| app.reading.get()).unwrap_or(false);
+    let wanted = if reading { reading_bar_width(width, column) } else { BAR_WIDTH };
+    let bar_width = wanted.min(avail);
     let min_x = column + 12;
     let max_x = (width - bar_width - 12).max(min_x);
     let x = (width - bar_width - PAGE_INSET).clamp(min_x, max_x);
@@ -74,6 +118,9 @@ impl FindBar {
         let count = gtk::Label::new(Some(""));
         crate::ui::class(&count, "empty");
         count.set_valign(gtk::Align::Center);
+        // The counter stays legible when the bar is narrow; the entry gives up
+        // space first.
+        count.set_width_request(44);
         crate::ui::pack(&bar, &count, false);
 
         // Down the page, not back through history: the marks say "previous
@@ -160,10 +207,22 @@ impl FindBar {
             0
         };
         let width = ui.overlay.allocated_width().max(ui.window.allocated_width());
-        self.layout_in(width, 0, column);
+        // Sit below the toolbar, not over its controls and the window marks.
+        let band = toolbar_band(ui);
+        self.layout_in(width, band, column);
         if width > 1 {
-            let (x, y, _) = bar_plan(width, 0, column);
-            crate::motion::slide_in_fixed(&self.layer.root, &self.bar, x, y, -18, 150);
+            let (x, y, _) = bar_plan(width, band, column);
+            // Enters and leaves on the shared roles: the same 8px of travel
+            // both ways, so the exit mirrors the entrance instead of using
+            // its own -18/-14 and 150/100 numbers.
+            crate::motion::slide_in_fixed(
+                &self.layer.root,
+                &self.bar,
+                x,
+                y,
+                -crate::motion::dur::TRAVEL,
+                crate::motion::dur::ENTER,
+            );
         }
     }
 
@@ -176,6 +235,16 @@ impl FindBar {
                 if let Some(controller) = view.find_controller() {
                     controller.search_finish();
                 }
+                // search_finish only clears the engine's own marks. The current
+                // match is a <mark data-search-find> wrapper set by the step
+                // script (WebKitGTK 2.54 does not paint custom highlights).
+                // Unwrap it, join the text back up, and forget the position,
+                // so closing find leaves the page exactly as it was.
+                crate::js::run(
+                    &view,
+                    "(() => { const parents = new Set(); for (const m of document.querySelectorAll('mark[data-search-find]')) { const p = m.parentNode; if (!p) continue; while (m.firstChild) p.insertBefore(m.firstChild, m); p.removeChild(m); parents.add(p); } for (const p of parents) p.normalize(); window.__searchFindAt = undefined; const s = document.getSelection(); if (s) s.removeAllRanges(); if (window.CSS && CSS.highlights) CSS.highlights.delete('search-find'); return 'cleared'; })()",
+                    |_| {},
+                );
             }
         }
         if !was_visible {
@@ -186,7 +255,14 @@ impl FindBar {
         let (x, y) = self.last_pos.get();
         let root = self.layer.root.clone();
         let bar = self.bar.clone();
-        crate::motion::slide_out_fixed(&self.layer.root, &self.bar, x, y, -14, 100, move || {
+        crate::motion::slide_out_fixed(
+            &self.layer.root,
+            &self.bar,
+            x,
+            y,
+            -crate::motion::dur::TRAVEL,
+            crate::motion::dur::EXIT,
+            move || {
             let still_hidden = !crate::app::current()
                 .map(|app| app.find.try_borrow().map(|f| f.visible).unwrap_or(false))
                 .unwrap_or(false);
@@ -221,6 +297,12 @@ impl FindBar {
         // The count comes from counted-matches, not from found-text: the latter
         // reports the text it found, so its number is meaningless as a total.
         let handler_id = controller.connect_counted_matches(move |_, matches| {
+            // The find step may already have written '3 of 12' for this same
+            // total (App::find_select). The engine's count can arrive after it,
+            // so it does not replace a position that already agrees with it.
+            if (1..=1_000_000).contains(&matches) && count.text().ends_with(&format!(" of {matches}")) {
+                return;
+            }
             // The engine reports -1 (as u32) until it has counted: printing
             // 4294967295 matches is worse than printing nothing.
             count.set_text(&if matches > 1_000_000 {
@@ -250,5 +332,45 @@ mod tests {
         assert_eq!(x, 244);
         assert_eq!(w, 420 - 232 - 24);
         assert!(x + w <= 420 - 12);
+    }
+
+    #[test]
+    fn bar_sits_under_the_real_toolbar_band() {
+        // The 72px toolbar and the 264px column used in the round-58 shots.
+        let (x, y, w) = bar_plan(1500, 72, 264);
+        assert_eq!((x, y, w), (1500 - BAR_WIDTH - PAGE_INSET, 72 + PAGE_TOP, BAR_WIDTH));
+        assert!(y > 72, "find must start below the toolbar rule");
+    }
+
+    #[test]
+    fn fullscreen_band_puts_the_bar_at_the_page_top() {
+        let (_, y, _) = bar_plan(1500, 0, 0);
+        assert_eq!(y, PAGE_TOP);
+        // A negative band from a stale allocation never lifts it above the page.
+        let (_, y, _) = bar_plan(1500, -40, 0);
+        assert_eq!(y, PAGE_TOP);
+    }
+
+    #[test]
+    fn reading_band_clears_the_reader_exit_pill() {
+        // The exit pill sits at PAGE_TOP under the toolbar and is at least
+        // 28px tall; find must start 8px below its bottom edge.
+        let toolbar = 72;
+        let pill_bottom = toolbar + PAGE_TOP + 28;
+        let (_, y, _) = bar_plan(1500, toolbar + READER_EXIT_CLEARANCE, 264);
+        assert_eq!(y, pill_bottom + 8);
+    }
+
+    #[test]
+    fn narrow_page_keeps_the_bar_inside_the_page_column() {
+        for width in [300, 400, 520, 720] {
+            let column = 264;
+            let (x, _, w) = bar_plan(width, 72, column);
+            assert!(w >= 1);
+            assert!(x >= column + 12, "width {width}: x {x} enters the column");
+            if width - column - 24 >= 1 {
+                assert!(x + w <= width - 12, "width {width}: bar runs past the right edge");
+            }
+        }
     }
 }

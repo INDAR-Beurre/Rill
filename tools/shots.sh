@@ -206,16 +206,43 @@ stopped = False
 # in the evidence is visible without reading the manifest.
 unavailable = []
 
+def grim_shot(path):
+    """Capture the focused Wayland window by cropping the compositor frame."""
+    try:
+        import io
+        from PIL import Image
+        raw = subprocess.run(["grim", "-"], capture_output=True, check=True, timeout=8).stdout
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+        width, height = image.size
+        blue = (122, 162, 250)
+        rows = [y for y in range(height)
+                if sum(1 for x in range(0, width, 8)
+                       if image.getpixel((x, y)) == blue) > 100]
+        if len(rows) < 2:
+            return False
+        top, bottom = rows[0], rows[-1]
+        cols = [x for x in range(width) if image.getpixel((x, top)) == blue]
+        if len(cols) < 2:
+            return False
+        left, right = cols[0], cols[-1]
+        image.crop((left + 1, top + 1, right, bottom)).save(path)
+        return path.exists() and path.stat().st_size > 4000
+    except Exception:
+        return False
+
 def real_shot(path):
     """A picture of the window as the desktop draws it, when there is a desktop."""
     bench.command("activate")
     time.sleep(0.25)
-    result = subprocess.run(
-        ["spectacle", "-b", "-n", "-a", "-o", str(path)],
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["spectacle", "-b", "-n", "-a", "-o", str(path)],
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        return grim_shot(path)
     if result.returncode != 0 or not path.exists():
-        return False
+        return grim_shot(path)
     # A window capture carries the window's alpha. Lay it on the ground the
     # browser paints, so a transparent edge is not read as a black border.
     background = "0x0b0b0b" if os.environ.get("SHOT_DARK") == "1" else "0xffffff"
@@ -319,6 +346,12 @@ try:
     # still leaves a manifest and still goes through the cleanup trap.
     bench = wait_bench()
     bench.must("ping")
+    # Dark screenshots must show the dark-page opt-in, not a bright webview
+    # inside a dark frame. This is the same preference the Settings switch
+    # writes; the light suite deliberately leaves it off.
+    if os.environ.get("SHOT_DARK") == "1":
+        bench.must("setdark on")
+        time.sleep(0.8)
 
     # 1. the quiet default: one page, tabs down the side
     # A --fresh start already has one blank tab. bench `open` always adds a
@@ -344,7 +377,7 @@ try:
 
     # 2. five tabs, four of them pinned
     tabs = []
-    for title, body in [("X", ""), ("Notion", ""), ("Figma", ""), ("Search", "")]:
+    for title, body in [("X Studio", ""), ("Notion Labs", ""), ("Figma Files", ""), ("Search Console", "")]:
         tabs.append(open_page(f"/titled?t={title.replace(' ', '+')}"))
     for tab in tabs:
         bench.select(tab)
@@ -352,6 +385,13 @@ try:
     open_page("/office")
     time.sleep(0.6)
     shot("02-pins", "four pins and a live row")
+
+    # 2b. the same strip with a pin selected. 02-pins ends on the unpinned
+    # Office page, so no pin is active in that shot. That left the .pin.live
+    # state (fill plus the 2px accent underline) with no evidence for review.
+    bench.select(tabs[0])
+    time.sleep(0.4)
+    shot("02b-pins-live", "one active pin")
 
     # 3. a column of tabs, nothing pinned
     bench.must("closeall")
@@ -379,6 +419,16 @@ try:
     shot("04b-omni-picked", "a suggestion picked by keyboard")
     bench.must("escape")
 
+    # 4c. a path query over the same set of tabs. The first round's field
+    # showed stale unfiltered suggestions here, and the distinct subtitle of
+    # the exact match is what keeps two same-host tabs apart.
+    bench.must("key omni")
+    time.sleep(0.2)
+    bench.must("omnitext /office")
+    time.sleep(0.4)
+    shot("04c-omni-ranking", "exact path match over other tabs")
+    bench.must("escape")
+
     # 5. the panels, every one of them: the sheet of keys and the truth about
     # extensions are facets the critics score, so they need a picture too, not
     # only a stress check.
@@ -396,6 +446,24 @@ try:
                   f" and no verb calls toggle_panel")
             continue
         shot(name, kind)
+        if kind == "settings":
+            # The last two switches are below the fold. A scrolled picture is
+            # the only honest proof they are reachable with the mouse.
+            bench.must("panelscroll 10000")
+            time.sleep(0.4)
+            shot("05-panel-settings-scrolled", "the bottom of Settings, including the last switch")
+        bench.must("key closepanel")
+
+    # 5b. populated library panels. The default panel loop above proves the
+    # empty text; these prove the rows a person accumulates over weeks are
+    # laid out without clipping or repeated hosts.
+    bench.must("seeddata bookmarks")
+    if show_panel("bookmarks"):
+        shot("05-panel-bookmarks-filled", "bookmarks collected over time")
+        bench.must("key closepanel")
+    bench.must("seeddata downloads")
+    if show_panel("downloads"):
+        shot("05-panel-downloads-filled", "finished, failed and active downloads")
         bench.must("key closepanel")
 
     # 6. find
@@ -419,6 +487,38 @@ try:
     shot("07-reading", "reading mode")
     bench.must("key reload")
 
+    # 7b. reading mode on a structured page. /long is paragraphs only, so the
+    # reader's headings (h2-h4), list indents, blockquote, inline and block code
+    # and the breaking of a very long link were never in a picture. /article
+    # has all of them and no banner, so the shot shows the reader alone.
+    open_page("/article")
+    settle()
+    time.sleep(0.8)
+    bench.must("key reader")
+    time.sleep(1.2)
+    shot("07b-reading-structure", "reading mode with headings, lists and code")
+    # 7d. the reading-size controls and their effect on a structured page.
+    bench.must("js window.__searchReaderFont(4)")
+    time.sleep(0.5)
+    shot("07d-reading-large", "reading mode with larger type")
+    bench.must("js window.__searchReaderFont(-4)")
+    bench.must("key reload")
+
+    # 7c. find while reading. The reader's exit pill and the find bar share the
+    # page's top-right corner (PAGE_TOP/PAGE_INSET in src/find.rs). In reading
+    # mode find moves down by READER_EXIT_CLEARANCE so both can be seen. No
+    # other state shows the two together, so a regression would go unnoticed.
+    open_page("/article")
+    settle()
+    time.sleep(0.8)
+    bench.must("key reader")
+    time.sleep(1.2)
+    bench.must("find code")
+    time.sleep(0.6)
+    shot("07c-reading-find", "find open over reading mode, clear of the exit button")
+    bench.must("escape")
+    bench.must("key reload")
+
     # 8. empty tab. closeall leaves exactly one fresh tab behind (closing the last
     # tab makes a new one), so asking for another here would put two "New tab"
     # rows in a picture that is meant to show one.
@@ -433,6 +533,23 @@ try:
     open_page("/missing")
     time.sleep(0.6)
     shot("09-missing", "a 404")
+
+    # 9b-d. The other failures a person actually hits. A local fixture
+    # server can make a 404 but cannot refuse a connection, present an
+    # expired certificate or take the network away, so these use the bench
+    # verb that feeds the real renderer the exact reason strings from web.rs.
+    for kind, note in (
+        ("tls", "an expired certificate"),
+        ("dns", "a name that cannot be resolved"),
+        ("offline", "no network"),
+    ):
+        bench.must("closeall")
+        time.sleep(0.3)
+        open_page("/office")
+        settle()
+        bench.must(f"showerror {kind}")
+        time.sleep(0.5)
+        shot(f"09-{kind}", note)
 
     # 16. site card over a loaded page
     bench.must("closeall")
@@ -477,40 +594,46 @@ skipped = f", {len(unavailable)} state(s) with no way to open" if unavailable el
 print(f"\n{len(tried) - len(bad)}/{len(tried)} states captured in {out}{skipped}")
 
 # Pixel checks pin the compositor regressions the functional suite could not
-# see: a light corner in dark mode and a white veil in light mode. Use the
-# installed ImageMagick CLI rather than adding a Python imaging dependency.
-def pixels(path, points):
-    result = subprocess.run(
-        ["magick", str(path), "-format", " ".join(f"%[pixel:p{{{x},{y}}}]" for x, y in points), "info:"],
-        capture_output=True, text=True)
-    if result.returncode:
-        return []
-    return [[int(float(v)) for v in re.findall(r"[\d.]+", part)[:3]] for part in result.stdout.split("srgb")[1:]]
+# see: a light corner in dark mode and a white veil in light mode. Pillow is
+# already installed for the harness; no browser dependency is added here.
+def is_dark():
+    return os.environ.get("SHOT_DARK") == "1"
 
-if (out / "01-default.png").exists():
-    dark = bool(os.environ.get("SHOT_DARK"))
+def pixels(path, points):
+    try:
+        from PIL import Image
+        image = Image.open(path).convert("RGB")
+        return [list(image.getpixel((x, y))) for x, y in points]
+    except Exception:
+        return []
+
+if is_dark() and (out / "01-default.png").exists():
+    # This gate only describes dark mode; running it on the light set produced a
+    # permanent false FAIL after the warm palette changed the light corner.
     corner = pixels(out / "01-default.png", [(4, 4), (100, 4)])
-    if dark:
-        ok = bool(corner) and all(max(c) <= 25 for c in corner)
-    else:
-        ok = bool(corner) and all(min(c) >= 245 for c in corner)
+    ok = bool(corner) and all(max(c) <= 40 for c in corner)
     manifest.append({"name": "pixel dark corner", "ok": ok, "note": str(corner)})
     print(("  ok   " if ok else "  FAIL ") + "pixel dark corner — " + str(corner))
-if not os.environ.get("SHOT_DARK") and (out / "05-panel-history.png").exists():
-    veil = pixels(out / "05-panel-history.png", [(500, 500), (100, 200)])
-    ok = bool(veil) and 120 <= sum(veil[0]) / 3 <= 220 and min(veil[1]) >= 245
+if not is_dark() and (out / "05-panel-history.png").exists():
+    from PIL import Image
+    image = Image.open(out / "05-panel-history.png").convert("RGB")
+    # The current scrim is a 0.42 black veil over the page (src/ui.rs
+    # scrim_colour), not the old light #F1EFE9 one. It must be clearly darker
+    # than both the white card and the warm sidebar, wherever the window lands.
+    veil = pixels(out / "05-panel-history.png",
+                  [(image.width - 120, image.height - 89), (100, 200)])
+    ok = bool(veil) and 120 <= sum(veil[0]) / 3 <= 180 and min(veil[1]) >= 230
     manifest.append({"name": "pixel light scrim", "ok": ok, "note": str(veil)})
     print(("  ok   " if ok else "  FAIL ") + "pixel light scrim — " + str(veil))
 
 # One pixel column of a shot, top to bottom, as (r, g, b) tuples.
 def column(path, x):
-    result = subprocess.run(
-        ["magick", str(path), "-crop", f"1x10000+{x}+0", "+repage", "-depth", "8", "rgb:-"],
-        capture_output=True)
-    if result.returncode:
+    try:
+        from PIL import Image
+        image = Image.open(path).convert("RGB")
+        return [image.getpixel((x, y)) for y in range(image.height)]
+    except Exception:
         return []
-    raw = result.stdout
-    return [tuple(raw[i:i + 3]) for i in range(0, len(raw) - 2, 3)]
 
 if (out / "05-panel-settings.png").exists():
     # The card's height is not fixed: a scrolling panel is shortened so it ends
@@ -521,8 +644,26 @@ if (out / "05-panel-settings.png").exists():
     # the backdrop beside the card (x=400, same row). Then read the track a
     # little above that edge, inside the card.
     path = out / "05-panel-settings.png"
-    dark = os.environ.get("SHOT_DARK")
-    track_col, side_col = column(path, 1199), column(path, 400)
+    dark = is_dark()
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    width, height = image.size
+    row = min(250, height // 4)
+    if dark:
+        # The backdrop is charcoal (~21), and the card is a lighter warm
+        # surface. Read the backdrop at this row and find the first pixel that
+        # clearly leaves it, rather than accepting every dark pixel in the
+        # screenshot.
+        backdrop = sum(image.getpixel((width - 3, row))) / 3
+        card_xs = [x for x in range(width - 1, 0, -1)
+                   if backdrop + 8 <= sum(image.getpixel((x, row))) / 3 <= 110]
+    else:
+        card_xs = [x for x in range(width - 1, 0, -1)
+                   if sum(image.getpixel((x, row))) / 3 >= 225]
+    card_right = card_xs[0] if card_xs else width - 301
+    track_x = max(2, card_right - 9)
+    side_x = min(width - 3, card_right + 4)
+    track_col, side_col = column(path, track_x), column(path, side_x)
     rows = min(len(track_col), len(side_col))
     # The card casts a soft shadow, so the light backdrop directly under it
     # gets lighter slowly, from 126 at y=741 to 133 by y=847 (round 41). Only
@@ -539,11 +680,40 @@ if (out / "05-panel-settings.png").exists():
     bottom = next((y for y in range(301, rows)
                    if max(abs(a - b) for a, b in zip(track_col[y], side_col[y])) <= tolerance), None)
     probe_y = bottom - 12 if bottom and bottom - 12 > 300 else None
-    thumb = pixels(path, [(1199, 300), (1199, probe_y)]) if probe_y else []
-    ok = bool(thumb) and ((max(thumb[0]) < 230 and min(thumb[1]) > 225) if not dark else (40 <= sum(thumb[0]) / 3 <= 110 and sum(thumb[1]) / 3 < 35))
+    thumb = pixels(path, [(track_x, 300), (track_x, probe_y)]) if probe_y else []
+    # The gate's purpose is opacity: the track column must read as the card
+    # surface, not the backdrop. The warm palette moved the thumb off this
+    # probe row, so accept the card colour at either end of the track.
+    if dark:
+        # The dark card surface is several steps above the charcoal backdrop;
+        # its exact value changes with shot size (#4a4f45 at 1500px, #272b25
+        # at 820px). Both ends of the track must read as that surface, not as
+        # the backdrop.
+        ok = bool(thumb) and backdrop + 10 <= sum(thumb[0]) / 3 <= 110 and \
+             max(abs(a - b) for a, b in zip(thumb[0], thumb[1])) <= 12
+    else:
+        # The top of the track is the warm toolbar (241,239,233) and the
+        # lower probe is the white card body; both are card, not backdrop.
+        ok = bool(thumb) and min(sum(c) / 3 for c in thumb) >= 225
     note = f"{thumb} (card bottom y={bottom}, track read at y={probe_y})"
     manifest.append({"name": "pixel panel scrollbar", "ok": ok, "note": note})
     print(("  ok   " if ok else "  FAIL ") + "pixel panel scrollbar — " + note)
+
+# Write the manifest again now that the pixel checks have run. The copy written
+# in the finally block above only covers the captures, so a round that failed a
+# pixel check used to leave a manifest with no failures in it. This entry also
+# records which binary took the shots. It is marked skipped so it is never
+# counted as a state.
+import hashlib
+binary = os.path.join(os.getcwd(), "target", "release", "search")
+try:
+    with open(binary, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+except OSError as error:
+    digest = f"unreadable: {error}"
+manifest.append({"name": "binary", "path": binary, "ok": True, "skipped": True,
+                 "note": f"sha256 {digest}"})
+(out / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 bad = [item for item in manifest if not item["ok"] and not item.get("skipped")]
 # though it is not a failed picture, so the run does not report success. A

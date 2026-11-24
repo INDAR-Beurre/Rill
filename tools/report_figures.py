@@ -8,6 +8,18 @@ copied from a machine instead of from memory.
     python3 tools/report_figures.py            # the table, for the page
     python3 tools/report_figures.py --check    # fail if the page disagrees
 
+A table on the page can name the saved report it was copied from with a
+comment on its own line above it:
+
+    <!-- report: council/round-48/stress-report-before.json -->
+
+--check compares the rows after that comment with that saved report, up to the
+next comment. Rows with no comment above them are compared with
+build/stress-report.json, which every run overwrites. This way a table copied
+from an older full run is not reported as wrong just because a quick run is on
+disk. If a cited report is missing or is not valid JSON, the check stops with
+an error, so it never passes by comparing against nothing.
+
 A result the suite no longer produces is never a crash: the row it would have
 filled is left out and the reason goes to stderr, so a page quoting a figure
 that vanished looks different from one quoting a figure that merely moved.
@@ -208,29 +220,64 @@ SKIP = re.compile(r"^(what|case|the difference|every figure on this page)$", re.
 SEPARATOR = re.compile(r"^:?-{2,}:?$")
 
 
+# A table names the saved report its rows were copied from with a comment on
+# its own line, e.g. <!-- report: council/round-48/stress-report-before.json -->.
+# Rows after a marker cite that report until the next marker. Rows before any
+# marker cite whatever report is on disk (build/stress-report.json).
+SOURCE = re.compile(r"<!--\s*report:\s*(\S+)\s*-->")
+
+
 def doc_rows(path):
-    """The table rows of the page: (label, figure cell), in the order printed."""
+    """The table rows of the page: (label, figure cell, cited report or None),
+    in the order printed."""
     try:
         text = path.read_text()
     except OSError as error:
         raise SystemExit(f"cannot read {path}: {error}")
+    source = None
     for line in text.splitlines():
         line = line.strip()
+        marker = SOURCE.search(line)
+        if marker:
+            source = marker.group(1)
+            continue
         if not line.startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         if len(cells) < 2 or all(SEPARATOR.match(cell) for cell in cells if cell):
             continue
         label = cells[0].replace("*", "").replace("`", "").strip()
-        yield label, cells[1]
+        yield label, cells[1], source
 
 
 def decimals(number):
     return len(number.split(".")[1]) if "." in number else 0
 
 
-def check(found):
-    """Compare every figure the page quotes against the run it cites."""
+_CITED = {}
+
+
+def cited(source):
+    """The figures of a saved report the page cites, read once per check.
+    A cited report that is missing or broken stops the check: the page would
+    otherwise be compared against nothing and pass."""
+    if source not in _CITED:
+        path = ROOT / source
+        try:
+            _CITED[source] = figures(json.loads(path.read_text()))[0]
+        except (OSError, json.JSONDecodeError) as error:
+            raise SystemExit(f"{DOC.name} cites {source}, which cannot be read: {error}")
+    return _CITED[source]
+
+
+def check(current):
+    """Compare every figure the page quotes against the run it cites.
+
+    `current` holds the figures of build/stress-report.json. A table that
+    names its own saved report with a `<!-- report: ... -->` comment is
+    checked against that report instead, so a worst-case table copied from
+    an older full run no longer shows up as a mismatch whenever a quick run
+    is on disk."""
     problems, compared = [], 0
     # DIFFERENCES.md quotes the same memory figure in prose, and prose is
     # not a table row, so it is checked by pattern instead of being left to rot.
@@ -243,16 +290,19 @@ def check(found):
         (r"own anonymous memory is (\d+(?:\.\d+)?) to", "idle anon low"),
     ):
         match = re.search(pattern, prose)
-        if not match or keys not in found:
+        if not match or keys not in current:
             continue
         said = float(match.group(1))
-        real = found[keys]
+        real = current[keys]
         compared += 1
         if abs(said - real) > max(0.5, abs(real) * TOLERANCE):
             problems.append(f"DIFFERENCES.md: says {said:g}, the run says {real:g} ({keys})")
-    for label, cell in doc_rows(DOC):
+    for label, cell, source in doc_rows(DOC):
         if SKIP.match(label):
             continue
+        # The figures this row is checked against: its cited report, or the
+        # one on disk when the table names none.
+        found = current if source is None else cited(source)
         keys = None
         for pattern, mapped in RULES:
             match = pattern.match(label)

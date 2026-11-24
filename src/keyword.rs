@@ -149,7 +149,7 @@ fn host_of_template(template: &str) -> Option<String> {
     }
 }
 
-/// Settings › KEYWORDS: each saved shortcut with a Remove button, then a row
+/// Settings › Keywords: each saved shortcut with a Remove button, then a row
 /// to add one. A shortcut that cannot be saved stays in the fields, and the
 /// reason is shown under them. Nothing is lost when the reason is fixed.
 pub fn settings_section(app: &crate::app::AppRef) -> gtk::Box {
@@ -157,7 +157,8 @@ pub fn settings_section(app: &crate::app::AppRef) -> gtk::Box {
 
     let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
     section.set_margin_top(14);
-    let head = gtk::Label::new(Some("KEYWORDS"));
+    // Sentence case, like "Site permissions" and the other Settings headings.
+    let head = gtk::Label::new(Some("Keywords"));
     crate::ui::class(&head, "group");
     head.set_xalign(0.0);
     section.add(&head);

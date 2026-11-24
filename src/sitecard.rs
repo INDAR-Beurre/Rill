@@ -25,6 +25,13 @@ thread_local! {
     static CLEARING: RefCell<Vec<(u64, Vec<WebsiteData>)>> = const { RefCell::new(Vec::new()) };
     /// The number the next clear is filed under.
     static CLEAR_TICKET: Cell<u64> = const { Cell::new(0) };
+    /// Which button in the rebuilt card should get the keyboard back.
+    static FOCUS_HINT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Whether the site card is on screen. It only asks and never moves focus.
+pub fn is_open() -> bool {
+    OPEN.with(|o| o.borrow().as_ref().is_some_and(|(_, card)| card.is_visible()))
 }
 
 /// The data kinds a site clear removes. Cookies and storage only: the cache is
@@ -220,10 +227,34 @@ pub fn open(app: &App) {
         card.add(&content);
     }
     card.show_all();
+    // The card opens under the shield button that opened it. The shared
+    // prompt card sits at the far right, which put the site card about 560px
+    // away from that button. Readers then saw it as a separate prompt.
+    // The anchor is measured only after the rows are added and shown, because
+    // the width depends on what the card holds: round 54 drew it about 458px
+    // wide, not the 380px it was told to be.
+    let anchor_top = anchor_under_button(app, &card);
     if !was_open {
-        crate::motion::pop_card_in(&card, crate::find::PAGE_TOP, -10, 155);
+        // Every card under the toolbar drops in the same shared 8px on the
+        // entrance role, so the site card, dialogs, welcome and permission
+        // prompts all arrive the same way.
+        crate::motion::pop_card_in(
+            &card,
+            anchor_top,
+            -crate::motion::dur::TRAVEL,
+            crate::motion::dur::ENTER,
+        );
     }
-    if let Some(button) = first_interactive(&content) {
+    // Rebuilding after a zoom or permission change used to drop the keyboard
+    // on the first button again. Keep the control the person was on, matched
+    // by its tip, so a second click or a press of Space lands on the same
+    // action in the new card.
+    let wanted = FOCUS_HINT.with(|hint| hint.borrow_mut().take());
+    let next = wanted
+        .as_deref()
+        .and_then(|tip| interactive_buttons(&content).into_iter().find(|b| b.tooltip_text().as_deref() == Some(tip)))
+        .or_else(|| first_interactive(&content));
+    if let Some(button) = next {
         button.grab_focus();
     } else {
         card.set_can_focus(true);
@@ -232,17 +263,104 @@ pub fn open(app: &App) {
     OPEN.with(|o| *o.borrow_mut() = Some((tab, card)));
 }
 
+/// Puts the site card 8px below the site-information button, with its left
+/// edge lined up with the button. Returns the top margin it set, so the
+/// entrance animation drops into that same place.
+///
+/// The card cannot run past the right edge of the page: at a narrow width it
+/// moves left until it fits inside PAGE_INSET. If the button has no position
+/// yet (it is not mapped), the card falls back to the shared prompt position.
+fn anchor_under_button(app: &crate::app::App, card: &gtk::Box) -> i32 {
+    let Some((left, top)) = anchor_point(app, card) else {
+        return crate::find::PAGE_TOP;
+    };
+    card.set_halign(gtk::Align::Start);
+    card.set_margin_start(left);
+    card.set_margin_end(0);
+    card.set_margin_top(top);
+    top
+}
+
+/// Keeps an open card under its button after the layout moves: a window
+/// resize, a column fold or unfold, or a toolbar reflow. Called from the
+/// overlay's and the toolbar's size_allocate handlers.
+///
+/// Only the left edge is updated. The top margin is what the entrance
+/// animation moves, and these handlers run on every animation frame (each
+/// margin step re-allocates the overlay), so writing the top here would cut
+/// the entrance short. The button's height and the toolbar's height do not
+/// change on resize or fold, so the top stays correct anyway. GTK ignores a
+/// margin set to the value it already has, so repeated calls settle and do
+/// not loop.
+pub fn relayout(app: &App) {
+    let Some(card) = OPEN.with(|o| o.borrow().as_ref().map(|(_, card)| card.clone())) else {
+        return;
+    };
+    if !card.is_mapped() {
+        return;
+    }
+    if let Some((left, _)) = anchor_point(app, &card) {
+        card.set_margin_start(left);
+    }
+}
+
+/// Where the card goes: (left, top) in overlay coordinates, or None when the
+/// site-information button has no position yet.
+fn anchor_point(app: &crate::app::App, card: &gtk::Box) -> Option<(i32, i32)> {
+    const MIN_CARD_WIDTH: i32 = 380;
+    const GAP: i32 = 8;
+    let button = &app.ui.site_info;
+    let overlay = &app.ui.overlay;
+    if !button.is_mapped() {
+        return None;
+    }
+    let (x, y) = button.translate_coordinates(overlay, 0, button.allocated_height())?;
+    // Clamp with the width the card will actually be drawn at, not an
+    // assumed 380px. With halign Start, GTK gives the card its natural width,
+    // and that includes the CSS padding and border plus whatever the rows
+    // ask for. With the old constant, a 458px card could run past the right
+    // PAGE_INSET at narrow window sizes. The caller measures only after the
+    // content is added and shown, so the natural width is the real one.
+    // GTK's preferred width includes the widget's own margins. Without this
+    // subtraction, the margin_start set on the last pass becomes part of the
+    // width used to work out the next one, so at narrow sizes the left edge
+    // can flip between two values (for example 160, 22, 160) instead of
+    // settling. Remove both horizontal margins to get the drawn width.
+    let (minimum, natural) = card.preferred_width();
+    let margins = card.margin_start() + card.margin_end();
+    let card_width = (natural.max(minimum) - margins).max(MIN_CARD_WIDTH);
+    // Both edges: the right edge stays inside PAGE_INSET, and the left edge
+    // never goes past the 12px surface guide. In a window too narrow for both,
+    // the left guide wins.
+    let max_left = (overlay.allocated_width() - card_width - crate::find::PAGE_INSET).max(12);
+    let left = x.clamp(12, max_left);
+    let top = y + GAP;
+    Some((left, top))
+}
+
+fn interactive_buttons(box_: &gtk::Box) -> Vec<gtk::Button> {
+    box_.children()
+        .into_iter()
+        .flat_map(|child| {
+            if let Ok(button) = child.clone().downcast::<gtk::Button>() {
+                return vec![button];
+            }
+            child
+                .downcast::<gtk::Box>()
+                .map(|row| {
+                    row.children()
+                        .into_iter()
+                        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .filter(|button| button.is_sensitive())
+        .collect()
+}
+
 fn first_interactive(box_: &gtk::Box) -> Option<gtk::Button> {
-    box_.children().into_iter().find_map(|child| {
-        if let Ok(button) = child.clone().downcast::<gtk::Button>() {
-            return button.is_sensitive().then_some(button);
-        }
-        let row = child.downcast::<gtk::Box>().ok()?;
-        row.children()
-            .into_iter()
-            .filter_map(|w| w.downcast::<gtk::Button>().ok())
-            .find(|b| b.is_sensitive())
-    })
+    interactive_buttons(box_).into_iter().next()
 }
 
 /// Takes the card down. The keyboard goes back to the page.
@@ -252,7 +370,7 @@ pub fn dismiss(app: &App) {
     permissions::focus_page(app);
     let overlay = app.ui.overlay.clone();
     let card_for_done = card.clone();
-    crate::motion::fade_out_then(&card, 95, move || {
+    crate::motion::fade_out_then(&card, crate::motion::dur::EXIT, move || {
         overlay.remove(&card_for_done);
     });
 }
@@ -278,7 +396,7 @@ pub fn key(app: &App, event: &gtk::gdk::EventKey) -> bool {
     true
 }
 
-fn text(card: &gtk::Box, message: &str, class: &str) {
+fn text(card: &gtk::Box, message: &str, class: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(message));
     crate::ui::class(&label, class);
     label.set_xalign(0.0);
@@ -286,6 +404,7 @@ fn text(card: &gtk::Box, message: &str, class: &str) {
     label.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
     label.set_max_width_chars(44);
     card.add(&label);
+    label
 }
 
 fn button(label: &str, tip: &str) -> gtk::Button {
@@ -312,8 +431,42 @@ fn row(card: &gtk::Box, message: &str, buttons: Vec<gtk::Button>) {
     card.add(&line);
 }
 
+/// A thin rule between the card's groups. Gemini R59 fix 10 found the zoom
+/// row, Permissions and Add-ons running together as one list, with only the
+/// small group label between them. A 1px separator with even space above and
+/// below marks where each group starts. The colour comes from the theme's
+/// separator rule, the same divider the tab column uses.
+fn rule(card: &gtk::Box) {
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    crate::ui::class(&separator, "sitecard-rule");
+    separator.set_margin_top(6);
+    separator.set_margin_bottom(2);
+    card.add(&separator);
+}
+
 fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
-    text(card, &model.security.text(), "settingdesc");
+    let security = text(card, &model.security.text(), "settingdesc");
+    // Round-68 review: the only warning on a plain-http page read like body
+    // copy. Weight and the alarm colour make the state legible before the
+    // sentence is read, while the text itself stays the same.
+    if matches!(model.security, Security::Plain | Security::Problem(_)) {
+        crate::ui::class(&security, "security-warning");
+        // The stylesheet class is the source of truth for the look, but a
+        // warning that renders in body grey is no warning. Pango attributes
+        // travel with the label, so the alarm colour survives theme swaps and
+        // styling changes that would otherwise wash the sentence out.
+        if let Some(app) = crate::app::current() {
+            let danger = app.palette.borrow().danger;
+            let attrs = gtk::pango::AttrList::new();
+            attrs.insert(gtk::pango::AttrColor::new_foreground(
+                u16::from(danger.0) * 257,
+                u16::from(danger.1) * 257,
+                u16::from(danger.2) * 257,
+            ));
+            attrs.insert(gtk::pango::AttrInt::new_weight(gtk::pango::Weight::Bold));
+            security.set_attributes(Some(&attrs));
+        }
+    }
 
     let zoom_out = button("-", "Zoom out");
     if let Some(access) = zoom_out.accessible() {
@@ -322,6 +475,7 @@ fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
     zoom_out.set_sensitive(model.zoom > 40);
     zoom_out.connect_clicked(move |_| {
         if let Some(app) = crate::app::current() {
+            FOCUS_HINT.with(|hint| *hint.borrow_mut() = Some("Zoom out".into()));
             app.zoom(-0.1);
             open(&app);
         }
@@ -333,6 +487,7 @@ fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
     zoom_in.set_sensitive(model.zoom < 300);
     zoom_in.connect_clicked(move |_| {
         if let Some(app) = crate::app::current() {
+            FOCUS_HINT.with(|hint| *hint.borrow_mut() = Some("Zoom in".into()));
             app.zoom(0.1);
             open(&app);
         }
@@ -341,12 +496,14 @@ fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
     reset.set_sensitive(model.zoom != 100);
     reset.connect_clicked(move |_| {
         if let Some(app) = crate::app::current() {
+            FOCUS_HINT.with(|hint| *hint.borrow_mut() = Some("Back to the normal size for this site".into()));
             app.reset_zoom();
             open(&app);
         }
     });
     row(card, &format!("Zoom {}%", model.zoom), vec![zoom_out, zoom_in, reset]);
 
+    rule(card);
     text(card, "Permissions", "group");
     if model.private {
         text(card, "Private tab: nothing is saved here, so these are shown read-only.", "settingdesc");
@@ -370,12 +527,20 @@ fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
             if allowed { "Block this from now on" } else { "Allow this from now on" },
         );
         let (flip_host, flip_kind) = (host.clone(), kind);
-        flip.connect_clicked(move |_| apply(&flip_host, flip_kind, Change::Set(!allowed)));
+        let flip_tip = format!("{} this from now on", if allowed { "Block" } else { "Allow" });
+        flip.connect_clicked(move |_| {
+            FOCUS_HINT.with(|hint| *hint.borrow_mut() = Some(flip_tip.clone()));
+            apply(&flip_host, flip_kind, Change::Set(!allowed));
+        });
         let forget = button("Forget", "Ask again next time");
-        forget.connect_clicked(move |_| apply(&host, kind, Change::Forget));
+        forget.connect_clicked(move |_| {
+            FOCUS_HINT.with(|hint| *hint.borrow_mut() = Some("Ask again next time".into()));
+            apply(&host, kind, Change::Forget);
+        });
         row(card, &what, vec![flip, forget]);
     }
 
+    rule(card);
     text(card, "Add-ons on this page", "group");
     if model.addons.is_empty() {
         text(card, "No installed add-on acts on this page.", "settingdesc");
@@ -385,21 +550,39 @@ fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
     }
 
     if !model.host.is_empty() {
+        // Clearing data cannot be undone, so it gets its own section. Without a
+        // divider it read as one more line of the add-on list above it
+        // (Gemini R60 polish). It uses the same rule() hairline as the
+        // permission and add-on sections, so the card keeps one rhythm.
+        rule(card);
         let clear = button("Clear this site's data", "Remove cookies and storage kept for this site");
+        crate::ui::class(&clear, "sitecard-clear");
         let host = model.host.clone();
         clear.connect_clicked(move |_| {
             if let Some(app) = crate::app::current() {
+                FOCUS_HINT.with(|hint| *hint.borrow_mut() = None);
                 clear_site_data(&app, tab, &host);
             }
         });
-        row(
-            card,
+        // The explanation and the destructive button share a column: beside
+        // a three-line paragraph the button crowded the second line (Gemini
+        // R73 review). Give the words their own lines, then the action.
+        let clear_block = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let clear_note = text(
+            &clear_block,
             &format!(
                 "Removes cookies and storage kept for {} and the domain it belongs to. Sibling sites are not touched.",
                 model.host
             ),
-            vec![clear],
+            "settingdesc",
         );
+        clear_note.set_line_wrap(true);
+        clear_note.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        clear_note.set_max_width_chars(48);
+        clear.set_halign(gtk::Align::Start);
+        clear_block.add(&clear_note);
+        clear_block.add(&clear);
+        card.add(&clear_block);
     }
 }
 

@@ -1,12 +1,45 @@
 # Changelog
 
+## Unreleased
+
+The native UI makeover is local and unreleased. Published `1.0.2` assets remain
+unchanged; no new memory/performance measurements are claimed for this work.
+
+### An entirely new native interface
+
+- New editorial start page with oversized serif typography, a hand-drawn orbital illustration, an inline search field, personal bookmarks, and deduplicated recent pages. Curated links are clearly identified when no bookmarks exist.
+- Warm paper and charcoal/olive appearances with burnt-orange/apricot accents, a coherent native icon system, and a new orbital application icon.
+- Permanent, responsive navigation toolbar with an address display, back/forward, reload/stop, site information, reading mode, bookmarking, sidebar toggle, and window controls.
+- Rebuilt tab column with title/host hierarchy, an explicit new/private-tab action, pinned-page section, tab count, and accessible library/history/download/settings controls.
+- Larger panel workspace with a navigation rail, editorial headings, ruled settings sections, native appearance previews, organized lists, and useful empty states. Compact panels switch to icon navigation and reflow controls.
+- New tabs focus the start-page search instead of immediately covering the page with the omnibox. `Ctrl L` retains the unified search/address field, now with a keyboard guidance footer.
+- Private start pages never show regular bookmarks or history; credentials are omitted from the toolbar address, and plain HTTP stays explicitly visible.
+- Added `tools/test_ui.py` as the current real GTK visual/behavior walkthrough, with an isolated profile, light/dark switching, responsive sizes, actual URL entry, normal/private data separation, settings and all panels, navigation overflow, sidebar folding, the fullscreen hide/restore path, and screenshot palette checks.
+
+### Validation and packaging
+
+- Current Rust suite tally: **272 passing tests and 1 ignored (273 total)**. Final verification of the local makeover is pending.
+- The seven gallery images in `docs/screenshots/` are to be replaced with actual final GTK captures from `tools/test_ui.py`, with its log and manifest as provenance. Replacement and final walkthrough verification are pending; simulated UI is not screenshot evidence.
+- `tools/appimage.sh` supports `APPIMAGE_OUT`. The planned local artifact is `build/Search-redesign-x86_64.AppImage`; it must not overwrite the released `Search-1.0.2-x86_64.AppImage` or its checksum.
+- The local font bundle includes Liberation Serif with its SIL Open Font License 1.1, alongside DejaVu Sans and Adwaita fonts. The font license must be retained in the packaged artifact.
+
 ## 1.0.2 (2026-11-21)
 
 ### Edge-to-edge chrome, VSync motion, real-site compatibility & security hardening
 
-Verified across the current 34-file Rust codebase (`src/*.rs`, 22,972 lines; ~3.8 MB stripped `target/release/search` binary): **269 Rust unit tests passed (1 ignored, 0 failed)** (`cargo test --release`), **117/117 stress checks passed** (`python3 tools/stress.py`), **18/18 visual states (light & dark)** captured with all pixel checks passing (`docs/screenshots/` updated from `council/round-47` & `council/round-47-dark`), **all extension suite checks passed** (`tools/extensions.py`), and **15,775 WebKit content-blocker rules** across **3 lists** (`network.json`, `hide-0.json`, `hide-sites.json`) compiled cleanly with 0 rejected (`tools/check_shield.py`).
+Historical release validation recorded **269 Rust unit tests passed (1 ignored,
+0 failed)** (`cargo test --release`), **117/117 stress checks passed**
+(`python3 tools/stress.py`), **18/18 visual states (light & dark)** captured with
+the legacy pixel checks passing (`council/round-47` and `council/round-47-dark`),
+**all extension suite checks passed** (`tools/extensions.py`), and **15,775
+WebKit content-blocker rules** across **3 lists** (`network.json`, `hide-0.json`,
+`hide-sites.json`) compiled cleanly with 0 rejected (`tools/check_shield.py`).
+The stripped `1.0.2` binary was approximately **3.8 MB**. These results belong to
+the released interface; in particular, the old hardcoded `tools/shots.sh` pixel
+checks do not establish a pass for the local redesign.
 
-Latest measured `build/stress-report.json` figures:
+Historical `1.0.2` measurements recorded in `build/stress-report.json` at release
+time (not remeasured for the local makeover):
 - One idle tab: **218.1 MB total PSS** (94.2 MB anonymous PSS).
 - Tab switch: **1.0 ms mean**, **1.7 ms p95**, **6.5 ms worst** over 300 switches.
 - Panel toggles: **22 ms mean**, **101 ms worst** over 80 toggles.
@@ -30,9 +63,10 @@ Latest measured `build/stress-report.json` figures:
 
 ### Fixed: the browser died at launch when the disk was full
 
-The release build has 0 warnings, and 236 tests pass with 1 ignored. A fresh
-browser launched with its error output on `/dev/full`, where every write
-fails, opened its test socket after about 1.4 s, answered a ping, opened a
+At this stage of `1.0.2`, the release build had 0 warnings, and 236 tests passed
+with 1 ignored. A fresh browser launched with its error output on `/dev/full`,
+where every write fails, opened its test socket after about 1.4 s, answered a
+ping, opened a
 page, answered again 3 s later and quit cleanly with exit code 0. Before the
 fix, the same launch died with SIGABRT (exit 134).
 
@@ -61,9 +95,9 @@ fix, the same launch died with SIGABRT (exit 134).
 
 ### Round 3: Peek, SiteCard and folding the tab column
 
-None of the changes below have been tried on a display yet. 236 tests pass,
-1 is ignored, the build has 0 warnings, and the stress suite passes 106 of
-106 checks.
+At this stage, none of the changes below had been tried on a display. 236 tests
+passed, 1 was ignored, the build had 0 warnings, and the stress suite passed
+106 of 106 checks.
 
 - Peek (`src/peek.rs`): Shift-click a link to open it in a card over the
   page. Escape closes the card. Keep moves the page that is already open into a
@@ -97,9 +131,9 @@ None of the changes below have been tried on a display yet. 236 tests pass,
 
 ### Fixes from critic round 2
 
-None of the changes below have been tried on a display yet. Each has unit
-tests for the parts that do not need GTK: 213 tests pass, 1 is ignored, and
-the build has 0 warnings.
+At this stage, none of the changes below had been tried on a display. Each had
+unit tests for the parts that do not need GTK: 213 tests passed, 1 was ignored,
+and the build had 0 warnings.
 
 - Keys: Ctrl H opens History. Ctrl Shift P no longer prints; only Ctrl P
   does. Escape closes the address field or the find bar first, and only then

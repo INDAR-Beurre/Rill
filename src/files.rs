@@ -78,8 +78,25 @@ pub fn path_in(dir: &Path, name: &str) -> PathBuf {
     dir.join(name)
 }
 
+/// The largest record file read back from disk. Every file the browser writes
+/// for itself stays far below this. Anything bigger was hand-edited, damaged
+/// or planted, and reading it whole would put all of it in memory before
+/// parsing even starts. A file over the cap is treated as missing, the same as
+/// one that doesn't parse.
+const READ_JSON_LIMIT: u64 = 32 * 1024 * 1024;
+
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
-    let text = fs::read_to_string(path).ok()?;
+    use std::io::Read;
+
+    // Read through `take` instead of checking the size first, so a file that
+    // grows between the check and the read still can't go over the cap. One
+    // extra byte shows whether the file was longer than the limit.
+    let file = fs::File::open(path).ok()?;
+    let mut text = String::new();
+    file.take(READ_JSON_LIMIT + 1).read_to_string(&mut text).ok()?;
+    if text.len() as u64 > READ_JSON_LIMIT {
+        return None;
+    }
     serde_json::from_str(&text).ok()
 }
 
@@ -87,9 +104,104 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
 ///
 /// The record is owner-only before it lands: these files hold every page
 /// visited, and the default umask would leave them readable by other users.
-pub fn write_json<T: Serialize>(path: &Path, value: &T) {
-    if let Ok(text) = serde_json::to_string(value) {
-        let _ = write_private(path, text.as_bytes());
+///
+/// Returns true only when the record reached the disk. The save timer uses
+/// this to keep a file marked dirty after a failed write (a full disk, a
+/// read-only config folder), so the next timer tries again and the change
+/// is not silently lost. Callers that don't care can ignore the result.
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> bool {
+    match serde_json::to_string(value) {
+        Ok(text) => write_private(path, text.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// The newest snapshot number written to each file through
+/// `write_json_ordered`. The same lock covers the write itself, so only one
+/// ordered writer works at a time, and a file never goes back to older data.
+static LATEST_WRITE: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+static NEXT_SNAPSHOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Numbers a snapshot. Call it on the main thread at the moment the data is
+/// copied out of the app's state, so the numbers follow the order in which
+/// the state actually changed.
+pub fn snapshot_number() -> u64 {
+    NEXT_SNAPSHOT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Writes `value` to `path` unless a newer snapshot already reached that file.
+///
+/// It is safe to call from a worker thread. A background save of an older
+/// snapshot that finishes late is skipped instead of renamed over newer data
+/// (the synchronous save at window close, for one). A skip returns true:
+/// what is on disk is newer than what this call carried, so nothing was lost
+/// and the caller must not mark the file dirty again.
+pub fn write_json_ordered<T: Serialize>(path: &Path, value: &T, snapshot: u64) -> bool {
+    let Ok(text) = serde_json::to_string(value) else { return false };
+    let mut latest = LATEST_WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if latest.iter().any(|(written, seen)| written == path && *seen >= snapshot) {
+        return true;
+    }
+    let landed = write_private(path, text.as_bytes()).is_ok();
+    if landed {
+        match latest.iter_mut().find(|(written, _)| written == path) {
+            Some(entry) => entry.1 = snapshot,
+            None => latest.push((path.to_path_buf(), snapshot)),
+        }
+    }
+    landed
+}
+
+#[cfg(test)]
+mod ordered_write_tests {
+    use super::{snapshot_number, write_json_ordered};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir()
+            .join(format!("search-ordered-{}-{nanos}", std::process::id()))
+            .join(name)
+    }
+
+    fn read(path: &std::path::Path) -> Vec<String> {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_late_older_snapshot_does_not_overwrite_a_newer_one() {
+        let path = scratch("session.json");
+        let older = snapshot_number();
+        let newer = snapshot_number();
+        assert!(write_json_ordered(&path, &vec!["newer"], newer));
+        // The older one finishes last, as a slow background write would.
+        assert!(write_json_ordered(&path, &vec!["older"], older));
+        assert_eq!(read(&path), vec!["newer".to_string()]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn snapshots_written_in_order_all_land() {
+        let path = scratch("history.json");
+        for word in ["one", "two", "three"] {
+            assert!(write_json_ordered(&path, &vec![word], snapshot_number()));
+            assert_eq!(read(&path), vec![word.to_string()]);
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn ordering_is_kept_per_file() {
+        let first = scratch("a.json");
+        let second = first.with_file_name("b.json");
+        let early = snapshot_number();
+        assert!(write_json_ordered(&first, &vec!["late"], snapshot_number()));
+        // A newer write to a.json says nothing about b.json.
+        assert!(write_json_ordered(&second, &vec!["early"], early));
+        assert_eq!(read(&second), vec!["early".to_string()]);
+        let _ = std::fs::remove_dir_all(first.parent().unwrap());
     }
 }
 

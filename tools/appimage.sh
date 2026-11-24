@@ -7,7 +7,7 @@ BUILD="$ROOT/build"
 APPDIR="$BUILD/AppDir"
 VERSION=$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' || true)
 VERSION=${VERSION:-1.0.1}
-OUT="$BUILD/Search-${VERSION}-x86_64.AppImage"
+OUT="${APPIMAGE_OUT:-$BUILD/Search-${VERSION}-x86_64.AppImage}"
 TOOL="${APPIMAGETOOL:-$BUILD/tools/appimagetool-x86_64.AppImage}"
 HOOK="$BUILD/tools/libapprun_hooks-x86_64.so"
 [[ $(uname -m) == x86_64 ]] || { echo 'This script builds x86_64 only.' >&2; exit 2; }
@@ -37,7 +37,9 @@ if ! command -v patchelf >/dev/null; then
 fi
 cd "$ROOT"
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1} cargo build --release
-rm -rf "$APPDIR" "$OUT" "$BUILD/appimagetool"
+rm -rf "$APPDIR" "$BUILD/appimagetool"
+mkdir -p "$(dirname "$OUT")"
+rm -f "$OUT" "$OUT.sha256"
 mkdir -p "$APPDIR"/{usr/{bin,lib,share},etc/fonts}
 cp target/release/search "$APPDIR/usr/bin/search"
 cp packaging/Search.desktop "$APPDIR/Search.desktop"
@@ -82,6 +84,10 @@ cp -a /usr/share/X11 "$APPDIR/usr/share/"
 mkdir -p "$APPDIR/usr/share/fonts"
 cp -a /usr/share/fonts/TTF/DejaVuSans*.ttf "$APPDIR/usr/share/fonts/"
 cp -a /usr/share/fonts/Adwaita "$APPDIR/usr/share/fonts/"
+cp -a /usr/share/fonts/liberation/LiberationSerif-*.ttf "$APPDIR/usr/share/fonts/"
+if [[ -f /usr/share/licenses/ttf-liberation/LICENSE ]]; then
+  install -Dm644 /usr/share/licenses/ttf-liberation/LICENSE "$APPDIR/usr/share/licenses/search/LiberationSerif-LICENSE"
+fi
 # GTK/WebKit use the standard locale directory if present. It is optional.
 for catalog in gtk30 glib20; do
   find /usr/share/locale -path "*/LC_MESSAGES/$catalog.mo" -print0 2>/dev/null | while IFS= read -r -d '' source; do
@@ -147,5 +153,5 @@ rm -rf "$BUILD/appimagetool"
 (cd "$BUILD" && "$TOOL" --appimage-extract >/dev/null && mv squashfs-root appimagetool)
 ARCH=x86_64 "$BUILD/appimagetool/AppRun" --no-appstream "$APPDIR" "$OUT"
 chmod +x "$OUT"
-sha256sum "$OUT" > "$OUT.sha256"
+(cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")") > "$OUT.sha256"
 echo "Built $OUT"

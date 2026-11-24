@@ -1,8 +1,3 @@
-// Every colour in the interface, as a light/dark pair.
-//
-// The values come from the Mac original's Design.swift (neutral greys, one
-// step apart), kept as pairs so the whole window resolves against one
-// appearance: light, dark, or whatever the desktop is doing.
 use crate::store::Look;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -22,13 +17,8 @@ impl Rgb {
     }
 }
 
-fn g(light: f32, dark: f32) -> (Rgb, Rgb) {
-    let v = |x: f32| (x * 255.0).round().clamp(0.0, 255.0) as u8;
-    (Rgb(v(light), v(light), v(light)), Rgb(v(dark), v(dark), v(dark)))
-}
-
-fn pair(light: Rgb, dark: Rgb) -> (Rgb, Rgb) {
-    (light, dark)
+const fn hex(value: u32) -> Rgb {
+    Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }
 
 #[derive(Clone, Copy)]
@@ -84,45 +74,41 @@ impl Palette {
             Look::Dark => true,
             Look::System => dark_desktop,
         };
-        let pick = |(l, d): (Rgb, Rgb)| if dark { d } else { l };
+        let pick = |light, night| hex(if dark { night } else { light });
         Palette {
-            ground: pick(g(1.0, 0.043)),
-            ink: pick(g(0.09, 0.93)),
-            // #6E6E6E read 5.10:1 on white but only 4.43:1 on the pressed
-            // wash and 3.68:1 on a live pin, and muted is the colour of text
-            // in both. #5E5E5E reads 6.48:1 on white, 5.64:1 on the wash,
-            // 4.68:1 on a live pin. The dark went the other way for the same
-            // reason: #9A9A9A was 3.15:1 for the letter on a live pin, and
-            // #A6A6A6 is 4.53:1 there and still 8.09:1 on the ground.
-            muted: pick(pair(Rgb(0x5E, 0x5E, 0x5E), Rgb(0xA6, 0xA6, 0xA6))),
-            // The one the critic caught at 2.30:1. #6C6C6C now reads 5.25:1
-            // on white and 4.86:1 on a hovered row; #8E8E8E reads 6.01:1 on
-            // the dark ground and 4.56:1 on its hover.
-            faint: pick(pair(Rgb(0x6C, 0x6C, 0x6C), Rgb(0x8E, 0x8E, 0x8E))),
-            // #E8E8E8 was 1.23:1 against white, which is not a line you can
-            // see. #D2D2D2 is 1.51:1 and #323232 is 1.54:1 on the dark
-            // ground: quiet, but a boundary that exists.
-            hairline: pick(pair(Rgb(0xD2, 0xD2, 0xD2), Rgb(0x32, 0x32, 0x32))),
-            wash: pick(pair(Rgb(0xEF, 0xEF, 0xEF), Rgb(0x3A, 0x3A, 0x3A))),
-            hover: pick(pair(Rgb(0xF6, 0xF6, 0xF6), Rgb(0x27, 0x27, 0x27))),
-            side_hover: pick(pair(Rgb(0xEF, 0xEF, 0xEE), Rgb(0x2C, 0x2C, 0x2C))),
-            side_tile: pick(pair(Rgb(0xF6, 0xF6, 0xF6), Rgb(0x2A, 0x2A, 0x2A))),
-            // A live pin carries the same muted letter as a hovering one, so
-            // the fill has to stay light enough to read against: #4A4A4A gave
-            // that letter 3.15:1 and is now #3C3C3C at 4.53:1, still a
-            // 1.30:1 step up from the tile it sits in.
-            side_pin_live: pick(pair(Rgb(0xDB, 0xDB, 0xD9), Rgb(0x3C, 0x3C, 0x3C))),
-            card: pick(pair(Rgb(0xFF, 0xFF, 0xFF), Rgb(0x0B, 0x0B, 0x0B))),
-            // #C0392B is 5.44:1 on white, so light keeps it. On the dark
-            // ground it was 3.62:1; #D25041 is 4.65:1 there and still carries
-            // white at 4.23:1, which is what the close mark is drawn in.
-            danger: pick(pair(Rgb(0xC0, 0x39, 0x2B), Rgb(0xD2, 0x50, 0x41))),
+            ground: pick(0xF1EFE9, 0x191B1A),
+            ink: pick(0x272724, 0xEDEFE8),
+            muted: pick(0x595A52, 0xB4BBAE),
+            faint: pick(0x67685E, 0xA4AD9C),
+            hairline: pick(0xC1BDB2, 0x4A4F45),
+            wash: pick(0xE2E0D8, 0x3B4037),
+            hover: pick(0xECEAE3, 0x30362D),
+            side_hover: pick(0xE7E4DB, 0x34382F),
+            side_tile: pick(0xF8F6F0, 0x292E27),
+            side_pin_live: pick(0xD8D3C6, 0x404638),
+            card: pick(0xFCFBF8, 0x202321),
+            danger: pick(0xAF392C, 0xE07463),
         }
     }
 
-    /// The column's own ground: the page's white in the Mac build.
     pub fn side_bg(&self) -> Rgb {
-        self.card
+        self.ground
+    }
+
+    pub fn accent(&self) -> Rgb {
+        hex(if self.is_dark() { 0xF69268 } else { 0xB74525 })
+    }
+
+    pub fn accent_ink(&self) -> Rgb {
+        hex(if self.is_dark() { 0x261D16 } else { 0xFFFFFF })
+    }
+
+    pub fn surface(&self) -> Rgb {
+        hex(if self.is_dark() { 0x272B25 } else { 0xFFFFFF })
+    }
+
+    pub fn tint(&self) -> Rgb {
+        hex(if self.is_dark() { 0x3E3027 } else { 0xF4DDCF })
     }
 
     pub fn is_dark(&self) -> bool {
@@ -156,10 +142,8 @@ impl Palette {
     }
 }
 
-/// The font stack: the Mac build's SF Pro, then the closest thing each Linux
-/// install is likely to have. Inter and Adwaita Sans are SF's near neighbours.
 pub const FONT: &str =
-    "\"SF Pro Text\", \"SF Pro\", Inter, \"Adwaita Sans\", \"Noto Sans\", \"Segoe UI\", sans-serif";
+    "Inter, \"Adwaita Sans\", \"Noto Sans\", Cantarell, sans-serif";
 pub const MONO: &str = "\"SF Mono\", \"JetBrains Mono\", \"DejaVu Sans Mono\", monospace";
 
 #[cfg(test)]
@@ -230,26 +214,16 @@ mod tests {
 
     #[test]
     fn the_field_edge_and_the_divider_are_not_invisible() {
-        // These four are not palette fields: css.rs writes them as hex, which
-        // is why they are literals here rather than fields of the struct. The
-        // test is a tripwire on that file, not a second opinion about it: the
-        // css builder owns those tokens, and 1.18:1 is the number that made an
-        // edge nobody could see. If those hexes move, move these with them.
-        //
-        // A hairline is allowed to be quiet, so 1.5 is the floor. All four
-        // clear it: 2.08 and 2.68 for the field edge, 1.51 and 1.78 for the
-        // divider.
-        let field_border = [Rgb(0xB4, 0xB4, 0xB2), Rgb(0x5E, 0x5E, 0x5E)];
-        let field_fill = [Rgb(0xFF, 0xFF, 0xFF), Rgb(0x1A, 0x1A, 0x1A)];
-        let divider = [Rgb(0xD2, 0xD2, 0xD0), Rgb(0x3C, 0x3C, 0x3C)];
         let palettes = [light(), dark()];
-        for (i, appearance) in ["light", "dark"].into_iter().enumerate() {
-            let ratio = contrast(field_border[i], field_fill[i]);
+        for (index, appearance) in ["light", "dark"].into_iter().enumerate() {
+            let palette = palettes[index];
+            let field_border = crate::css::quiet::pick(crate::css::quiet::FIELD_BORDER, palette.is_dark());
+            let ratio = contrast(field_border, palette.surface());
             assert!(
                 ratio >= 1.5,
                 "{appearance}: the field edge is {ratio:.2}:1 against its own fill"
             );
-            let ratio = contrast(divider[i], palettes[i].ground);
+            let ratio = contrast(palette.hairline, palette.ground);
             assert!(
                 ratio >= 1.5,
                 "{appearance}: the divider is {ratio:.2}:1 against the page"
@@ -322,6 +296,14 @@ mod tests {
                 "{appearance}: white on {} is {ratio:.2}:1",
                 p.danger.hex()
             );
+        }
+    }
+
+    #[test]
+    fn accent_actions_have_readable_labels() {
+        for palette in [light(), dark()] {
+            assert!(contrast(palette.accent_ink(), palette.accent()) >= 4.5);
+            assert!(contrast(palette.accent(), palette.surface()) >= 3.0);
         }
     }
 }

@@ -48,7 +48,7 @@ pub fn cancel_download(id: u64) -> bool {
     }
 }
 
-fn shielded_for(app: &AppRef, url: &str) -> bool {
+pub(crate) fn shielded_for(app: &crate::app::App, url: &str) -> bool {
     app.prefs.borrow().shield && !crate::shield::is_allowed(&crate::shield::host_of(url))
 }
 
@@ -156,6 +156,27 @@ fn devtools_enabled_for(value: Option<&std::ffi::OsStr>) -> bool {
     value != Some(std::ffi::OsStr::new("0"))
 }
 
+/// Whether the low-memory profile is on. main() sets SEARCH_LOW_MEMORY before
+/// GTK starts when either the saved preference or the environment asks for
+/// it. The answer is read once, so every context and view built during this
+/// run uses the same profile.
+pub(crate) fn low_memory_profile() -> bool {
+    static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROFILE.get_or_init(|| std::env::var_os("SEARCH_LOW_MEMORY").is_some())
+}
+
+/// The cache model for both contexts. DocumentBrowser keeps decoded pages and
+/// resources around so Back and Forward feel instant. DocumentViewer keeps
+/// almost nothing between pages, which is the trade the low-memory profile
+/// asks for.
+fn cache_model() -> CacheModel {
+    if low_memory_profile() {
+        CacheModel::DocumentViewer
+    } else {
+        CacheModel::DocumentBrowser
+    }
+}
+
 pub(crate) fn settings() -> Settings {
     let settings = Settings::new();
     // The inspector is enabled by default so F12 / Ctrl+Shift+I work out of
@@ -169,7 +190,9 @@ pub(crate) fn settings() -> Settings {
     settings.set_enable_media_stream(true);
     settings.set_enable_mediasource(true);
     settings.set_enable_webaudio(true);
-    settings.set_enable_page_cache(true);
+    // The page cache holds whole live pages (DOM, scripts, layers) in memory
+    // for instant Back. In the low-memory profile Back reloads the page.
+    settings.set_enable_page_cache(!low_memory_profile());
     settings.set_default_charset("utf-8");
     settings.set_enable_site_specific_quirks(true);
     settings.set_javascript_can_open_windows_automatically(false);
@@ -228,7 +251,14 @@ fn configure_languages(context: &WebContext) {
         return;
     }
     let refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+    // Accept-Language is always sent, so sites still pick the right language.
     context.set_preferred_languages(&refs);
+    // Spellcheck loads a dictionary for every locale up front, in every page
+    // process. The low-memory profile skips it; ordinary runs keep it.
+    if low_memory_profile() {
+        context.set_spell_checking_enabled(false);
+        return;
+    }
     context.set_spell_checking_enabled(true);
     context.set_spell_checking_languages(&refs);
 }
@@ -248,6 +278,7 @@ pub fn page_memory_pressure() -> webkit2gtk::MemoryPressureSettings {
     pressure
 }
 
+
 /// The private session's context. It used to be `WebContext::new_ephemeral()`,
 /// which takes no settings, so private page processes had no memory limit.
 /// Building it with an ephemeral data manager is the same thing as
@@ -258,7 +289,7 @@ pub fn ephemeral_context() -> WebContext {
         .website_data_manager(&manager)
         .memory_pressure_settings(&page_memory_pressure())
         .build();
-    context.set_cache_model(CacheModel::DocumentBrowser);
+    context.set_cache_model(cache_model());
     configure_languages(&context);
     context
 }
@@ -295,7 +326,7 @@ pub fn shared_context() -> WebContext {
         .website_data_manager(&manager)
         .memory_pressure_settings(&page_memory_pressure())
         .build();
-    context.set_cache_model(CacheModel::DocumentBrowser);
+    context.set_cache_model(cache_model());
     if let Some(cookies) = context.cookie_manager() {
         cookies.set_persistent_storage(
             &data.join("cookies.sqlite").to_string_lossy(),
@@ -368,31 +399,48 @@ pub fn view_for(app: &AppRef, tab: TabId) -> Option<WebView> {
     Some(view)
 }
 
+/// True when `view` is still the view the tab shows. Callbacks capture the
+/// tab id when the view is attached. After a sleep and wake, a Keep from
+/// Peek, or a crash and reload, the tab can have a newer view, and a signal
+/// from the retired one must not change the live tab's title, address,
+/// icon, loading state or error page. Every callback that changes tab state
+/// checks this first, the same check dialogs.rs and permissions.rs use.
+fn is_live(app: &crate::app::App, tab: TabId, view: &WebView) -> bool {
+    app.view(tab).as_ref() == Some(view)
+}
+
 /// Binds a view's callbacks to a tab id. A peek that is kept calls this once
 /// its view has been adopted as a tab, the same way a pop-up window does.
 pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     {
         let weak = app.weak();
         view.connect_title_notify(move |view| {
-            let title = view.title().map(|t| t.to_string()).unwrap_or_default();
-            if let Some(app) = weak.upgrade() {
-                app.set_title(tab, &title);
+            let Some(app) = weak.upgrade() else { return };
+            if !is_live(&app, tab, view) {
+                return;
             }
+            let title = view.title().map(|t| t.to_string()).unwrap_or_default();
+            app.set_title(tab, &title);
         });
     }
     {
         let weak = app.weak();
         view.connect_favicon_notify(move |view| {
-            let icon = view.favicon();
-            if let Some(app) = weak.upgrade() {
-                app.set_icon(tab, icon);
+            let Some(app) = weak.upgrade() else { return };
+            if !is_live(&app, tab, view) {
+                return;
             }
+            app.set_icon(tab, view.favicon());
         });
     }
     {
         let weak = app.weak();
         view.connect_uri_notify(move |view| {
-            if let (Some(app), Some(uri)) = (weak.upgrade(), view.uri()) {
+            let Some(app) = weak.upgrade() else { return };
+            if !is_live(&app, tab, view) {
+                return;
+            }
+            if let Some(uri) = view.uri() {
                 app.set_uri(tab, &uri);
             }
         });
@@ -401,6 +449,11 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         let weak = app.weak();
         view.connect_load_changed(move |view, event| {
             let Some(app) = weak.upgrade() else { return };
+            // A retired view's load events must not dismiss the live tab's
+            // prompts, reset its reader state or restart its progress bar.
+            if !is_live(&app, tab, view) {
+                return;
+            }
             match event {
                 webkit2gtk::LoadEvent::Started => {
                     app.reading_tabs.borrow_mut().remove(&tab);
@@ -445,15 +498,20 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     {
         let weak = app.weak();
         view.connect_is_loading_notify(move |view| {
-            if let Some(app) = weak.upgrade() {
-                app.sync_nav(tab, view);
+            let Some(app) = weak.upgrade() else { return };
+            if !is_live(&app, tab, view) {
+                return;
             }
+            app.sync_nav(tab, view);
         });
     }
     {
         let weak = app.weak();
         view.connect_estimated_load_progress_notify(move |view| {
             if let Some(app) = weak.upgrade() {
+                if !is_live(&app, tab, view) {
+                    return;
+                }
                 if view.is_loading() {
                     app.set_load_progress(tab, view.estimated_load_progress().clamp(0.08, 0.96));
                 }
@@ -462,8 +520,14 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     }
     {
         let weak = app.weak();
-        view.connect_load_failed(move |_, event, uri, error| {
+        view.connect_load_failed(move |view, event, uri, error| {
             if let Some(app) = weak.upgrade() {
+                // A failure on a retired view must not put an error page on
+                // the live tab. Returning true still stops the engine's own
+                // grey page on the retired view.
+                if !is_live(&app, tab, view) {
+                    return true;
+                }
                 // The engine's own error page is not the browser's voice: the
                 // browser explains it itself.
                 // Every event is a failure worth explaining, not only the
@@ -507,8 +571,11 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         // site left the tab finished, untitled and blank. The browser has to
         // say plainly that the site could not be trusted, and never open it.
         let weak = app.weak();
-        view.connect_load_failed_with_tls_errors(move |_, uri, _certificate, flags| {
+        view.connect_load_failed_with_tls_errors(move |view, uri, _certificate, flags| {
             if let Some(app) = weak.upgrade() {
+                if !is_live(&app, tab, view) {
+                    return true;
+                }
                 let reason = reason_for_tls(flags);
                 app.mark_failed(tab);
                 app.set_load_progress(tab, 1.0);
@@ -519,7 +586,7 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     }
     {
         let weak = app.weak();
-        view.connect_decide_policy(move |_, decision, kind| {
+        view.connect_decide_policy(move |view, decision, kind| {
             if kind != webkit2gtk::PolicyDecisionType::Response {
                 return false;
             }
@@ -543,7 +610,16 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                         .map(|uri| uri.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase().ends_with(".xpi"))
                         .unwrap_or(false);
                 if is_xpi {
-                    decision.download();
+                    // Only the tab's live view may start an add-on download. A
+                    // view that was replaced, put to sleep or crashed could
+                    // otherwise hand an .xpi to the installer for a page that
+                    // is no longer on screen (Gemini R59 craft fix 5).
+                    let live = weak.upgrade().is_some_and(|app| is_live(&app, tab, view));
+                    if live {
+                        decision.download();
+                    } else {
+                        decision.ignore();
+                    }
                     return true;
                 }
             }
@@ -570,7 +646,10 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 return false;
             }
             let reason = reason_for_status(status);
-            if let Some(app) = weak.upgrade() {
+            // A retired view (slept, woken, replaced by a Keep from Peek) may
+            // still get a response. It must not mark the live page as failed
+            // or rewrite its address. Its own load is still refused below.
+            if let Some(app) = weak.upgrade().filter(|app| is_live(app, tab, view)) {
                 // The response's own uri is empty for a document the engine
                 // refused to commit; the request is what was asked for, and it
                 // is what the address bar and the tab have to say.
@@ -600,16 +679,26 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         // with the side column still beside it, and the browser's own
         // fullscreen flag fell out of step with the window.
         let weak = app.weak();
-        view.connect_enter_fullscreen(move |_| {
-            if let Some(app) = weak.upgrade() {
-                app.page_fullscreen_entered(tab);
+        view.connect_enter_fullscreen(move |view| {
+            // Only the tab's live view may take the chrome away. A retired
+            // view asking for fullscreen is refused (true stops WebKit's
+            // default from filling the screen).
+            match weak.upgrade() {
+                Some(app) if is_live(&app, tab, view) => {
+                    app.page_fullscreen_entered(tab);
+                    false
+                }
+                Some(_) => true,
+                None => false,
             }
-            false
         });
         let weak = app.weak();
         view.connect_leave_fullscreen(move |_| {
             // true keeps the window full screen when the user had F11 on before
             // the page asked; false lets WebKit's default take it out.
+            // Deliberately not guarded by is_live: if the view that entered
+            // fullscreen has been retired, leaving must still give the chrome
+            // back, or the window is stuck without its column and toolbar.
             weak.upgrade().is_some_and(|app| app.page_fullscreen_left(tab))
         });
         let weak = app.weak();
@@ -619,34 +708,57 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
         // gets the whole quiet window before it may sleep. Stamping only the
         // start measured the window from when the music began, and such a tab
         // could be put to sleep the moment it stopped.
-        view.connect_is_playing_audio_notify(move |_| {
-            if let Some(app) = weak.upgrade() {
+        view.connect_is_playing_audio_notify(move |view| {
+            if let Some(app) = weak.upgrade().filter(|app| is_live(app, tab, view)) {
                 app.mark_audible(tab);
             }
         });
         // A call holds the camera or microphone while silent. Stamping on these
         // edges too keeps the window counted from when the call ended.
+        // A retired view's edges say nothing about the live page, so they
+        // must not keep a tab awake.
         let weak = app.weak();
-        view.connect_camera_capture_state_notify(move |_| {
-            if let Some(app) = weak.upgrade() {
+        view.connect_camera_capture_state_notify(move |view| {
+            if let Some(app) = weak.upgrade().filter(|app| is_live(app, tab, view)) {
                 app.mark_audible(tab);
             }
         });
         let weak = app.weak();
-        view.connect_microphone_capture_state_notify(move |_| {
-            if let Some(app) = weak.upgrade() {
+        view.connect_microphone_capture_state_notify(move |view| {
+            if let Some(app) = weak.upgrade().filter(|app| is_live(app, tab, view)) {
                 app.mark_audible(tab);
             }
         });
     }
     {
         let weak = app.weak();
-        view.connect_web_process_terminated(move |_, reason| {
+        view.connect_web_process_terminated(move |view, reason| {
             if let Some(app) = weak.upgrade() {
+                // The tab id was captured when this view was attached. If the
+                // tab has since been given another view (a sleep and wake, a
+                // Keep from Peek), this signal comes from a retired view and
+                // must not mark the live page as failed.
+                if app.view(tab).as_ref() != Some(view) {
+                    return;
+                }
                 // Every reason leaves a dead view behind, so every reason gets
                 // a sentence. Only `Crashed` used to be answered, which left a
                 // tab the engine had killed for using too much memory sitting
                 // grey with nothing said and no way to try again.
+                // A dead page cannot answer anything, so close everything that
+                // was waiting on it, the same way a new load does in
+                // connect_load_changed(Started). Before this, a crash left the
+                // page's permission prompt, script dialog and site card open
+                // over the error page. It also left the loading bar running and
+                // reader mode still on, with no page behind them.
+                // The same cleanup a rebuild does (App::retire_page_layers):
+                // prompts, dialogs, the peek card, the site card, page
+                // fullscreen and reader mode. A page that crashed while
+                // fullscreen never sends leave-fullscreen, and a peek card
+                // opened from it has nothing left to show.
+                app.retire_page_layers(tab);
+                app.set_loading(tab, false);
+                app.set_load_progress(tab, 1.0);
                 let sentence = reason_for_termination(reason);
                 let uri = app.state.borrow().tab(tab).map(|t| t.url.clone()).unwrap_or_default();
                 app.mark_failed(tab);
@@ -686,7 +798,10 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 link,
                 crate::peek::is_peek_view(view),
             ) {
-                if let Some(app) = weak.upgrade() {
+                // Only the tab's live view may open a peek card. A retired view
+                // (slept, rebuilt, or replaced by Keep) still gets its click
+                // ignored, but it must not put a card over the page on screen.
+                if let Some(app) = weak.upgrade().filter(|app| is_live(app, tab, view)) {
                     crate::peek::open(&app, tab, view, &uri);
                 }
                 decision.ignore();
@@ -698,8 +813,11 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
             }
             // Only the page the address bar is showing gets an explanation. A
             // subframe that tries a custom scheme is that frame's business.
+            // A retired view's refused navigation is still refused, but it
+            // must not mark the live tab failed or replace it with an error
+            // page.
             if main_frame {
-                if let Some(app) = weak.upgrade() {
+                if let Some(app) = weak.upgrade().filter(|app| is_live(app, tab, view)) {
                     app.mark_failed(tab);
                     app.show_error(
                         tab,
@@ -739,8 +857,16 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     }
     {
         let weak = app.weak();
-        view.connect_authenticate(move |_, request| match weak.upgrade() {
-            Some(app) => crate::permissions::on_auth(&app, tab, request),
+        // A sign-in card belongs to the page the tab is showing. A retired
+        // view asking for credentials is cancelled, not shown over the live
+        // page where the user would type into the wrong origin's prompt.
+        view.connect_authenticate(move |view, request| match weak.upgrade() {
+            Some(app) if is_live(&app, tab, view) => crate::permissions::on_auth(&app, tab, request),
+            Some(_) => {
+                use webkit2gtk::AuthenticationRequestExt;
+                request.cancel();
+                true
+            }
             None => false,
         });
     }
@@ -760,9 +886,15 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     }
     {
         let weak = app.weak();
-        view.connect_run_file_chooser(move |_, request| match weak.upgrade() {
-            Some(app) => crate::dialogs::on_file_chooser(&app, request),
-            None => {
+        // A retired view cannot open a native file chooser over the live page,
+        // and neither can a background tab. The desktop's chooser is modal over
+        // the whole window, so a tab nobody is looking at must not be able to
+        // put one up over the page in front (Gemini R59 craft fix 5).
+        view.connect_run_file_chooser(move |view, request| match weak.upgrade() {
+            Some(app) if is_live(&app, tab, view) && app.active_id() == tab => {
+                crate::dialogs::on_file_chooser(&app, tab, view, request)
+            }
+            _ => {
                 request.cancel();
                 true
             }
@@ -789,7 +921,9 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     {
         let weak = app.weak();
         view.connect_create(move |opener, action| {
-            let app = weak.upgrade()?;
+            // A retired view must not open tabs: its tab id now points at a
+            // different view, and the new tab would claim the wrong opener.
+            let app = weak.upgrade().filter(|app| is_live(app, tab, opener))?;
             let uri = action.request().and_then(|request| request.uri().map(|u| u.to_string()))?;
             if !scheme_is_allowed(&uri, false) {
                 app.flash_toast("This link asks for an address the browser cannot open.");
@@ -827,7 +961,10 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
     {
         let weak = app.weak();
         view.connect_close(move |view| {
-            if let Some(app) = weak.upgrade() {
+            // window.close() from a retired view used to find its tab by the
+            // old widget name and could close the replacement page. Only the
+            // tab's live view may close it.
+            if let Some(app) = weak.upgrade().filter(|app| is_live(app, tab, view)) {
                 app.close_tab_of_view(view);
             }
         });

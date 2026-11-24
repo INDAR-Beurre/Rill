@@ -1,13 +1,56 @@
 # Testing Search
 
-Five layers, none of them mocks.
+Rust unit tests, real-browser socket/stress suites, and a native GTK walkthrough.
+Keep historical `1.0.2` results separate from verification of the local,
+unreleased UI makeover.
+
+## Current GTK UI walkthrough
+
+```sh
+python3 tools/test_ui.py
+```
+
+Run against an already-built checkout: the default binary is
+`target/release/search`; set `SEARCH_BINARY=target/debug/search` for a development
+build. The walkthrough uses a working Wayland session and starts the real GTK
+browser with temporary `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME`
+directories plus a dedicated `SEARCH_BENCH_SOCKET`. A local fixture server
+provides actual pages; the normal user profile is not used.
+
+Use this walkthrough for visual and behavior checks of:
+- Native start-page empty states, clearly labeled curated links, and populated
+  bookmarks/recent pages. URL input goes into the actual GTK entry and activates
+  its navigation path; the resulting WebKit address is checked, not simulated.
+- Live light/dark switching and screenshot palette checks on the real rendered
+  PNGs, rather than the old layout's hardcoded pixel coordinates.
+- Wide, medium, and compact window sizes, allocated control bounds, start-page
+  and settings reflow, scrolling, and sidebar folding/unfolding.
+- Normal/private data separation: private start pages hide normal bookmarks and
+  history, and submitting a URL keeps the private tab private. Engine-level
+  cookie/storage isolation remains covered by the stress suite.
+- All six panels, settings navigation and lower-section scrolling, the omnibox,
+  pinned pages, history, and reading-mode captures.
+- Toolbar actions and native navigation overflow at compact widths, plus the
+  video-fullscreen hide/restore path and error-page presentation.
+
+The `chrome`, `uitree`, `starttext`, `start`, `theme`, `uiclick`, `menuentries`,
+and `menupick` bench verbs inspect or exercise actual GTK widgets. Geometry is
+checked against the allocated window size, not against the earlier design.
+`start` fills and activates the entry; `uiclick` emits the real button action.
+These are widget-level checks, not compositor-level input injection.
+
+Screenshots, `test-ui.log`, and `manifest.json` land in `build/redesign/`.
+The `shot` path captures the constructed GTK frame and WebKit page, not an HTML
+recreation or simulated UI. Final walkthrough verification and replacement of
+the seven gallery images are pending; the coverage described here is not a
+claim that a fresh final run has passed.
 
 ## 0. The three suites beside the stress suite
 
 ```sh
 python3 tools/extensions.py    # the extension loader, on built fixtures
 python3 tools/check_shield.py  # every generated filter rule, compiled
-python3 tools/compare.py       # a screenshot measured against the original
+python3 tools/compare.py       # legacy fidelity measurement, not redesign validation
 ```
 
 `tools/extensions.py` builds three extensions in a temporary folder: one with a
@@ -21,14 +64,14 @@ rather than described.
 
 `tools/check_shield.py` compiles the real generated lists (`network.json`,
 `hide-0.json`, `hide-sites.json`) with the engine's own parser through
-PyGObject — currently 15,775 rules accepted across 3 lists, 0 rejected. It
+PyGObject — `1.0.2` validation accepted 15,775 rules across 3 lists, 0 rejected. It
 exists because WebKit rejects a whole list for one bad rule, which is how
 9,565 rules once blocked nothing at all.
 
-`tools/compare.py` measures a screenshot against
+`tools/compare.py` is a legacy fidelity measurement against
 `reference/reference-window.png`: the divider's column, the window controls'
-position, the first row of ink, the ground colour. It is how arguments about a
-few pixels get settled with numbers.
+position, the first row of ink, the ground colour. Those reference coordinates
+belong to the older interface and are not acceptance criteria for the makeover.
 
 ## 1. Unit tests
 
@@ -41,8 +84,9 @@ search engine's URL, the history's human dates, download filenames, extension
 match patterns, the stylesheet's contrast pairs, the key table, VSync motion
 easing curves (`src/motion.rs`), permission rules (`src/permissions.rs`), site
 card security/data rules (`src/sitecard.rs`), and 6-browser import
-(`src/import.rs`). These run without a display. Verified current suite:
-**269 passed (1 ignored), 0 failed**.
+(`src/import.rs`). These run without a display. Current Rust suite tally:
+**303 passed, 1 ignored (304 total)**, from `cargo test --release` on 22 November
+(round 76, log `build/test-r76-known-fixes.log`).
 
 ## 2. The bench socket
 
@@ -62,6 +106,11 @@ command per line, answering each with one JSON line:
 |---|---|
 | `ping` | version, so a script knows the browser is up |
 | `probe` | every tab, the active one, the field, the panels, find, window size |
+| `chrome` / `uitree` | live toolbar/sidebar state and control bounds, or the actual visible GTK widget tree |
+| `starttext` / `start <text>` | start-page labels, or fill and activate its real GTK URL/search entry |
+| `theme <light\|dark\|system>` | switch the running browser's appearance |
+| `uiclick <name>` | activate a named native toolbar/sidebar button (`address`, `back`, `forward`, `reload`, `more`, `settings`, etc.) |
+| `menuentries` / `menupick <label>` | inspect the open native overflow menu, or activate a sensitive item by its label |
 | `tabs` | the tabs, shorter than probe |
 | `open <url>` | a new tab, selected, at that address |
 | `select <id>` / `close <id>` / `closeall` | as their names say |
@@ -142,52 +191,76 @@ rather than absolute, because an absolute bound that the run clears by three
 times cannot catch a regression: `20 tabs open` fails above 40 MB per tab,
 `tabs give their memory back` fails if closing them leaves more than 60 MB
 above the baseline taken before they were opened, and `the engine survives a
-spray and keeps working` fails above twice the idle tab's resident memory. Grep
+spray and keeps working` fails if total PSS after the sprayed tab closes is more
+than 60 MB above the reading taken just before the spray. Grep
 the check's name to read the number: the line it sits on moves, the name does
 not.
 
+A round-76 motion probe added `motioncfg` and `drift` checks around a Settings
+open. It confirms that benchmark mode suppresses animation
+(`motioncfg.animations = false`) and that the Settings open no longer stalls
+the main loop past 120 ms. The first probe measured a 138 ms gap; keeping the
+Settings body in a permanent holder removed it. The probe also records measured
+WCAG contrast ratios and the type ramp, so those claims are numbers rather than
+prose.
+
 The pop-up checks (`downloads and popups`) are `a pop-up becomes a tab`, and
 `a pop-up without a click does not open a tab`, which uses `/popup-auto` and
-`/popup-target` from `tools/fixtures.py`. Both passed in the last run.
+`/popup-target` from `tools/fixtures.py`. Both passed in the historical `1.0.2`
+baseline run, not a new redesign run.
 
-The measured values. The last run that passed every check, which is the one
-`build/stress-report.json` holds (**117 passed, 0 failed, 117 checks**),
+The historical `1.0.2` baseline (**117 passed, 0 failed, 117 checks**), saved in
+`build/stress-report.json` at the time,
 recorded a tab switch mean of **1.0 ms**, **p95 1.7 ms** and a **worst of
 6.5 ms** over 300 switches, panels at **22 ms mean** (`22.0 ms`) and **101 ms
-worst** (`100.7 ms`) over 80 toggles, and one idle tab at **218.1 MB resident**
-(total PSS; 318.2 MB RSS) and **94.2 MB** of its own memory (`anon_mb`).
-`python3 tools/report_figures.py` prints those rows from
-`build/stress-report.json`, so check them against
-whatever run is in there. Two other full runs on the same machine were recorded
+worst** (`100.7 ms`) over 80 toggles, and one idle tab at **218.1 MB total PSS**
+(318.2 MB RSS), including **94.2 MB anonymous PSS** (`anon_mb`).
+These are historical memory/performance measurements, not measurements of the
+local UI makeover. `python3 tools/report_figures.py` prints rows from whichever
+run is currently saved in `build/stress-report.json`; reading that report is not
+a fresh run. Two other baseline-era full runs on the same machine were recorded
 by hand and are in no file here: a quiet one measured mean 1.7 ms, p95 3.4 ms
 and worst 67 ms, and one made while the host was swapping measured a 259.5 ms
-worst. The mean barely moved between the three; the worst moved by a factor of
-four. The worst case is a property of the host as much as of the browser, which
+worst. The worst varied substantially between these older samples. The worst
+case is a property of the host as much as of the browser, which
 is why the assertion is on the mean and the recorded p95 is the evidence about
 the tail.
 
-## 4. Pictures
+## 4. Legacy pictures (v1.0.2)
 
 ```sh
-tools/shots.sh council/latest                      # every state, light
-SHOT_DARK=1 tools/shots.sh council/dark            # the same states, dark
+tools/shots.sh council/legacy-1.0.2-light
+SHOT_DARK=1 tools/shots.sh council/legacy-1.0.2-dark
 ```
 
-Captures **18/18 states** in both light and dark modes: the default state,
+For `1.0.2`, this older harness captured **18/18 states** in both light and dark
+modes: the default state,
 pins, a column of tabs, the field (open and keyboard-picked), each of the six
 panels (`settings`, `history`, `bookmarks`, `downloads`, `shortcuts`,
 `extensions`), find, reading mode, an empty tab, a failed 404 page, `16-sitecard`,
-`17-peek`, and `18-folded-column`, writing one PNG per state plus a manifest and
-running pixel checks (`pixel dark corner`, `pixel light scrim`, `pixel panel
-scrollbar`) adapted for the bar-free layout (`deskband` removed). On a desktop,
-it attempts `spectacle` first when `SEARCH_SHOTS=real` and falls back to the
-browser's own `shot` capture path, which draws the frame and lays the engine's
-own snapshot into the page's rectangle so it works on a locked or headless
-desktop and produces the same picture every time.
+`17-peek`, and `18-folded-column`, with a PNG per state and a manifest. Its
+hardcoded pixel checks (`pixel dark corner`, `pixel light scrim`, `pixel panel
+scrollbar`) passed for that older bar-free layout. They target its palette and
+geometry, not the redesign, and must not be reported as current UI passes.
+The harness can attempt `spectacle` with `SEARCH_SHOTS=real` and otherwise uses
+the browser's `shot` path; the capture mechanism does not make old assertions
+valid for the new interface.
+
+### Gallery provenance
+
+`council/round-47` and `council/round-47-dark` are the historical `1.0.2`
+screenshot runs. The gallery refresh replaces
+`docs/screenshots/{light,dark,omnibox,pins,reading,history,settings}.png` with
+actual final GTK captures from `tools/test_ui.py`, retaining its log and
+manifest as provenance. That replacement is pending. Do not substitute
+simulated UI, mockups, or unverified images, and do not cite the older pixel
+checks as verification of the new captures.
 
 ## What is not tested
 
-Real input events (mouse, keyboard at the compositor level), because the suite
-drives the browser's actions directly. Full-screen, notifications, media
-playback and the engine's own captchas. Those are checked by hand, and this
-page is the only place that says what they are.
+Real input events (mouse and keyboard at the compositor level): the walkthrough
+uses real GTK controls but drives their actions through the socket. The
+video-fullscreen hide/restore path is exercised there; real page-triggered
+fullscreen, window-manager integration, notifications, media playback, and the
+engine's own captchas still need manual checks. Palette and geometry checks do
+not replace a manual review of legibility, focus, and pointer/keyboard behavior.

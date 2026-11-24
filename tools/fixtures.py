@@ -86,6 +86,35 @@ class Handler(BaseHTTPRequestHandler):
                 for i in range(1, 400)
             )
             self.send(page("A long read", f"<article>{paragraphs}</article>"))
+        elif route == "/article":
+            # A reader-mode test page that covers the whole hierarchy, not only
+            # paragraphs: h2-h4, ordered and unordered lists, a blockquote,
+            # inline code, a preformatted block and a link far too long for the
+            # measure. Reader shots on /long only showed body text, so heading
+            # sizes, list indents, code wrapping and link breaking went
+            # unreviewed.
+            filler = "The quick brown fox jumps over the lazy dog. " * 6
+            long_link = (
+                "http://127.0.0.1:8099/a/very/long/address/that/has/no/natural/"
+                "break/points/and/keeps/going/past/the/reading/measure/"
+                "?with=query&parameters=that&also=refuse&to=wrap&politely=true"
+            )
+            body = (
+                f"<article><p>{filler}</p>"
+                "<h2>A second-level heading that runs onto two lines at narrow widths</h2>"
+                f"<p>{filler}<code>inline_code(value)</code> sits inside the sentence.</p>"
+                "<h3>A third-level heading</h3>"
+                "<ul><li>First point, short.</li>"
+                f"<li>Second point, long enough to wrap. {filler}</li>"
+                "<li>Third point with a nested list<ul><li>Nested one</li><li>Nested two</li></ul></li></ul>"
+                "<ol><li>Step one</li><li>Step two</li><li>Step three</li></ol>"
+                f"<blockquote><p>A quoted passage. {filler}</p></blockquote>"
+                "<h4>A fourth-level heading</h4>"
+                "<pre><code>fn main() {\n    let words = vec![\"reader\", \"mode\", \"keeps\", \"code\", \"monospaced\", \"and\", \"scrollable\"];\n    println!(\"{}\", words.join(\" \"));\n}\n</code></pre>"
+                f'<p>A link that must break instead of widening the page: <a href="{long_link}">{long_link}</a></p>'
+                f"<p>{filler}</p></article>"
+            )
+            self.send(page("A structured read", body, banner=False))
         elif route == "/big":
             rows = "".join(f"<div>row {i}</div>" for i in range(8000))
             self.send(page("Eight thousand rows", f"<div>{rows}</div>", banner=False))

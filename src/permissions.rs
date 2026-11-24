@@ -143,6 +143,16 @@ pub fn on_request(app: &App, tab: TabId, view: &WebView, request: &PermissionReq
         request.deny();
         return true;
     };
+    // The view that asked must still be this tab's view. A request from a
+    // view that has closed or been replaced would otherwise put a card over
+    // whatever tab is on screen now, or apply a saved grant to a page that is
+    // gone. It is refused and nothing is recorded. A peek's view never gets
+    // here: peek::connect_refusals denies its requests itself, and a kept peek
+    // is adopted as the tab's view before web::attach connects this handler.
+    if app.view(tab).as_ref() != Some(view) {
+        request.deny();
+        return true;
+    }
     let host = view.uri().map(|uri| crate::shield::host_of(&uri)).unwrap_or_default();
     let private = app.state.borrow().tab(tab).map(|t| t.private).unwrap_or(true);
     if host.is_empty() || pending(tab) {
@@ -205,11 +215,14 @@ fn first_button(card: &gtk::Box) -> Option<gtk::Button> {
     })
 }
 
-/// Puts the keyboard back on the page once a card that held it is gone.
+/// Puts the keyboard back once a card that held it is gone. This used to
+/// grab the active WebView directly, even when the omnibox, the find bar or
+/// a panel was still open, or when the tab was blank and had no view. It now
+/// goes through the app's single focus policy, so every card (permissions,
+/// dialogs, the site card, Peek, welcome) hands focus to the topmost layer
+/// that is still open.
 pub(crate) fn focus_page(app: &App) {
-    if let Some(view) = app.view(app.active_id()) {
-        view.grab_focus();
-    }
+    app.restore_page_focus();
 }
 
 /// Escape refuses the card on screen: a permission is denied, a sign-in is
@@ -240,8 +253,7 @@ fn answer_permission(app: &App, tab: TabId, allowed: bool) {
             request.deny();
         }
     }
-    crate::motion::cancel(&prompt.widget);
-    app.ui.overlay.remove(&prompt.widget);
+    retire_card(app, &prompt.widget);
     focus_page(app);
 }
 
@@ -332,8 +344,7 @@ fn answer_auth(app: &App, tab: TabId, credentials: Option<(String, String)>) {
             None => request.cancel(),
         }
     }
-    crate::motion::cancel(&prompt.widget);
-    app.ui.overlay.remove(&prompt.widget);
+    retire_card(app, &prompt.widget);
     focus_page(app);
 }
 
@@ -444,8 +455,7 @@ pub fn addon_message(host: &str, offer: &crate::extensions::Offer) -> String {
 
 fn answer_addon(app: &App, tab: TabId, install: bool) {
     let Some(prompt) = take(tab) else { return };
-    crate::motion::cancel(&prompt.widget);
-    app.ui.overlay.remove(&prompt.widget);
+    retire_card(app, &prompt.widget);
     focus_page(app);
     let Answer::AddOn { path } = &prompt.answer else { return };
     if !install {
@@ -468,6 +478,32 @@ fn answer_addon(app: &App, tab: TabId, install: bool) {
     }
 }
 
+/// Takes an answered or dismissed card off the page. A card on screen fades out
+/// over the shared exit duration, the same as the site card and find. Before
+/// this, it disappeared in one frame. A card for a tab that isn't on screen is
+/// hidden, so it has nothing to fade and is removed right away. The prompt has
+/// already left PENDING when this runs, so a new prompt for the same tab can
+/// open while the old card is still fading. The completion holds weak handles
+/// and removes the card only if it is still a child of the overlay, so a
+/// window that closed mid-fade is not touched.
+fn retire_card(app: &App, widget: &gtk::Box) {
+    crate::motion::cancel(widget);
+    if !widget.is_visible() || !widget.is_mapped() {
+        app.ui.overlay.remove(widget);
+        return;
+    }
+    // A fading card must not take clicks meant for the page or the next card.
+    widget.set_sensitive(false);
+    let overlay = app.ui.overlay.downgrade();
+    let card = widget.downgrade();
+    crate::motion::fade_out_then(widget, crate::motion::dur::EXIT, move || {
+        let (Some(overlay), Some(card)) = (overlay.upgrade(), card.upgrade()) else { return };
+        if card.parent().as_ref() == Some(overlay.upcast_ref::<gtk::Widget>()) {
+            overlay.remove(&card);
+        }
+    });
+}
+
 /// Refuses whatever the tab is waiting on: a tab that closes or leaves its
 /// page takes its open prompt with it.
 pub fn dismiss(app: &App, tab: TabId) {
@@ -477,8 +513,7 @@ pub fn dismiss(app: &App, tab: TabId) {
         Answer::Auth { request } => request.cancel(),
         Answer::AddOn { .. } => app.flash_toast("The add-on was not installed. The file is still in Downloads."),
     }
-    crate::motion::cancel(&prompt.widget);
-    app.ui.overlay.remove(&prompt.widget);
+    retire_card(app, &prompt.widget);
     focus_page(app);
 }
 
@@ -510,6 +545,12 @@ pub fn focus_pending(_app: &App, tab: TabId) -> bool {
     true
 }
 
+/// Whether a permission, sign-in or add-on card is on screen for `tab`. It only
+/// asks and never moves focus.
+pub fn showing(tab: TabId) -> bool {
+    PENDING.with(|p| p.borrow().get(&tab).is_some_and(|prompt| prompt.widget.is_visible()))
+}
+
 fn show(app: &App, tab: TabId, card: gtk::Box, focus: Option<gtk::Widget>, answer: Answer) {
     // The buttons were added after the card's own show_all, so show again or
     // they stay hidden.
@@ -522,7 +563,7 @@ fn show(app: &App, tab: TabId, card: gtk::Box, focus: Option<gtk::Widget>, answe
     });
     sync_visible(app);
     if app.active_id() == tab {
-        crate::motion::pop_card_in(&card, PAGE_TOP, -10, 155);
+        crate::motion::pop_card_in(&card, PAGE_TOP, -crate::motion::dur::TRAVEL, crate::motion::dur::ENTER);
     }
 }
 
@@ -576,7 +617,9 @@ fn named<W: IsA<gtk::Widget>>(widget: &W, name: &str) {
 pub fn settings_section(app: &crate::app::AppRef) -> gtk::Box {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
     section.set_margin_top(14);
-    let head = gtk::Label::new(Some("SITE PERMISSIONS"));
+    // Sentence case, like every other heading in Settings. The all-caps label
+    // was the last shouted section title in the panel.
+    let head = gtk::Label::new(Some("Site permissions"));
     crate::ui::class(&head, "group");
     head.set_xalign(0.0);
     section.add(&head);

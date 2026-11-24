@@ -1,0 +1,193 @@
+[
+  {
+    "name": "01-default",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/01-default.png",
+    "ok": true,
+    "note": "one tab, the studio page"
+  },
+  {
+    "name": "02-pins",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/02-pins.png",
+    "ok": true,
+    "note": "four pins and a live row"
+  },
+  {
+    "name": "02b-pins-live",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/02b-pins-live.png",
+    "ok": true,
+    "note": "one active pin"
+  },
+  {
+    "name": "03-tabs",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/03-tabs.png",
+    "ok": true,
+    "note": "a row of open tabs"
+  },
+  {
+    "name": "04-omni",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/04-omni.png",
+    "ok": true,
+    "note": "the field with suggestions"
+  },
+  {
+    "name": "04b-omni-picked",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/04b-omni-picked.png",
+    "ok": true,
+    "note": "a suggestion picked by keyboard"
+  },
+  {
+    "name": "04c-omni-ranking",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/04c-omni-ranking.png",
+    "ok": true,
+    "note": "exact path match over other tabs"
+  },
+  {
+    "name": "05-panel-settings",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-settings.png",
+    "ok": true,
+    "note": "settings"
+  },
+  {
+    "name": "05-panel-settings-scrolled",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-settings-scrolled.png",
+    "ok": true,
+    "note": "the bottom of Settings, including the last switch"
+  },
+  {
+    "name": "05-panel-history",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-history.png",
+    "ok": true,
+    "note": "history"
+  },
+  {
+    "name": "05-panel-bookmarks",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-bookmarks.png",
+    "ok": true,
+    "note": "bookmarks"
+  },
+  {
+    "name": "05-panel-downloads",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-downloads.png",
+    "ok": true,
+    "note": "downloads"
+  },
+  {
+    "name": "05-panel-shortcuts",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-shortcuts.png",
+    "ok": true,
+    "note": "shortcuts"
+  },
+  {
+    "name": "05-panel-extensions",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-extensions.png",
+    "ok": true,
+    "note": "extensions"
+  },
+  {
+    "name": "05-panel-bookmarks-filled",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-bookmarks-filled.png",
+    "ok": true,
+    "note": "bookmarks collected over time"
+  },
+  {
+    "name": "05-panel-downloads-filled",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/05-panel-downloads-filled.png",
+    "ok": true,
+    "note": "finished, failed and active downloads"
+  },
+  {
+    "name": "06-find",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/06-find.png",
+    "ok": true,
+    "note": "find over a page"
+  },
+  {
+    "name": "07-reading",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/07-reading.png",
+    "ok": true,
+    "note": "reading mode"
+  },
+  {
+    "name": "07b-reading-structure",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/07b-reading-structure.png",
+    "ok": true,
+    "note": "reading mode with headings, lists and code"
+  },
+  {
+    "name": "07d-reading-large",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/07d-reading-large.png",
+    "ok": true,
+    "note": "reading mode with larger type"
+  },
+  {
+    "name": "07c-reading-find",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/07c-reading-find.png",
+    "ok": true,
+    "note": "find open over reading mode, clear of the exit button"
+  },
+  {
+    "name": "08-empty",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/08-empty.png",
+    "ok": true,
+    "note": "an empty tab"
+  },
+  {
+    "name": "09-missing",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/09-missing.png",
+    "ok": true,
+    "note": "a 404"
+  },
+  {
+    "name": "09-tls",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/09-tls.png",
+    "ok": true,
+    "note": "an expired certificate"
+  },
+  {
+    "name": "09-dns",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/09-dns.png",
+    "ok": true,
+    "note": "a name that cannot be resolved"
+  },
+  {
+    "name": "09-offline",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/09-offline.png",
+    "ok": true,
+    "note": "no network"
+  },
+  {
+    "name": "16-sitecard",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/16-sitecard.png",
+    "ok": true,
+    "note": "site card"
+  },
+  {
+    "name": "17-peek",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/17-peek.png",
+    "ok": true,
+    "note": "peek card"
+  },
+  {
+    "name": "18-folded-column",
+    "path": "/home/alex/Search Linux/work/search-linux/build/council/round-r2-dark/18-folded-column.png",
+    "ok": true,
+    "note": "folded tab column"
+  },
+  {
+    "name": "pixel dark corner",
+    "ok": true,
+    "note": "[[25, 27, 26], [25, 27, 26]]"
+  },
+  {
+    "name": "pixel panel scrollbar",
+    "ok": true,
+    "note": "[[39, 43, 37], [39, 43, 37]] (card bottom y=570, track read at y=558)"
+  },
+  {
+    "name": "binary",
+    "path": "/home/alex/Search Linux/work/search-linux/target/release/search",
+    "ok": true,
+    "skipped": true,
+    "note": "sha256 bb3a077e9bbf8dccf3010a1066e22b2b6f6e6b291e4613274364970fbfd4229d"
+  }
+]

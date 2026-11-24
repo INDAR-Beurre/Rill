@@ -1,48 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="300" viewBox="0 0 1440 300" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="320" viewBox="0 0 1440 320" role="img" aria-labelledby="title description">
   <title id="title">Search for Linux</title>
-  <desc id="desc">A small, quiet WebKit browser written in Rust. The page is the product.</desc>
+  <desc id="description">Go somewhere interesting. A native Linux browser with an editorial start page, vertical tabs, and a shared WebKit engine.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0d1321"/>
-      <stop offset="0.52" stop-color="#183153"/>
-      <stop offset="1" stop-color="#275d67"/>
-    </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#7dd3fc"/>
-      <stop offset="0.5" stop-color="#a5b4fc"/>
-      <stop offset="1" stop-color="#5eead4"/>
-    </linearGradient>
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="38"/>
-    </filter>
+    <clipPath id="planet"><circle cx="1220" cy="166" r="118"/></clipPath>
   </defs>
-  <rect width="1440" height="300" rx="28" fill="url(#bg)"/>
-  <circle cx="1240" cy="24" r="180" fill="#5eead4" opacity=".12" filter="url(#glow)"/>
-  <circle cx="430" cy="280" r="170" fill="#818cf8" opacity=".16" filter="url(#glow)"/>
-  <g opacity=".15" stroke="#d9f5ff" stroke-width="1">
-    <path d="M960 0v300M1040 0v300M1120 0v300M1200 0v300M1280 0v300M1360 0v300"/>
-    <path d="M920 60h520M920 140h520M920 220h520"/>
+  <rect width="1440" height="320" fill="#f1efe9"/>
+  <path d="M46 70h1008M46 266h1008" fill="none" stroke="#c1bdb2"/>
+  <g font-family="DejaVu Sans Mono,monospace" font-size="12" letter-spacing="2" fill="#595a52">
+    <text x="46" y="48">SEARCH / FOR LINUX</text>
+    <text x="868" y="48">RUST + WEBKIT</text>
+    <text x="46" y="296">VERTICAL TABS</text>
+    <text x="265" y="296">LOCAL FIRST</text>
+    <text x="466" y="296">NO ACCOUNT REQUIRED</text>
   </g>
-  <g transform="translate(76 64)">
-    <rect width="68" height="68" rx="20" fill="url(#accent)"/>
-    <circle cx="31" cy="31" r="15" fill="none" stroke="#102c43" stroke-width="6"/>
-    <path d="m42 42 13 13" stroke="#102c43" stroke-width="6" stroke-linecap="round"/>
-    <text x="94" y="73" fill="#f4f8ff" font-family="Inter,Segoe UI,sans-serif" font-size="72" font-weight="700" letter-spacing="-3">Search</text>
-    <rect x="400" y="23" width="142" height="43" rx="21.5" fill="#ffffff" fill-opacity=".10" stroke="#b7edee" stroke-opacity=".35"/>
-    <circle cx="424" cy="44" r="6" fill="#5eead4"/>
-    <text x="441" y="51" fill="#d9fffa" font-family="Inter,Segoe UI,sans-serif" font-size="19" font-weight="600">for Linux</text>
-    <text x="0" y="135" fill="#d7e5f7" font-family="Inter,Segoe UI,sans-serif" font-size="29" font-weight="400">The page is the product.</text>
-    <text x="0" y="174" fill="#a6bdd5" font-family="Inter,Segoe UI,sans-serif" font-size="19">Vertical tabs. One quiet field. No bundled Chromium.</text>
-  </g>
-  <g transform="translate(1020 86)" font-family="Inter,Segoe UI,sans-serif">
-    <rect width="322" height="132" rx="18" fill="#07111f" fill-opacity=".44" stroke="#c3e6ff" stroke-opacity=".20"/>
-    <rect x="22" y="22" width="64" height="28" rx="14" fill="#38bdf8" fill-opacity=".18"/>
-    <text x="54" y="42" text-anchor="middle" fill="#bae6fd" font-size="14" font-weight="700">RUST</text>
-    <text x="106" y="43" fill="#eff6ff" font-size="20" font-weight="600">Native shell</text>
-    <rect x="22" y="65" width="84" height="28" rx="14" fill="#5eead4" fill-opacity=".16"/>
-    <text x="64" y="85" text-anchor="middle" fill="#ccfbf1" font-size="14" font-weight="700">WEBKIT</text>
-    <text x="126" y="86" fill="#eff6ff" font-size="20" font-weight="600">Shared engine</text>
-    <circle cx="28" cy="112" r="4" fill="#a5b4fc"/>
-    <text x="42" y="118" fill="#b6c9df" font-size="15">Your tabs. Your files. No account.</text>
-  </g>
+  <text x="42" y="172" fill="#272724" font-family="Liberation Serif,Georgia,serif" font-size="84" letter-spacing="-3">Go somewhere <tspan font-style="italic">interesting.</tspan></text>
+  <text x="46" y="225" fill="#595a52" font-family="Adwaita Sans,Noto Sans,sans-serif" font-size="18">A browser with room for the web. And a little more character.</text>
+  <ellipse cx="1214" cy="166" rx="181" ry="64" transform="rotate(-32 1214 166)" fill="none" stroke="#c1bdb2"/>
+  <circle cx="1220" cy="166" r="118" fill="#b74525"/>
+  <path d="M1100 219c99 57 142-58 250-38l30 143h-290Z" fill="#272724" clip-path="url(#planet)"/>
+  <ellipse cx="1214" cy="166" rx="169" ry="45" transform="rotate(-32 1214 166)" fill="none" stroke="#fcfbf8" stroke-width="20"/>
+  <path d="M1119 104a118 118 0 0 1 172-31" fill="none" stroke="#b74525" stroke-width="22"/>
+  <circle cx="1083" cy="62" r="8" fill="#fcfbf8" stroke="#272724"/>
 </svg>

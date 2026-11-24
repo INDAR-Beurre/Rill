@@ -201,8 +201,104 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
     match command {
         "ping" => ok(&format!(",\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))),
         "probe" => probe(app),
+        "minsize" => {
+            fn largest(widget: &gtk::Widget, depth: usize, out: &mut Vec<(i32, String)>) {
+                let (minimum, natural) = widget.preferred_size();
+                out.push((minimum.width, format!("{}{} {} min={} natural={}", "  ".repeat(depth), widget.widget_name(), widget.type_().name(), minimum.width, natural.width)));
+                if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+                    for child in container.children() {
+                        largest(child.upcast_ref::<gtk::Widget>(), depth + 1, out);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            largest(app.ui.window.upcast_ref::<gtk::Widget>(), 0, &mut out);
+            out.sort_by(|a, b| b.0.cmp(&a.0));
+            ok(&format!(",\"sizes\":[{}]", out.into_iter().take(30).map(|(w, n)| format!("[{},\"{}\"]", w, json_escape(&n))).collect::<Vec<_>>().join(",")))
+        }
+        "chrome" => chrome(app),
+        "menuentries" => {
+            let Some(menu) = browser_menu() else { return fail("no browser menu is open") };
+            let items: Vec<_> = menu.children().into_iter().filter_map(|child| {
+                child.downcast::<gtk::MenuItem>().ok().map(|item| serde_json::json!({"label":item.label().as_deref(), "sensitive":item.is_sensitive()}))
+            }).collect();
+            serde_json::json!({"ok":true,"items":items}).to_string()
+        }
+        "menupick" => {
+            let Some(menu) = browser_menu() else { return fail("no browser menu is open") };
+            let item = menu.children().into_iter().filter_map(|child| child.downcast::<gtk::MenuItem>().ok())
+                .find(|item| item.label().as_deref() == Some(argument));
+            let Some(item) = item else { return fail("no matching menu item") };
+            if !item.is_sensitive() { return fail("menu item is disabled") }
+            menu.activate_item(&item, true);
+            ok("")
+        }
+        "uitree" => ui_tree(app),
+        "starttext" => {
+            let mut lines = Vec::new();
+            let mut budget = PANEL_TEXT_CAP;
+            collect_labels(app.ui.start.root.upcast_ref(), &mut lines, &mut budget);
+            ok(&format!(",\"text\":\"{}\"", json_escape(&lines.join("\n"))))
+        }
+        "start" => {
+            if app.ui.stack.visible_child_name().as_deref() != Some("blank") {
+                return fail("start needs a new tab");
+            }
+            app.ui.start.search.set_text(argument);
+            app.ui.start.search.emit_activate();
+            ok("")
+        }
+        "theme" => {
+            let look = match argument {
+                "light" => crate::store::Look::Light,
+                "dark" => crate::store::Look::Dark,
+                "system" => crate::store::Look::System,
+                _ => return fail("theme needs light, dark or system"),
+            };
+            app.switch_look(look);
+            ok("")
+        }
+        "uiclick" => {
+            let button = match argument {
+                "newtab" => &app.ui.newtab,
+                "private" => &app.ui.private_tab,
+                "library" => &app.ui.library,
+                "history" => &app.ui.history,
+                "downloads" => &app.ui.downloads,
+                "settings" => &app.ui.menu,
+                "address" => &app.ui.address,
+                "site" => &app.ui.site_info,
+                "fold" => &app.ui.fold,
+                "bookmark" => &app.ui.bookmark,
+                "reader" => &app.ui.reader,
+                "back" => &app.ui.back,
+                "forward" => &app.ui.forward,
+                "reload" => &app.ui.reload,
+                "more" => &app.ui.more,
+                _ => return fail("unknown chrome control"),
+            };
+            if !button.is_sensitive() { return fail("control is disabled"); }
+            button.emit_clicked();
+            ok("")
+        }
         "paneltext" => paneltext(app),
         "paneltree" => paneltree(app),
+        "setdark" => {
+            // The dark capture needs the page canvas to follow the frame.
+            // The setting is normally a person's choice in Settings; this
+            // verb only drives the same setter the switch uses, so the
+            // screenshots show the feature rather than a special build.
+            let on = match argument.trim() {
+                "on" => true,
+                "off" => false,
+                _ => return fail("setdark needs on or off"),
+            };
+            app.prefs.borrow_mut().darken_pages = on;
+            app.prefs.borrow().save();
+            app.apply_page_tone();
+            app.reload();
+            ok("")
+        }
         "panelscroll" => {
             let amount: f64 = argument.parse().unwrap_or(0.0);
             let panels = app.panels.borrow();
@@ -227,10 +323,20 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             ok(",\"handled\":true")
         }
         "panelfocus" => {
-            let card = &app.panels.borrow().card;
+            let panels = app.panels.borrow();
+            let card = &panels.card;
+            let holder = &panels.holder;
             let focus = app.ui.window.focused_widget();
-            let inside = focus.as_ref().is_some_and(|widget| card.is_ancestor(widget) || card == widget);
-            ok(&format!(",\"inside\":{inside},\"focus\":\"{}\",\"focusParent\":\"{}\"", focus.as_ref().map(|widget| widget.type_().name()).unwrap_or_default(), focus.and_then(|widget| widget.parent()).map(|widget| widget.type_().name()).unwrap_or_default()))
+            let inside = focus.as_ref().is_some_and(|widget|
+                widget.is_ancestor(card) || widget == card ||
+                widget.is_ancestor(holder) || widget == holder);
+            let mut chain = Vec::new();
+            let mut current = focus.clone();
+            while let Some(widget) = current {
+                chain.push(widget.type_().name().to_string());
+                current = widget.parent();
+            }
+            ok(&format!(",\"inside\":{inside},\"focus\":\"{}\",\"focusParent\":\"{}\",\"focusChain\":\"{}\"", focus.as_ref().map(|widget| widget.type_().name()).unwrap_or_default(), focus.and_then(|widget| widget.parent()).map(|widget| widget.type_().name()).unwrap_or_default(), json_escape(&chain.join(">"))))
         }
         "errorgeometry" => {
             let ui = &app.ui;
@@ -249,12 +355,13 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             }
             settle(app);
             ok(&format!(
-                ",\"sideShown\":{},\"bookmarksShown\":{},\"sideWidth\":{},\"windowFullscreen\":{},\"flag\":{}",
+                ",\"sideShown\":{},\"bookmarksShown\":{},\"sideWidth\":{},\"windowFullscreen\":{},\"flag\":{},\"toolbarShown\":{}",
                 app.ui.side.is_child_visible(),
                 app.ui.bmarkbar.is_child_visible(),
                 app.ui.side.allocated_width(),
                 app.window_is_fullscreen(),
-                app.fullscreen.get()
+                app.fullscreen.get(),
+                app.ui.toolbar.is_child_visible()
             ))
         }
         "debug" => debug(app),
@@ -342,6 +449,18 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                     ok("")
                 }
                 None => fail("peek needs an open page to peek from"),
+            }
+        }
+        "peekkeep" => {
+            // Keep on the Peek card. The socket cannot click the button, so
+            // this calls peek::keep, which runs the same keep_peek the button
+            // runs. The stress suite uses it to check that a kept page becomes
+            // a tab without loading again, sits right after the active tab and
+            // keeps the private flag of the tab it was peeked from.
+            if crate::peek::keep(app) {
+                ok("")
+            } else {
+                fail("no peek card is open")
             }
         }
         "key" => key(app, argument),
@@ -432,6 +551,13 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             crate::omnibox::commit(app);
             ok("")
         }
+        "omnitext" => {
+            // Set the field's words without committing: lets a harness test
+            // arrow-key movement through the full, unfiltered offer list.
+            app.omni.entry.set_text(argument);
+            app.refresh_offers(argument);
+            ok("")
+        }
         "find" => {
             if !app.find.borrow().visible {
                 app.toggle_find();
@@ -516,6 +642,68 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 Err(why) => fail(&why),
             }
         }
+        // Error variants that a local fixture server cannot produce. They
+        // use the same renderer as a real page failure, so the shot shows a
+        // real error page instead of a mock drawn by the harness.
+        "showerror" => {
+            let (reason, url) = match argument {
+                "dns" => ("That address could not be found.", "https://no-such-host.invalid/page"),
+                "refused" => ("The site refused the connection.", "http://127.0.0.1:1/refused"),
+                "timeout" => ("The site took too long to answer.", "http://127.0.0.1:9/slow"),
+                "tls" => ("This site's security could not be verified: Let's Encrypt certificate expired on 2026-01-01. It was not opened.", "https://expired.badssl.com/account"),
+                "offline" => ("There is no network to reach it on.", "https://example.com/offline"),
+                _ => return fail("showerror needs dns, refused, timeout, tls or offline"),
+            };
+            let id = app.state.borrow().active;
+            app.show_error(id, reason, url);
+            // The renderer's error page names the URL it failed to open; the
+            // chrome has to agree, or the screenshot shows two different
+            // addresses at once. show_error changes the tab, refresh_helm
+            // copies it into the visible field and the path label.
+            app.refresh_helm();
+            ok("")
+        }
+        // Seed the populated library panels. These are the records a person
+        // accumulates over weeks; an empty panel only proves the empty text.
+        "seeddata" => {
+            {
+                let mut state = app.state.borrow_mut();
+                match argument {
+                    "bookmarks" => {
+                        for (url, title) in [
+                            ("http://127.0.0.1:8765/office", "Office Commun"),
+                            ("http://127.0.0.1:8765/long", "The Long Read"),
+                        ] {
+                            if !state.bookmarks.iter().any(|b| b.url == url) {
+                                state.bookmarks.push(crate::store::Bookmark { url: url.to_string(), title: title.to_string() });
+                            }
+                        }
+                    }
+                    "downloads" => {
+                        for (name, done, failed, got, total) in [
+                            ("release-notes.pdf", true, false, 2400000u64, 2400000u64),
+                            ("field-report.csv", true, false, 184000, 184000),
+                            ("setup.dmg", false, true, 61000000, 92000000),
+                            ("dataset.zip", false, false, 128000000, 410000000),
+                        ] {
+                            if !state.downloads.iter().any(|d| d.name == name) {
+                                state.downloads.push(crate::app::DownloadRec {
+                                    id: 0, name: name.to_string(), path: format!("/home/user/Downloads/{name}"),
+                                    done, failed, got, total, private: false,
+                                });
+                            }
+                        }
+                    }
+                    _ => return fail("seeddata needs bookmarks or downloads"),
+                }
+            }
+            let state = app.state.borrow();
+            crate::store::Records::save_bookmarks(&state.bookmarks);
+            crate::store::Records::save_downloads(&state.downloads);
+            drop(state);
+            app.render_bmarks();
+            ok("")
+        }
         "downloads" => {
             let state = app.state.borrow();
             let items: Vec<String> = state
@@ -537,6 +725,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             if parts.len() != 2 {
                 return fail("resize needs WxH");
             }
+            app.ui.window.set_default_size(parts[0], parts[1]);
             app.ui.window.resize(parts[0], parts[1]);
             ok("")
         }
@@ -550,6 +739,47 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             }
         }
         "orphans" => ok(&format!(",\"count\":{}", app.orphan_views())),
+        "contrast" => {
+            let mut pairs = Vec::new();
+            for (name, look) in [("light", crate::store::Look::Light), ("dark", crate::store::Look::Dark)] {
+                let p = crate::palette::Palette::for_look(look, false);
+                let values = [
+                    ("ink/ground", p.ink, p.ground),
+                    ("muted/ground", p.muted, p.ground),
+                    ("faint/ground", p.faint, p.ground),
+                    ("danger/ground", p.danger, p.ground),
+                    ("ink/side", p.ink, p.side_bg()),
+                    ("muted/side", p.muted, p.side_bg()),
+                ];
+                for (label, ink, ground) in values {
+                    pairs.push(format!(
+                        "{{\"pair\":\"{name} {label}\",\"ratio\":{:.2}}}",
+                        crate::palette::contrast(ink, ground)
+                    ));
+                }
+            }
+            ok(&format!(",\"pairs\":[{}]", pairs.join(",")))
+        }
+        "typeramp" => {
+            let default = crate::css::Scale::from_points(10.0);
+            let large = crate::css::Scale::from_points(18.0);
+            ok(&format!(
+                ",\"default\":{{\"caption\":{},\"body\":{},\"title\":{},\"headline\":{},\"panel\":{}}},\"large\":{{\"caption\":{},\"body\":{},\"title\":{},\"headline\":{},\"panel\":{}}}",
+                default.caption, default.body, default.title, default.start_headline, default.panel_heading,
+                large.caption, large.body, large.title, large.start_headline, large.panel_heading
+            ))
+        }
+        "motioncfg" => {
+            let gtk = gtk::Settings::default()
+                .map(|settings| settings.is_gtk_enable_animations())
+                .unwrap_or(true);
+            ok(&format!(
+                ",\"animations\":{},\"gtkAnimations\":{},\"enterMs\":{}",
+                crate::motion::enabled(),
+                gtk,
+                crate::motion::dur::ENTER
+            ))
+        }
         "drift" => {
             let worst = WORST_GAP_MS.lock().map(|value| *value).unwrap_or(0);
             let gaps = GAPS.lock().map(|gaps| gaps.clone()).unwrap_or_default();
@@ -572,6 +802,106 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         }
         other => fail(&format!("unknown command: {other}")),
     }
+}
+
+fn chrome(app: &AppRef) -> String {
+    settle(app);
+    let controls: Vec<_> = [
+        ("newtab", app.ui.newtab.upcast_ref::<gtk::Widget>()),
+        ("private", app.ui.private_tab.upcast_ref::<gtk::Widget>()),
+        ("address", app.ui.address.upcast_ref::<gtk::Widget>()),
+        ("site", app.ui.site_info.upcast_ref::<gtk::Widget>()),
+        ("fold", app.ui.fold.upcast_ref::<gtk::Widget>()),
+        ("back", app.ui.back.upcast_ref::<gtk::Widget>()),
+        ("forward", app.ui.forward.upcast_ref::<gtk::Widget>()),
+        ("reload", app.ui.reload.upcast_ref::<gtk::Widget>()),
+        ("bookmark", app.ui.bookmark.upcast_ref::<gtk::Widget>()),
+        ("reader", app.ui.reader.upcast_ref::<gtk::Widget>()),
+        ("more", app.ui.more.upcast_ref::<gtk::Widget>()),
+        ("history", app.ui.history.upcast_ref::<gtk::Widget>()),
+        ("library", app.ui.library.upcast_ref::<gtk::Widget>()),
+        ("settings", app.ui.menu.upcast_ref::<gtk::Widget>()),
+        ("minimise", app.ui.light_amber.upcast_ref::<gtk::Widget>()),
+        ("maximise", app.ui.light_green.upcast_ref::<gtk::Widget>()),
+        ("close", app.ui.light_red.upcast_ref::<gtk::Widget>()),
+        ("start-search", app.ui.start.search.upcast_ref::<gtk::Widget>()),
+    ].into_iter().map(|(name, widget)| {
+        let origin = widget.translate_coordinates(&app.ui.overlay, 0, 0).unwrap_or((-1, -1));
+        serde_json::json!({
+            "name": name,
+            "at": [origin.0, origin.1],
+            "size": [widget.allocated_width(), widget.allocated_height()],
+            "visible": widget.is_visible() && widget.is_child_visible() && widget.is_mapped(),
+            "sensitive": widget.is_sensitive(),
+            "focusOnClick": widget.gets_focus_on_click(),
+            "accessibleName": widget.accessible().and_then(|access| gtk::atk::prelude::AtkObjectExt::name(&access)).map(|name| name.to_string()),
+        })
+    }).collect();
+    serde_json::json!({
+        "ok": true,
+        "address": app.ui.address_label.text().as_str(),
+        "tabCount": app.ui.tab_count.text().as_str(),
+        "dark": app.dark(),
+        "toolbarShown": app.ui.toolbar.is_child_visible(),
+        "bookmarksShown": app.ui.bmarkbar.is_visible() && app.ui.bmarkbar.is_child_visible() && app.ui.bmarkbar.is_mapped(),
+        "rowCount": app.ui.rows.children().len(),
+        "startFocused": app.ui.window.focused_widget().as_ref() == Some(app.ui.start.search.upcast_ref()),
+        "startHasFocus": app.ui.start.search.has_focus(),
+        "windowActive": app.ui.window.is_active(),
+        "protected": app.ui.site_info.style_context().has_class("protected"),
+        "controls": controls,
+    }).to_string()
+}
+
+fn browser_menu() -> Option<gtk::Menu> {
+    fn find(widget: &gtk::Widget) -> Option<gtk::Menu> {
+        if widget.style_context().has_class("browser-menu") && widget.is_visible() {
+            return widget.clone().downcast::<gtk::Menu>().ok();
+        }
+        widget.downcast_ref::<gtk::Container>().and_then(|container| container.children().iter().find_map(find))
+    }
+    gtk::Window::list_toplevels().iter().find_map(find)
+}
+
+fn ui_tree(app: &AppRef) -> String {
+    fn walk(widget: &gtk::Widget, root: &gtk::Overlay, nodes: &mut Vec<serde_json::Value>) {
+        if !widget.is_visible() || !widget.is_child_visible() || !widget.is_mapped() || widget.is::<webkit2gtk::WebView>() {
+            return;
+        }
+        let origin = widget.translate_coordinates(root, 0, 0).unwrap_or((-1, -1));
+        let text = widget.downcast_ref::<gtk::Label>().map(|label| label.text().to_string());
+        let preferred = widget.preferred_width();
+        let context = widget.style_context();
+        let foreground = context.color(widget.state_flags()).to_string();
+        let background = context.style_property_for_state("background-color", widget.state_flags())
+            .get::<gtk::gdk::RGBA>().ok().map(|color| color.to_string());
+        // What the stylesheet resolved, next to what the widget carries: a
+        // close button can sit at CSS opacity 0.6 while its row looks idle,
+        // and only the flags say whether GTK still thinks it is hovered.
+        let css_opacity = context.style_property_for_state("opacity", widget.state_flags())
+            .get::<f64>().ok();
+        let state_flags = format!("{:?}", widget.state_flags());
+        nodes.push(serde_json::json!({
+            "type": widget.type_().name(),
+            "classes": widget.style_context().list_classes().into_iter().map(|class| class.to_string()).collect::<Vec<_>>(),
+            "text": text,
+            "at": [origin.0, origin.1],
+            "size": [widget.allocated_width(), widget.allocated_height()],
+            "preferredWidth": [preferred.0, preferred.1],
+            "foreground": foreground,
+            "background": background,
+            "stateFlags": state_flags,
+            "opacity": widget.opacity(),
+            "cssOpacity": css_opacity,
+        }));
+        if let Some(container) = widget.downcast_ref::<gtk::Container>() {
+            for child in container.children() { walk(&child, root, nodes); }
+        }
+    }
+    settle(app);
+    let mut nodes = Vec::new();
+    walk(app.ui.overlay.upcast_ref(), &app.ui.overlay, &mut nodes);
+    serde_json::json!({"ok":true, "nodes":nodes}).to_string()
 }
 
 fn probe(app: &AppRef) -> String {
@@ -604,6 +934,10 @@ fn probe(app: &AppRef) -> String {
     let find = app.find.borrow();
     let panels = app.panels.borrow();
     let hide_mode = app.state.borrow().hide_mode;
+    let (screen_width, screen_height) = gdk::Screen::default()
+        .and_then(|screen| screen.root_window())
+        .map(|window| (window.width(), window.height()))
+        .unwrap_or((0, 0));
     // The error page is only the browser's story while it is the child being
     // drawn: a failed tab that is not the active one remembers its error but
     // shows a page. The button's caption is read rather than assumed, because
@@ -621,7 +955,7 @@ fn probe(app: &AppRef) -> String {
         .map(|label| label.to_string())
         .unwrap_or_default();
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"orphanViews\":{},\"reading\":{},\"width\":{},\"height\":{},\"viewWidth\":{},\"viewHeight\":{},\"error\":{},\"errorAction\":\"{}\"}}",
+        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"orphanViews\":{},\"reading\":{},\"width\":{},\"height\":{},\"viewWidth\":{},\"viewHeight\":{},\"gdkWidth\":{},\"gdkHeight\":{},\"minimumWidth\":{},\"naturalWidth\":{},\"screen\":{{\"width\":{},\"height\":{}}},\"error\":{},\"errorAction\":\"{}\"}}",
         active,
         json_escape(&url),
         json_escape(&title),
@@ -647,6 +981,12 @@ fn probe(app: &AppRef) -> String {
         app.ui.window.allocated_height(),
         app.view(active).map(|v| v.allocated_width()).unwrap_or(0),
         app.view(active).map(|v| v.allocated_height()).unwrap_or(0),
+        app.ui.window.window().map(|w| w.geometry().2).unwrap_or(0),
+        app.ui.window.window().map(|w| w.geometry().3).unwrap_or(0),
+        app.ui.window.preferred_size().0.width,
+        app.ui.window.preferred_size().1.width,
+        screen_width,
+        screen_height,
         error,
         json_escape(&error_action)
     )
@@ -755,8 +1095,12 @@ fn settle(app: &AppRef) -> String {
         rounds += 1;
         app.ui.window.check_resize();
         app.ui.overlay.check_resize();
+        app.ui.start.root.check_resize();
         let context = glib::MainContext::default();
-        while context.iteration(false) {}
+        let mut dispatched = 0;
+        while dispatched < 256 && context.iteration(false) {
+            dispatched += 1;
+        }
         let width = app.ui.overlay.allocated_width();
         let height = app.ui.overlay.allocated_height();
         let layers_ready = [&app.omni.holder, &app.find.borrow().holder]
@@ -781,12 +1125,25 @@ fn tabs(app: &AppRef) -> String {
         .tabs
         .iter()
         .map(|tab| {
+            // The letter the row's tile shows, and whether that label is really
+            // on screen. Gemini R59 found the tile stuck on "1": set_loading
+            // dropped the label ui::mark returned, so row.letter pointed at a
+            // detached label that update_row_title kept renaming. A test can
+            // now see both the text and that the label it names is mapped.
+            let label = tab.row.as_ref().and_then(|row| row.letter.as_ref());
+            let letter = match label {
+                Some(label) => format!("\"{}\"", json_escape(label.text().as_str())),
+                None => "null".to_string(),
+            };
+            let letter_mapped = label.map(|label| label.is_mapped()).unwrap_or(false);
             format!(
-                "{{\"id\":{},\"url\":\"{}\",\"title\":\"{}\",\"pinned\":{}}}",
+                "{{\"id\":{},\"url\":\"{}\",\"title\":\"{}\",\"pinned\":{},\"letter\":{},\"letterMapped\":{}}}",
                 tab.id,
                 json_escape(&tab.url),
                 json_escape(&tab.title),
-                tab.pinned
+                tab.pinned,
+                letter,
+                letter_mapped
             )
         })
         .collect();

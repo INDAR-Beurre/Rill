@@ -75,7 +75,9 @@ pub fn show(app: &App, url: &str) {
         crate::motion::cancel(&label);
         label.set_opacity(1.0);
         label.show();
-        crate::motion::fade_in(&label, 100);
+        // The hover link label is a small state change, so it shows and hides
+        // on the shared MICRO role in both directions.
+        crate::motion::fade_in(&label, crate::motion::dur::MICRO);
     } else if HIDING.with(|h| h.replace(false)) {
         crate::motion::cancel(&label);
         label.set_opacity(1.0);
@@ -89,7 +91,7 @@ pub fn hide() {
                 HIDING.with(|h| h.set(true));
                 crate::motion::cancel(label);
                 let label_done = label.clone();
-                crate::motion::fade_out_then(label, 110, move || {
+                crate::motion::fade_out_then(label, crate::motion::dur::MICRO, move || {
                     if HIDING.with(|h| h.replace(false)) {
                         label_done.hide();
                         label_done.set_opacity(1.0);

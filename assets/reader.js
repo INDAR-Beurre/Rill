@@ -1,6 +1,16 @@
 // Reading mode, done in the page: take the article out of the page it is in
 // and set it again in the browser's own type. No second view, no extra
 // process, and Back still works because the address never changes.
+// The reader owns its type size for this session. The host can drive these
+// buttons through the bench `js` verb, and a person can click A- / A+.
+window.__searchReaderFont = function (delta) {
+  const current = Number(window.__searchReaderSize) || 19;
+  const next = Math.max(15, Math.min(28, current + delta));
+  window.__searchReaderSize = next;
+  document.documentElement.style.setProperty('--search-reader-size', next + 'px');
+  return String(next);
+};
+
 window.__searchReader = function (palette) {
   if (window.__searchReaderOn) {
     window.__searchReaderOn = false;
@@ -117,22 +127,69 @@ window.__searchReader = function (palette) {
   style.setAttribute('data-search-reader', '');
   style.textContent = `
     html, body { ${pageCss} !important; }
-    body { margin: 0 auto !important; max-width: 720px !important; font: 19px/1.62 "SF Pro Text", Inter, "Adwaita Sans", "Noto Sans", sans-serif !important;
+    body { margin: 0 auto !important; padding: 0 !important; max-width: 720px !important; font: var(--search-reader-size, 19px)/1.62 Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif !important;
       -webkit-font-smoothing: antialiased; }
-    #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 72px 28px 120px; }
-    #__search_reader h1 { font-size: 34px; line-height: 1.18; letter-spacing: -0.012em; font-weight: 700; margin: 0 0 12px; }
-    #__search_reader .byline { color: ${muted}; font-size: 13px; margin: 0 0 40px; }
+    #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 48px 28px 120px; }
+    #__search_reader h1 { font-size: 1.79em; line-height: 1.18; letter-spacing: -0.012em; font-weight: 700; margin: 0 0 12px; }
+    /* Secondary text is sized in em from the 19px body instead of fixed
+       pixels, so it follows the reader's text size and page zoom along with
+       everything else. 0.72em of 19px is about 13.7px, close to the old 13px. */
+    #__search_reader .byline { color: ${muted}; font-size: 0.72em; margin: 0 0 40px; }
     #__search_reader p, #__search_reader li, #__search_reader blockquote { margin: 0 0 1.05em; }
     #__search_reader h2, #__search_reader h3 { line-height: 1.25; margin: 1.8em 0 0.5em; letter-spacing: -0.01em; }
+    #__search_reader h2 { font-size: 1.32em; font-weight: 600; }
+    #__search_reader h3 { font-size: 1.11em; font-weight: 600; letter-spacing: -0.005em; }
+    #__search_reader h4, #__search_reader h5, #__search_reader h6 { font-size: 1em; font-weight: 600; line-height: 1.3; margin: 1.6em 0 0.4em; }
     #__search_reader img, #__search_reader video, #__search_reader figure { max-width: 100%; height: auto; border-radius: 6px; }
-    #__search_reader a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: ${rule}; }
+    /* A long bare URL has no spaces to break at, so without this it would push
+       past the 604px measure. Break anywhere only when the line would overflow. */
+    #__search_reader a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: ${rule}; overflow-wrap: anywhere; }
     #__search_reader blockquote { border-left: 2px solid ${rule}; padding-left: 18px; color: ${muted}; }
-    #__search_reader pre, #__search_reader code { font: 14px/1.5 "SF Mono", "DejaVu Sans Mono", monospace; background: ${rule}; border-radius: 6px; }
-    #__search_reader pre { padding: 14px; overflow-x: auto; }
+    /* Inline code and code blocks are styled apart. Inline code sits in running
+       prose, so it is sized from the text around it (0.86em, about 16px in 19px
+       body text, and it scales inside headings too) and gets a little padding
+       so the tint does not touch the letters. Blocks keep the smaller 0.76em,
+       their own line height and the 14px inset. */
+    #__search_reader code { font-family: "SF Mono", "DejaVu Sans Mono", monospace; font-size: 0.86em; background: ${rule}; border-radius: 4px; padding: 0.12em 0.36em; -webkit-box-decoration-break: clone; box-decoration-break: clone; overflow-wrap: anywhere; }
+    /* Code blocks wrap instead of scrolling sideways. Reading mode is for
+       reading, and a horizontal scrollbar inside a 604px measure hides the
+       end of each long line (Gemini R59 fix 4). pre-wrap keeps the block's
+       own line breaks and indentation and only wraps lines that would
+       overflow. overflow-wrap: anywhere breaks a long token with no spaces,
+       such as a URL or a hash. overflow-x: auto stays as a fallback for
+       anything that still cannot break. */
+    #__search_reader pre { font: 0.76em/1.5 "SF Mono", "DejaVu Sans Mono", monospace; background: ${rule}; border-radius: 6px; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }
+    /* Code inside a block takes the block's size, not 0.86 of 0.76, and has no tint or padding of its own.
+       It inherits the block's wrapping, so a long line inside <pre><code> wraps too. */
+    #__search_reader pre code { font-size: 1em; background: none; padding: 0; border-radius: 0; white-space: inherit; overflow-wrap: inherit; }
     #__search_reader hr { border: none; border-top: 1px solid ${rule}; margin: 2.4em 0; }
-    #__search_reader .search-reader-origin { font-size: 12px; color: ${muted}; margin-bottom: 28px; }
+    #__search_reader .search-reader-origin { font-size: 0.68em; color: ${muted}; margin-bottom: 28px; }
+    /* The exit button's inline style starts with all: unset, which removes the
+       browser's default focus ring, and nothing replaced it. A stylesheet rule
+       marked !important beats an inline declaration without !important, so
+       these rules win over that reset. Hover makes the border stronger. Keyboard
+       focus gets a visible 2px ring set 2px off the edge, so the way out can be
+       found without a mouse. */
+    #__search_reader_exit:hover { border-color: ${muted} !important; }
+    #__search_reader_exit:focus-visible { outline: 2px solid ${muted} !important; outline-offset: 2px !important; border-color: ${muted} !important; }
+    /* The type controls sit on the opposite side from the exit pill and the
+       find bar, so all three can be captured and used at once. */
+    #__search_reader_font { position: fixed; top: 14px; left: 18px; z-index: 2147483647; display: flex; gap: 6px; }
+    #__search_reader_font button { all: unset; box-sizing: border-box; min-width: 32px; min-height: 28px; cursor: pointer; text-align: center;
+      font: 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
+      color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; background: ${ground}; }
+    #__search_reader_font button:hover { border-color: ${muted} !important; }
+    #__search_reader_font button:focus-visible { outline: 2px solid ${muted} !important; outline-offset: 2px !important; }
+    /* Find selects the current match, and WebKit paints that selection in its
+       own bright yellow while keeping the page's text colour. On the dark
+       ground that put light text on yellow, which is hard to read. The
+       selection now uses dark text on a warm amber in both looks, so the
+       current match reads the same way in light and dark. Ordinary text
+       selection uses the same colours. */
+    #__search_reader ::selection, html::selection, body::selection { background: #f2c94c !important; color: #1b1a17 !important; }
   `;
   document.head.appendChild(style);
+  window.__searchReaderFont(0);
 
   const container = document.createElement('div');
   container.id = '__search_reader';
@@ -145,8 +202,11 @@ window.__searchReader = function (palette) {
   // Fixed at the top right of the page column. The find bar in src/find.rs
   // places itself at the same inset and top (PAGE_INSET, PAGE_TOP): the two
   // are one pair, and moving one alone leaves two different edges on screen.
-  exit.setAttribute('style', `all: unset; display: inline-block; cursor: pointer; font: 12px system-ui, sans-serif;
-    color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 5px 10px;
+  // Same font as the browser chrome, and a 28px minimum height, so the way
+  // out looks like a browser control and not like part of the page.
+  exit.setAttribute('style', `all: unset; display: inline-block; box-sizing: border-box; min-height: 28px; cursor: pointer;
+    font: 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
+    color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 4px 10px;
     position: fixed; top: 14px; right: 18px; background: ${ground}; z-index: 2147483647;`);
   // The button calls the toggle with the tokens it was built with, so it can
   // enter again with real colours if a restore ever leaves it on screen.
@@ -162,6 +222,19 @@ window.__searchReader = function (palette) {
     } catch (_) {}
   });
   container.appendChild(exit);
+  const font = document.createElement('div');
+  font.id = '__search_reader_font';
+  for (const [label, delta, name] of [['A-', -2, 'Smaller reading text'], ['A+', 2, 'Larger reading text']]) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.title = name;
+    button.setAttribute('aria-label', name);
+    const step = delta;
+    button.addEventListener('click', () => window.__searchReaderFont(step));
+    font.appendChild(button);
+  }
+  container.appendChild(font);
   const title = document.createElement('h1');
   title.textContent = heading.trim();
   container.appendChild(title);

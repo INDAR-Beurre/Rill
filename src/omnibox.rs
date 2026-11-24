@@ -5,8 +5,9 @@ use crate::layer::Layer;
 use crate::palette::Palette;
 use gtk::prelude::*;
 
-pub const FIELD_WIDTH: i32 = 560;
-const FIELD_HEIGHT: i32 = 50;
+pub const FIELD_WIDTH: i32 = 720;
+const FIELD_HEIGHT: i32 = 64;
+const FOOTER_HEIGHT: i32 = 34;
 
 /// Field width clamped to the available page width on narrow windows.
 fn field_width_for(page: i32) -> i32 {
@@ -21,7 +22,7 @@ const LIST_CAP: i32 = 420;
 /// in exactly the same place as before and no list can move it.
 const LIST_RESERVE: i32 = 359;
 /// The highest the field may stand, so its top edge never reaches the lights.
-const TOP_MIN: i32 = 72;
+const TOP_MIN: i32 = 96;
 
 #[derive(Clone)]
 pub struct Offer {
@@ -43,6 +44,9 @@ pub struct Omnibox {
     pub entry: gtk::Entry,
     pub site: gtk::Label,
     pub site_box: gtk::EventBox,
+    /// The footer's action label. Its verb follows the first row: an Open
+    /// row switches tabs, so "Enter  open" would promise the wrong thing.
+    commit: gtk::Label,
     pub list: gtk::Box,
     pub list_scroll: gtk::ScrolledWindow,
     /// The rows, in draw order, so a pick can restyle one row instead of
@@ -144,7 +148,7 @@ struct Plan {
 /// How tall the list may grow in a window this tall, under a field that
 /// stands at `top`.
 fn room_under(top: i32, height: i32) -> i32 {
-    (height - top - FIELD_HEIGHT - 8 - 12).clamp(0, LIST_CAP)
+    (height - top - FIELD_HEIGHT - FOOTER_HEIGHT - 12).clamp(0, LIST_CAP)
 }
 
 /// The anchor comes from the window height alone, never from what is in the
@@ -156,12 +160,12 @@ fn plan(height: i32, list_height: i32) -> Plan {
     // The field, plus the room a full list has always been given, centred as
     // one block and lifted a little. What is really in the list is not part
     // of that sum, so nothing that arrives in it can move the field.
-    let top = ((height - (FIELD_HEIGHT + 8 + LIST_RESERVE)) / 2 - 60).max(TOP_MIN);
+    let top = ((height - (FIELD_HEIGHT + FOOTER_HEIGHT + LIST_RESERVE)) / 2 - 24).max(TOP_MIN);
     let list = list_height.clamp(0, room_under(top, height));
     Plan {
         top,
         list,
-        block: FIELD_HEIGHT + if list > 0 { list + 8 } else { 0 },
+        block: FIELD_HEIGHT + FOOTER_HEIGHT + list,
     }
 }
 
@@ -179,7 +183,8 @@ impl Omnibox {
         crate::ui::class(&list_scroll, "suggestscroll");
         list_scroll.set_no_show_all(true);
 
-        let block = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        crate::ui::class(&block, "omni-block");
         block.set_halign(gtk::Align::Start);
         block.set_valign(gtk::Align::Start);
 
@@ -187,9 +192,15 @@ impl Omnibox {
         crate::ui::class(&field, "omni");
         field.set_size_request(FIELD_WIDTH, FIELD_HEIGHT);
 
+        let magnifier = crate::icons::area(crate::icons::Icon::Search, 19, palette.accent());
+        crate::ui::class(&magnifier, "omni-search-icon");
+        magnifier.set_margin_start(18);
+        magnifier.set_valign(gtk::Align::Center);
+        crate::ui::pack(&field, &magnifier, false);
+
         let site = gtk::Label::new(None);
         crate::ui::class(&site, "omnisite");
-        site.set_margin_start(18);
+        site.set_margin_start(4);
         site.set_ellipsize(gtk::pango::EllipsizeMode::End);
         site.set_max_width_chars(14);
         site.set_no_show_all(true);
@@ -216,13 +227,18 @@ impl Omnibox {
         entry.set_placeholder_text(Some("Search or enter address"));
         entry.set_width_chars(1);
         entry.set_hexpand(true);
-        entry.set_margin_end(18);
+        entry.set_margin_end(4);
         entry.set_valign(gtk::Align::Center);
         entry.set_has_frame(false);
         if let Some(access) = entry.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, "Address and search");
         }
         crate::ui::pack(&field, &entry, true);
+        let escape = gtk::Label::new(Some("Esc"));
+        crate::ui::class(&escape, "omni-escape");
+        escape.set_valign(gtk::Align::Center);
+        escape.set_margin_end(18);
+        crate::ui::pack(&field, &escape, false);
         block.add(&field);
 
         // The ring is the only sign the field is live, so it follows the
@@ -317,6 +333,16 @@ impl Omnibox {
         list_scroll.add(&list);
         block.add(&list_scroll);
 
+        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        crate::ui::class(&footer, "omni-footer");
+        let guidance = gtk::Label::new(Some("↑ ↓  choose"));
+        guidance.set_xalign(0.0);
+        guidance.set_hexpand(true);
+        crate::ui::pack(&footer, &guidance, true);
+        let commit = gtk::Label::new(Some("Enter  open"));
+        crate::ui::pack(&footer, &commit, false);
+        crate::ui::pack(&block, &footer, false);
+
         layer.add(&block);
         let holder = layer.root.clone();
 
@@ -333,6 +359,7 @@ impl Omnibox {
             entry,
             site,
             site_box,
+            commit,
             list,
             list_scroll,
             rows: std::cell::RefCell::new(Vec::new()),
@@ -362,7 +389,7 @@ impl Omnibox {
         // anchor above it does not depend on any of that.
         let shown = self.list_scroll.get_visible();
         let placed = plan(height, if shown { self.list_height_for(field_width) } else { 0 });
-        self.layer.place(&self.block, x, placed.top, field_width, placed.block.max(FIELD_HEIGHT));
+        self.layer.place(&self.block, x, placed.top, field_width, placed.block.max(FIELD_HEIGHT + FOOTER_HEIGHT));
         if shown {
             self.list_scroll.set_size_request(field_width, placed.list);
         }
@@ -379,7 +406,7 @@ impl Omnibox {
         if host.is_empty() {
             self.site_box.set_no_show_all(true);
             self.site_box.hide();
-            self.entry.set_margin_start(18);
+            self.entry.set_margin_start(4);
         } else {
             self.site_box.set_no_show_all(false);
             self.site.set_text(host);
@@ -388,7 +415,7 @@ impl Omnibox {
         }
     }
 
-    pub fn show(&self, ui: &crate::ui::Ui, over: bool, offers: Vec<Offer>) {
+    pub fn show(&self, ui: &crate::ui::Ui, over: bool) {
         crate::motion::cancel(&self.layer.root);
         crate::motion::cancel(&self.scrim);
         crate::motion::cancel(&self.block);
@@ -398,8 +425,9 @@ impl Omnibox {
         self.block.set_opacity(1.0);
         self.list_scroll.set_opacity(1.0);
         self.visible.set(true);
-        // A new field starts with nothing picked: a pick from the last time is
-        // a pick the user did not make.
+        // A new field starts on its first row: a pick from the last time is a
+        // pick the user did not make, and an unhighlighted first row made the
+        // footer's "Enter" promise invisible (Gemini R68 review).
         self.picked.set(-1);
         self.scrim.set_visible(over);
         let column = if ui.side.is_visible() && ui.side.is_child_visible() {
@@ -446,22 +474,38 @@ impl Omnibox {
         // lands, would otherwise show a bare label where the field is.
         crate::ui::class(&self.field, "focused");
         self.entry.grab_focus();
+        // The text above is the address's path, not the empty string the
+        // caller passed in. Setting it fires `changed`, which refreshes the
+        // offers; asking again here makes that the one that sticks even when
+        // GTK skips `changed` because the text is identical to last time.
+        // Writing the caller's stale `offers("")` back here is what used to
+        // leave every same-host tab listed under Open while the field said
+        // "/office" (round 67, council/round-67/04-omni.png).
         if let Some(app) = crate::app::current() {
-            self.set_offers(ui, &app, offers);
+            app.refresh_offers(&self.entry.text());
         }
         self.layout(width, height);
+        // The scrim, field and list all arrive on the shared entrance role,
+        // so they land on the same frame instead of at 130, 150 and 160ms.
         if over {
-            crate::motion::fade_in(&self.scrim, 130);
+            crate::motion::fade_in(&self.scrim, crate::motion::dur::ENTER);
         }
         if width > 1 && height > 1 {
             let page = (width - column).max(0);
             let field_width = field_width_for(page);
             let x = column + ((page - field_width) / 2).max(12);
             let y = plan(height, 0).top;
-            crate::motion::slide_in_fixed(&self.layer.root, &self.block, x, y, -10, 160);
+            crate::motion::slide_in_fixed(
+                &self.layer.root,
+                &self.block,
+                x,
+                y,
+                -crate::motion::dur::TRAVEL,
+                crate::motion::dur::ENTER,
+            );
         }
         if self.list_scroll.get_visible() {
-            crate::motion::fade_in(&self.list_scroll, 150);
+            crate::motion::fade_in(&self.list_scroll, crate::motion::dur::ENTER);
         }
     }
 
@@ -479,7 +523,8 @@ impl Omnibox {
         crate::motion::cancel(&self.list_scroll);
         let visible_flag = self.visible.clone();
         let root = self.layer.root.clone();
-        crate::motion::fade_out_then(&self.layer.root, 100, move || {
+        // Closing mirrors opening on the shared exit role (130ms, ease_exit).
+        crate::motion::fade_out_then(&self.layer.root, crate::motion::dur::EXIT, move || {
             if !visible_flag.get() {
                 root.hide();
                 root.set_no_show_all(true);
@@ -490,7 +535,21 @@ impl Omnibox {
 
     pub fn set_offers(&self, _ui: &crate::ui::Ui, app: &AppRef, offers: Vec<Offer>) {
         *self.offers.borrow_mut() = offers.clone();
-        let picked = self.picked.get();
+        // An open field has a visible first pick unless the list is empty.
+        // Previously picked stayed -1 until an arrow key: the first row had no
+        // highlight while the footer said Enter would open it.
+        let picked = if offers.is_empty() {
+            -1
+        } else {
+            self.picked.get().clamp(0, offers.len() as i32 - 1)
+        };
+        self.picked.set(picked);
+        let verb = if offers.first().is_some_and(|offer| offer.kind == "Open") {
+            "Enter  switch"
+        } else {
+            "Enter  open"
+        };
+        self.commit.set_text(verb);
         let tint = app.palette.borrow().faint;
         self.rows.borrow_mut().clear();
         for child in self.list.children() {
@@ -561,14 +620,27 @@ impl Omnibox {
             let url = gtk::Label::new(Some(&offer.url));
             crate::ui::class(&url, "sgurl");
             url.set_xalign(0.0);
-            url.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            // Ellipsize in the middle. The host at the start and the last path
+            // segment at the end are the parts that tell two suggestions
+            // apart. With End, long URLs on the same site all looked the same.
+            url.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
             texts.add(&title);
             texts.add(&url);
             crate::ui::pack(&hbox, &texts, true);
 
-            // No right-hand kind label: the group head above the row and the
-            // glyph on its left already say where it came from. "Open" three
-            // times under an "Open" head is noise in a quiet field.
+            // Most rows get no right-hand kind label. The group head above the
+            // row and the glyph on its left already say where it came from, so
+            // "History" under a "History" head would only add noise. An open-tab
+            // row is the one exception: picking it switches to a tab that is
+            // already open instead of loading the address again, and nothing
+            // else on the row says so (Gemini R60 polish). The hint uses the
+            // existing .sgkind style (src/css.rs:229), which had no user until now.
+            if offer.kind == "Open" {
+                let hint = gtk::Label::new(Some("Switch to tab"));
+                crate::ui::class(&hint, "sgkind");
+                hint.set_valign(gtk::Align::Center);
+                crate::ui::pack(&hbox, &hint, false);
+            }
 
             row.add(&hbox);
             self.rows.borrow_mut().push(row.clone());
@@ -936,7 +1008,7 @@ mod tests {
         let short = plan(500, 8 * 44);
         assert!(short.list >= 3 * 44, "only {}px of rows at height 500", short.list);
         assert!(short.top >= TOP_MIN);
-        assert!(short.top + FIELD_HEIGHT + 8 + short.list <= 500);
+        assert!(short.top + FIELD_HEIGHT + FOOTER_HEIGHT + short.list <= 500);
 
         // Room to spare: the list gets exactly what it asked for, up to the
         // cap, and no more.
@@ -988,7 +1060,7 @@ mod tests {
     #[test]
     fn nothing_in_the_list_leaves_the_block_at_the_field() {
         let none = plan(917, 0);
-        assert_eq!(none.block, FIELD_HEIGHT);
+        assert_eq!(none.block, FIELD_HEIGHT + FOOTER_HEIGHT);
         assert!(plan(917, 352).block > FIELD_HEIGHT);
     }
 

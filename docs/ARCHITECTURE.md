@@ -1,12 +1,14 @@
 # How Search is put together
 
-A browser is a small surface with a lot underneath. This is the map (34 files in `src/`):
+A browser is a small surface with a lot underneath. This is the module map for
+the local, unreleased native UI makeover:
 
 ```
 main.rs           flags, the environment, the window, and the loop
 app.rs            the browser: tabs, the active tab, and every action
 web.rs            WebKitGTK 4.1 setup, persistent SQLite cookies vs ephemeral private sessions, locale Accept-Language & spellcheck, WebRTC, downloads, error pages
-ui.rs             edge-to-edge GTK3 window without a top deskband: left tab column + GtkPaned + page stack overlay with 3px accent progress bar and 90ms crossfade
+ui.rs             GTK3 shell: branded tab column + permanent responsive navigation toolbar + page stack, with 3px progress and a 120ms crossfade (`motion::dur::MICRO`)
+startpage.rs      native editorial start page, direct search, Cairo orbital artwork, bookmarks, recent pages, and private-session presentation
 motion.rs         VSync `add_tick_callback` frame-clock motion engine for fades, slides, pops, toasts, and paned sidebar fold (disabled under `SEARCH_BENCH` or `gtk-enable-animations=false`)
 css.rs            one stylesheet, built from the palette
 palette.rs        every colour, as a light/dark pair
@@ -111,21 +113,38 @@ a sheet added that way is accepted and has no effect at either
 
 ## The frame
 
-`ui::build` builds an edge-to-edge GTK3 window without a top deskband around a
-single `GtkPaned`: the tab column on the left, the page card on the right, with
-the column's edge as the handle so its width can be dragged. The column is a
-vertical box of fixed pieces: the top handle band (with window lights and
-back/forward/reload helm), the pins' grid, the rows in a scrolled window, and
-the footer menu (or a 10px strip when folded). On the right, the page card
-packs the bookmarks bar above a `GtkOverlay` containing the `GtkStack` (with a
-90ms crossfade between tabs, disabled under `SEARCH_BENCH`) and a 3px accent
-page-load progress bar overlaid at the top edge of the viewport.
+`ui::build` uses one `GtkPaned`: the branded tab column on the left and the page
+card on the right. The column holds a drag handle/wordmark, new/private-tab
+actions, a pinned-page section, title/host tab rows in a scrolled window, and
+direct library/settings/history/download controls. It folds to a 10px strip.
+The page card packs a permanent responsive navigation toolbar, the optional
+bookmarks bar, and a `GtkOverlay` containing the `GtkStack` (120ms crossfade from `motion::dur::MICRO`,
+turned off under `SEARCH_BENCH` or when GTK animations are off) with an overlaid 3px load-progress bar.
+
+`startpage::StartPage` owns a native scrolled start surface under the stack's
+`blank` child. Its direct entry resolves URLs/search/keywords through the same
+navigation path as the omnibox. It deduplicates bookmarks and recent web pages,
+labels curated fallbacks honestly, and hides regular browsing records in
+private mode. The illustration reads live CSS colors, so theme switches do
+not leave stale artwork. No additional WebView or network request is needed
+for the start page.
+
+`app::refresh_helm` updates the persistent address, navigation sensitivity,
+reload/stop glyph, bookmark/reader state, protection tooltip, and tab count.
+HTTP remains visibly prefixed; embedded credentials are omitted. Video
+fullscreen hides both the column and toolbar, restoring their previous state
+when it ends.
+
+At compact widths, some navigation and page controls leave the toolbar to keep
+the address usable. Their actions remain available through the native browser
+overflow menu. The current GTK walkthrough checks control bounds and overflow
+behavior rather than relying on the older shell's fixed screenshot coordinates.
 
 Rows are rebuilt when the set of tabs changes, not on every title change: the
 browser keeps the row's widgets on the tab and updates the label in place.
 
 The bookmarks bar is a row of chips in the page's column, above the page stack
-overlay and below the column's top band. It is hidden when nothing is kept and
+overlay and below the navigation toolbar. It is hidden when nothing is kept and
 shown again when something is, and Settings has a switch for it; both live in
 `app::render_bmarks`, which is why a bookmark taken with `Ctrl D` appears
 without rebuilding the column.
@@ -134,22 +153,11 @@ without rebuilding the column.
 motion engine for fades, slides, pops, toasts, and paned sidebar fold; it is
 disabled automatically under `SEARCH_BENCH` or `gtk-enable-animations=false`.
 
-Nothing in `ui.rs` knows what a tab is. `app.rs` is 4,700 lines and touches GTK
-deliberately in `app::capture` (and the `draw_at`, `opacity_of` and `draw_into`
+Nothing in `ui.rs` knows what a tab is. `app.rs` touches GTK deliberately in
+`app::capture` (and the `draw_at`, `opacity_of` and `draw_into`
 helpers under it), walking the real widget tree with cairo because a screenshot
 of a window with no compositor has to draw the widgets that were actually built,
 at the offsets they were actually given. Grep `fn capture` to see the shape of it.
-
-Measured with `wc -l src/*.rs` across the 34 files, 22,972 lines in `src`:
-`app.rs` 4,700, `extensions.rs` 2,376, `panels.rs` 1,710, `web.rs` 1,575,
-`omnibox.rs` 1,001, `bench.rs` 930, `import.rs` 918, `ui.rs` 849, `shield.rs`
-776, `keys.rs` 740, `permissions.rs` 718, `css.rs` 672, `store.rs` 604,
-`sitecard.rs` 574, `suggest.rs` 441, `peek.rs` 418, `curtain.rs` 407,
-`motion.rs` 400, `dialogs.rs` 382, `files.rs` 374, `palette.rs` 327,
-`keyword.rs` 309, `main.rs` 291, `find.rs` 254, `menu.rs` 223, `reader.rs` 214,
-`icons.rs` 212, `welcome.rs` 195, `fuzzy.rs` 177, `status.rs` 134, `layer.rs`
-34, `js.rs` 17, `gtkx.rs` 11, `shield_assets.rs` 9. The numbers move with every
-commit; the command does not.
 
 ## Things over the page
 
@@ -172,9 +180,19 @@ compositor.
 
 `app::capture` draws the frame into a cairo surface, asks WebKit for a snapshot
 of the visible page (and any visible `peek.rs` preview WebView), lays that into
-the page's rectangle, and then draws the over-page layers on top. `tools/shots.sh`
-drives a browser through every state and calls it, which is how screenshot
-evidence is made on a machine without a live compositor.
+the page's rectangle, and then draws the over-page layers on top. This captures
+the actual GTK widget tree and WebKit page, not a simulated browser interface.
+
+`tools/test_ui.py` is the current visual/behavior walkthrough for the makeover.
+It launches an isolated profile, exercises real GTK entries and buttons through
+the test socket, and captures light/dark and responsive states for geometry,
+navigation overflow, and screenshot palette review. Final gallery images in
+`docs/screenshots/` are to come from that walkthrough; replacement and final
+verification are pending. See [TESTING.md](TESTING.md).
+
+`tools/shots.sh` is the older `1.0.2` capture harness. Its hardcoded pixel checks
+describe the previous palette and layout and must not be reported as passing
+the redesign.
 
 ## Memory
 
@@ -183,18 +201,18 @@ The frame is GTK and the browser's own widgets; the other two belong to WebKit,
 as in any browser on this engine.
 
 `tools/stress.py` measures PSS, Pss_Anon, Pss_Shmem, Private_Dirty and RSS for the
-whole tree. With one tab open and idle the browser's own memory — `Pss_Anon`
-summed over the three processes — measured between 49 and 119 MB, and 159.0 MB
-resident in the last run that passed every check. That run also counted 9.9 MB
-of shared backing and 253.3 MB RSS. The gap between own and resident is the
-shared GTK and WebKit libraries, which the desktop has in memory anyway; the
-shared backing is named separately so the flattering number cannot hide it.
+whole tree. The historical `1.0.2` baseline recorded one idle tab at 218.1 MB
+total PSS, 94.2 MB anonymous PSS, and 318.2 MB RSS. The original 100 MB total-PSS request was not met; round 75
+rebaselined the enforced floor to 230 MB. Anonymous PSS is not total RAM: shared libraries and other backing
+also contribute to total PSS. These figures and the earlier tuning samples
+below are historical baseline evidence, not new measurements of the local UI
+makeover.
 
 Before GTK starts, `src/main.rs` always sets `MALLOC_ARENA_MAX=2` and disables
 the Wayland DMA-BUF renderer by default with `WEBKIT_DISABLE_DMABUF_RENDERER=1`
 (opt-in via `SEARCH_ENABLE_DMABUF=1` or `WEBKIT_DISABLE_DMABUF_RENDERER=0`) while
-keeping GPU compositing enabled unless `low_memory` is active. Earlier runs
-measuring `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `MALLOC_ARENA_MAX=2` took one
+keeping GPU compositing enabled unless `low_memory` is active. Earlier baseline
+runs measuring `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `MALLOC_ARENA_MAX=2` took one
 idle tab from 87-104 MB of the browser's own memory down to 60-88 MB and moved
 resident memory from 212.8 MB to 159.0 MB. `SEARCH_LOW_MEMORY=1` (or Settings →
 *Use less memory*) forces DMA-BUF off and adds `WEBKIT_DISABLE_COMPOSITING_MODE=1`,
@@ -210,7 +228,8 @@ of that and everything it can at half, checking every 5 seconds. Page processes
 get the same limit from `web::page_memory_pressure()`, through the contexts
 `shared_context()` and `ephemeral_context()` build.
 
-The run that produced 49.4 MB own and 159.0 MB resident is the one quoted on
-`docs/LIMITS.md`; `python3 tools/report_figures.py` prints its figures from
-`build/stress-report.json`. A number written into this file would be a number
-about one afternoon.
+See [TESTING.md](TESTING.md) for the historical `1.0.2` timing and memory baseline
+and [LIMITS.md](LIMITS.md) for memory definitions and limitations.
+`python3 tools/report_figures.py` prints whichever figures are currently saved
+in `build/stress-report.json`; reading that report does not rerun the suite or
+measure the redesign.

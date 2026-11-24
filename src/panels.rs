@@ -979,7 +979,11 @@ impl Panels {
             // so the bottom edge cut through a row (History, Settings).
             // card_height only snaps when the window shrinks the card further,
             // so snap here too and end the card on a whole row.
-            let height = self.snap_to_row(inner_scrolled, capped).max(minimum).min(capped);
+            let height = if settings {
+                capped
+            } else {
+                self.snap_to_row(inner_scrolled, capped).max(minimum).min(capped)
+            };
             if settings {
                 *self.settings_height.borrow_mut() = Some((card_width, height));
             }

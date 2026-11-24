@@ -1,0 +1,1653 @@
+{
+  "results": [
+    {
+      "name": "bench is up",
+      "ok": true,
+      "detail": "ready in 0.4s",
+      "seconds": 0.04
+    },
+    {
+      "name": "first paint",
+      "ok": true,
+      "detail": "{\"pss_mb\": 59.0, \"target_pss_mb\": 230, \"target_met\": true, \"anon_mb\": 24.7, \"shmem_mb\": 1.0, \"private_dirty_mb",
+      "seconds": 0.04
+    },
+    {
+      "name": "probe",
+      "ok": true,
+      "detail": "1180x1001, 1 tabs",
+      "seconds": 0.04
+    },
+    {
+      "name": "the field stands still when the list fills",
+      "ok": true,
+      "detail": "0 offers at (363,250) mapped True, 1 offers at (363,250) mapped True",
+      "empty_at": [
+        363,
+        250
+      ],
+      "filled_at": [
+        363,
+        250
+      ],
+      "empty_offers": 0,
+      "filled_offers": 1,
+      "seconds": 7.93
+    },
+    {
+      "name": "the field does not say the host twice",
+      "ok": true,
+      "detail": "field holds '/plain?critique=1'",
+      "seconds": 7.93
+    },
+    {
+      "name": "a 404 can be left with the keyboard",
+      "ok": true,
+      "detail": "showing error, then Ctrl L gave omni=True",
+      "seconds": 7.93
+    },
+    {
+      "name": "a failed tab does not paint over another",
+      "ok": true,
+      "detail": "active 3 showing tab-3, page text 'Hide this strip\\n\\nWe value your privacy a'",
+      "seconds": 7.93
+    },
+    {
+      "name": "the history filter has visible geometry",
+      "ok": true,
+      "detail": [
+        {
+          "kind": "GtkEntry",
+          "parent": "GtkBox",
+          "size": [
+            627,
+            52
+          ],
+          "mapped": true,
+          "visible": true,
+          "text": ""
+        }
+      ],
+      "seconds": 7.93
+    },
+    {
+      "name": "the Shortcuts panel lists keys that work",
+      "ok": true,
+      "detail": "panel Shortcuts, 83 labels, Ctrl L listed: True, F3 listed: True, Shift F3 listed: True",
+      "panel_rows": 83,
+      "seconds": 7.93
+    },
+    {
+      "name": "the Shortcuts panel has a real scroll range",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "card": [
+          880,
+          440
+        ],
+        "body": [
+          627,
+          2112
+        ],
+        "scroll": [
+          702,
+          301
+        ],
+        "value": 0,
+        "upper": 2140,
+        "page": 301
+      },
+      "seconds": 7.93
+    },
+    {
+      "name": "the Shortcuts panel reaches its last row",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "value": 1839,
+        "upper": 2140,
+        "page": 301
+      },
+      "seconds": 7.93
+    },
+    {
+      "name": "the idle check measures exactly one tab",
+      "ok": true,
+      "detail": "1 tab(s) open while measuring",
+      "tabs": 1,
+      "seconds": 3.24
+    },
+    {
+      "name": "one idle tab stays under the 230MB WebKitGTK floor",
+      "ok": true,
+      "detail": "203.6MB total PSS warm, 206.0MB cold (target 230MB); largest process: {'pid': 20496, 'role': 'search', 'pss_mb': 94.1, 'anon_mb': 44.2, 'file_mb': 43.4, 'rss_mb': 257.3}",
+      "memory": {
+        "pss_mb": 203.6,
+        "target_pss_mb": 230,
+        "target_met": true,
+        "anon_mb": 98.2,
+        "shmem_mb": 10.8,
+        "private_dirty_mb": 99.2,
+        "rss_mb": 487.2,
+        "processes": 6,
+        "per_process": [
+          {
+            "pid": 20496,
+            "role": "search",
+            "pss_mb": 94.1,
+            "anon_mb": 44.2,
+            "file_mb": 43.4,
+            "rss_mb": 257.3
+          },
+          {
+            "pid": 20617,
+            "role": "WebKitWebProces",
+            "pss_mb": 73.4,
+            "anon_mb": 30.4,
+            "file_mb": 38.7,
+            "rss_mb": 133.8
+          },
+          {
+            "pid": 20509,
+            "role": "WebKitNetworkPr",
+            "pss_mb": 29.5,
+            "anon_mb": 21.4,
+            "file_mb": 8.1,
+            "rss_mb": 74.2
+          },
+          {
+            "pid": 20573,
+            "role": "glycin-svg",
+            "pss_mb": 6.4,
+            "anon_mb": 2.1,
+            "file_mb": 4.3,
+            "rss_mb": 18.6
+          },
+          {
+            "pid": 20571,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.1,
+            "rss_mb": 2.1
+          },
+          {
+            "pid": 20572,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.0,
+            "rss_mb": 1.1
+          }
+        ],
+        "cold": {
+          "pss_mb": 206.0,
+          "anon_mb": 100.7,
+          "rss_mb": 489.7,
+          "processes": 6
+        }
+      },
+      "seconds": 3.24
+    },
+    {
+      "name": "idle one tab",
+      "ok": true,
+      "detail": "{\"pss_mb\": 203.6, \"target_pss_mb\": 230, \"target_met\": true, \"anon_mb\": 98.2, \"shmem_mb\": 10.8, \"private_dirty_mb\": 99.2, \"rss_mb\": 487.2, \"processes\": 6, \"per_process\": [{\"pid\": 20496, \"role\": \"search\", \"pss_mb\": 94.1, \"anon_mb\": 44.2, \"file_mb\": 43.4, \"rss_mb\": 257.3}, {\"pid\": 20617, \"role\": \"WebKitWebProces\", \"pss_mb\": 73.4, \"anon_mb\": 30.4, \"file_mb\": 38.7, \"rss_mb\": 133.8}, {\"pid\": 20509, \"role\": \"WebKitNetworkPr\", \"pss_mb\": 29.5, \"anon_mb\": 21.4, \"file_mb\": 8.1, \"rss_mb\": 74.2}, {\"pid\": 20573, \"role\": \"glycin-svg\", \"pss_mb\": 6.4, \"anon_mb\": 2.1, \"file_mb\": 4.3, \"rss_mb\": 18.6}, {\"pid\": 20571, \"role\": \"bwrap\", \"pss_mb\": 0.1, \"anon_mb\": 0.1, \"file_mb\": 0.1, \"rss_mb\": 2.1}, {\"pid\": 20572, \"role\": \"bwrap\", \"pss_mb\": 0.1, \"anon_mb\": 0.1, \"file_mb\": 0.0, \"rss_mb\": 1.1}], \"cold\": {\"pss_mb\": 206.0, \"anon_mb\": 100.7, \"rss_mb\": 489.7, \"processes\": 6}} (WebKitGTK floor: 230MB; met: True)",
+      "memory": {
+        "pss_mb": 203.6,
+        "target_pss_mb": 230,
+        "target_met": true,
+        "anon_mb": 98.2,
+        "shmem_mb": 10.8,
+        "private_dirty_mb": 99.2,
+        "rss_mb": 487.2,
+        "processes": 6,
+        "per_process": [
+          {
+            "pid": 20496,
+            "role": "search",
+            "pss_mb": 94.1,
+            "anon_mb": 44.2,
+            "file_mb": 43.4,
+            "rss_mb": 257.3
+          },
+          {
+            "pid": 20617,
+            "role": "WebKitWebProces",
+            "pss_mb": 73.4,
+            "anon_mb": 30.4,
+            "file_mb": 38.7,
+            "rss_mb": 133.8
+          },
+          {
+            "pid": 20509,
+            "role": "WebKitNetworkPr",
+            "pss_mb": 29.5,
+            "anon_mb": 21.4,
+            "file_mb": 8.1,
+            "rss_mb": 74.2
+          },
+          {
+            "pid": 20573,
+            "role": "glycin-svg",
+            "pss_mb": 6.4,
+            "anon_mb": 2.1,
+            "file_mb": 4.3,
+            "rss_mb": 18.6
+          },
+          {
+            "pid": 20571,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.1,
+            "rss_mb": 2.1
+          },
+          {
+            "pid": 20572,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.0,
+            "rss_mb": 1.1
+          }
+        ],
+        "cold": {
+          "pss_mb": 206.0,
+          "anon_mb": 100.7,
+          "rss_mb": 489.7,
+          "processes": 6
+        }
+      },
+      "seconds": 3.24
+    },
+    {
+      "name": "page text",
+      "ok": true,
+      "detail": "Hide this strip\nPlain page\n\nThe quietest page there is.",
+      "seconds": 3.24
+    },
+    {
+      "name": "20 tabs open",
+      "ok": true,
+      "detail": "21 tabs, +20.8MB per tab, total 626.1MB",
+      "per_tab_mb": 20.8,
+      "memory": {
+        "pss_mb": 626.1,
+        "target_pss_mb": 230,
+        "target_met": false,
+        "anon_mb": 484.4,
+        "shmem_mb": 17.3,
+        "private_dirty_mb": 484.4,
+        "rss_mb": 2795.6,
+        "processes": 26,
+        "per_process": [
+          {
+            "pid": 20496,
+            "role": "search",
+            "pss_mb": 95.9,
+            "anon_mb": 50.7,
+            "file_mb": 35.4,
+            "rss_mb": 270.4
+          },
+          {
+            "pid": 20617,
+            "role": "WebKitWebProces",
+            "pss_mb": 41.6,
+            "anon_mb": 29.2,
+            "file_mb": 9.1,
+            "rss_mb": 139.0
+          },
+          {
+            "pid": 20633,
+            "role": "WebKitWebProces",
+            "pss_mb": 34.0,
+            "anon_mb": 30.4,
+            "file_mb": 3.5,
+            "rss_mb": 125.7
+          },
+          {
+            "pid": 20635,
+            "role": "WebKitWebProces",
+            "pss_mb": 34.0,
+            "anon_mb": 30.4,
+            "file_mb": 3.6,
+            "rss_mb": 125.7
+          },
+          {
+            "pid": 20637,
+            "role": "WebKitWebProces",
+            "pss_mb": 34.0,
+            "anon_mb": 30.4,
+            "file_mb": 3.6,
+            "rss_mb": 125.8
+          },
+          {
+            "pid": 20639,
+            "role": "WebKitWebProces",
+            "pss_mb": 32.8,
+            "anon_mb": 29.2,
+            "file_mb": 3.5,
+            "rss_mb": 124.2
+          },
+          {
+            "pid": 20650,
+            "role": "WebKitWebProces",
+            "pss_mb": 32.4,
+            "anon_mb": 28.8,
+            "file_mb": 3.5,
+            "rss_mb": 123.6
+          },
+          {
+            "pid": 20509,
+            "role": "WebKitNetworkPr",
+            "pss_mb": 27.7,
+            "anon_mb": 23.8,
+            "file_mb": 3.9,
+            "rss_mb": 76.7
+          },
+          {
+            "pid": 20667,
+            "role": "WebKitWebProces",
+            "pss_mb": 26.5,
+            "anon_mb": 22.9,
+            "file_mb": 3.5,
+            "rss_mb": 117.9
+          },
+          {
+            "pid": 20862,
+            "role": "WebKitWebProces",
+            "pss_mb": 21.7,
+            "anon_mb": 14.1,
+            "file_mb": 4.3,
+            "rss_mb": 117.2
+          },
+          {
+            "pid": 20751,
+            "role": "WebKitWebProces",
+            "pss_mb": 21.2,
+            "anon_mb": 17.6,
+            "file_mb": 3.5,
+            "rss_mb": 112.5
+          },
+          {
+            "pid": 20776,
+            "role": "WebKitWebProces",
+            "pss_mb": 20.3,
+            "anon_mb": 16.7,
+            "file_mb": 3.6,
+            "rss_mb": 111.9
+          },
+          {
+            "pid": 20679,
+            "role": "WebKitWebProces",
+            "pss_mb": 19.4,
+            "anon_mb": 15.8,
+            "file_mb": 3.5,
+            "rss_mb": 110.8
+          },
+          {
+            "pid": 20739,
+            "role": "WebKitWebProces",
+            "pss_mb": 19.3,
+            "anon_mb": 15.7,
+            "file_mb": 3.5,
+            "rss_mb": 110.4
+          },
+          {
+            "pid": 20764,
+            "role": "WebKitWebProces",
+            "pss_mb": 19.3,
+            "anon_mb": 15.7,
+            "file_mb": 3.6,
+            "rss_mb": 110.9
+          },
+          {
+            "pid": 20692,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.5,
+            "anon_mb": 13.9,
+            "file_mb": 3.5,
+            "rss_mb": 109.1
+          },
+          {
+            "pid": 20706,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.5,
+            "anon_mb": 13.9,
+            "file_mb": 3.5,
+            "rss_mb": 109.0
+          },
+          {
+            "pid": 20727,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.5,
+            "anon_mb": 13.9,
+            "file_mb": 3.5,
+            "rss_mb": 108.8
+          },
+          {
+            "pid": 20813,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.5,
+            "anon_mb": 13.9,
+            "file_mb": 3.5,
+            "rss_mb": 108.9
+          },
+          {
+            "pid": 20832,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.5,
+            "anon_mb": 13.9,
+            "file_mb": 3.5,
+            "rss_mb": 109.0
+          },
+          {
+            "pid": 20854,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.5,
+            "anon_mb": 13.9,
+            "file_mb": 3.5,
+            "rss_mb": 108.8
+          },
+          {
+            "pid": 20800,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.3,
+            "anon_mb": 13.7,
+            "file_mb": 3.6,
+            "rss_mb": 108.9
+          },
+          {
+            "pid": 20794,
+            "role": "WebKitWebProces",
+            "pss_mb": 17.2,
+            "anon_mb": 13.6,
+            "file_mb": 3.6,
+            "rss_mb": 108.6
+          },
+          {
+            "pid": 20573,
+            "role": "glycin-svg",
+            "pss_mb": 6.2,
+            "anon_mb": 2.1,
+            "file_mb": 4.2,
+            "rss_mb": 18.6
+          },
+          {
+            "pid": 20571,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.1,
+            "rss_mb": 2.1
+          },
+          {
+            "pid": 20572,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.0,
+            "rss_mb": 1.1
+          }
+        ]
+      },
+      "seconds": 4.71
+    },
+    {
+      "name": "tabs give their memory back",
+      "ok": true,
+      "detail": "206.6MB after closing (was 626.1MB, started at 209.9MB)",
+      "memory": {
+        "pss_mb": 206.6,
+        "target_pss_mb": 230,
+        "target_met": true,
+        "anon_mb": 96.8,
+        "shmem_mb": 10.8,
+        "private_dirty_mb": 97.8,
+        "rss_mb": 492.2,
+        "processes": 6,
+        "per_process": [
+          {
+            "pid": 20496,
+            "role": "search",
+            "pss_mb": 95.0,
+            "anon_mb": 45.5,
+            "file_mb": 43.0,
+            "rss_mb": 258.6
+          },
+          {
+            "pid": 20617,
+            "role": "WebKitWebProces",
+            "pss_mb": 76.5,
+            "anon_mb": 28.7,
+            "file_mb": 43.5,
+            "rss_mb": 138.5
+          },
+          {
+            "pid": 20509,
+            "role": "WebKitNetworkPr",
+            "pss_mb": 28.5,
+            "anon_mb": 20.4,
+            "file_mb": 8.1,
+            "rss_mb": 73.2
+          },
+          {
+            "pid": 20573,
+            "role": "glycin-svg",
+            "pss_mb": 6.4,
+            "anon_mb": 2.1,
+            "file_mb": 4.3,
+            "rss_mb": 18.6
+          },
+          {
+            "pid": 20571,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.1,
+            "rss_mb": 2.1
+          },
+          {
+            "pid": 20572,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.0,
+            "rss_mb": 1.1
+          }
+        ]
+      },
+      "seconds": 4.71
+    },
+    {
+      "name": "tab switches stay quick",
+      "ok": true,
+      "detail": "mean 7ms, p95 16ms, worst 16ms over 300",
+      "mean_ms": 6.8,
+      "p95_ms": 15.8,
+      "worst_ms": 16.4,
+      "seconds": 2.62
+    },
+    {
+      "name": "loads /big",
+      "ok": true,
+      "detail": "0.4s, 62913 on the page",
+      "seconds": 0.44
+    },
+    {
+      "name": "loads /long",
+      "ok": true,
+      "detail": "0.2s, 149632 on the page",
+      "seconds": 0.23
+    },
+    {
+      "name": "loads /images",
+      "ok": true,
+      "detail": "0.5s, 40 on the page",
+      "seconds": 0.53
+    },
+    {
+      "name": "loads /frames",
+      "ok": true,
+      "detail": "0.3s, 12 on the page",
+      "seconds": 0.33
+    },
+    {
+      "name": "loads /styles",
+      "ok": true,
+      "detail": "0.2s, 231 on the page",
+      "seconds": 0.23
+    },
+    {
+      "name": "alive after hard pages",
+      "ok": true,
+      "detail": "6 tabs, 6 with a view",
+      "seconds": 1.84
+    },
+    {
+      "name": "a 404 shows the browser's own page",
+      "ok": true,
+      "detail": "showing error, active 40",
+      "seconds": 18.62
+    },
+    {
+      "name": "a 404 shows, the browser lives",
+      "ok": true,
+      "detail": "2 tabs, 2 with a view",
+      "seconds": 18.62
+    },
+    {
+      "name": "a 403 with its own page is shown as the site sent it",
+      "ok": true,
+      "detail": "showing tab-41, url http://127.0.0.1:58053/status?code=403",
+      "seconds": 18.62
+    },
+    {
+      "name": "a 503 with its own page is shown as the site sent it",
+      "ok": true,
+      "detail": "showing tab-42, url http://127.0.0.1:58053/status?code=503",
+      "seconds": 18.62
+    },
+    {
+      "name": "a redirect chain lands",
+      "ok": true,
+      "detail": "http://127.0.0.1:58053/plain",
+      "seconds": 18.62
+    },
+    {
+      "name": "a redirect loop is survived",
+      "ok": true,
+      "detail": "1 tab for the loop, answered in 0.0s",
+      "seconds": 18.62
+    },
+    {
+      "name": "a page that never ends does not hang the browser",
+      "ok": true,
+      "detail": "probe answered in 0.0s",
+      "seconds": 18.62
+    },
+    {
+      "name": "a busy script does not stop other tabs",
+      "ok": true,
+      "detail": "other tab loaded in 0.2s, busy tab still here: True",
+      "seconds": 18.62
+    },
+    {
+      "name": "a memory spray is survived",
+      "ok": true,
+      "detail": "{\"pss_mb\": 1329.3, \"target_pss_mb\": 230, \"target_met\": false, \"anon_mb\": 1161.2, \"shmem_mb\": 43.5, \"private_dirty_mb\": 1164.6, \"rss_mb\": 2300.0, \"processes\": 13, \"per_process\": [{\"pid\": 21301, \"role\": \"WebKitWebProces\", \"pss_mb\": 907.9, \"anon_mb\": 889.6, \"file_mb\": 14.9, \"rss_mb\": 1006.2}, {\"pid\": 20496, \"role\": \"search\", \"pss_mb\": 103.8, \"anon_mb\": 45.6, \"file_mb\": 37.1, \"rss_mb\": 288.3}, {\"pid\": 21271, \"role\": \"WebKitWebProces\", \"pss_mb\": 44.6, \"anon_mb\": 30.1, \"file_mb\": 12.7, \"rss_mb\": 137.8}, {\"pid\": 21232, \"role\": \"WebKitWebProces\", \"pss_mb\": 44.2, \"anon_mb\": 30.4, \"file_mb\": 8.6, \"rss_mb\": 134.2}, {\"pid\": 20617, \"role\": \"WebKitWebProces\", \"pss_mb\": 43.2, \"anon_mb\": 28.7, \"file_mb\": 11.1, \"rss_mb\": 138.6}, {\"pid\": 21138, \"role\": \"WebKitWebProces\", \"pss_mb\": 39.2, \"anon_mb\": 30.0, \"file_mb\": 7.4, \"rss_mb\": 124.2}, {\"pid\": 21245, \"role\": \"WebKitWebProces\", \"pss_mb\": 39.0, \"anon_mb\": 29.9, \"file_mb\": 7.4, \"rss_mb\": 124.3}, {\"pid\": 21259, \"role\": \"WebKitWebProces\", \"pss_mb\": 37.5, \"anon_mb\": 28.5, \"file_mb\": 7.3, \"rss_mb\": 122.2}, {\"pid\": 21289, \"role\": \"WebKitWebProces\", \"pss_mb\": 36.2, \"anon_mb\": 24.2, \"file_mb\": 8.6, \"rss_mb\": 127.4}, {\"pid\": 20509, \"role\": \"WebKitNetworkPr\", \"pss_mb\": 27.1, \"anon_mb\": 22.0, \"file_mb\": 5.1, \"rss_mb\": 74.9}, {\"pid\": 20573, \"role\": \"glycin-svg\", \"pss_mb\": 6.3, \"anon_mb\": 2.1, \"file_mb\": 4.2, \"rss_mb\": 18.6}, {\"pid\": 20571, \"role\": \"bwrap\", \"pss_mb\": 0.1, \"anon_mb\": 0.1, \"file_mb\": 0.1, \"rss_mb\": 2.1}, {\"pid\": 20572, \"role\": \"bwrap\", \"pss_mb\": 0.1, \"anon_mb\": 0.1, \"file_mb\": 0.0, \"rss_mb\": 1.1}]}",
+      "seconds": 18.62
+    },
+    {
+      "name": "the spray adds at most 1500 MB over the reading before it",
+      "ok": true,
+      "detail": "898.1 MB over 431.2 MB before",
+      "seconds": 18.62
+    },
+    {
+      "name": "the engine survives a spray and keeps working",
+      "ok": true,
+      "detail": "1329.3MB -> 423.6MB, still answering (was 431.2MB before the spray)",
+      "memory": {
+        "pss_mb": 423.6,
+        "target_pss_mb": 230,
+        "target_met": false,
+        "anon_mb": 269.3,
+        "shmem_mb": 37.0,
+        "private_dirty_mb": 272.8,
+        "rss_mb": 1265.3,
+        "processes": 9,
+        "per_process": [
+          {
+            "pid": 20496,
+            "role": "search",
+            "pss_mb": 101.0,
+            "anon_mb": 45.5,
+            "file_mb": 37.6,
+            "rss_mb": 281.7
+          },
+          {
+            "pid": 21271,
+            "role": "WebKitWebProces",
+            "pss_mb": 49.6,
+            "anon_mb": 30.1,
+            "file_mb": 17.7,
+            "rss_mb": 137.8
+          },
+          {
+            "pid": 21232,
+            "role": "WebKitWebProces",
+            "pss_mb": 45.3,
+            "anon_mb": 30.4,
+            "file_mb": 9.7,
+            "rss_mb": 134.2
+          },
+          {
+            "pid": 20617,
+            "role": "WebKitWebProces",
+            "pss_mb": 44.9,
+            "anon_mb": 28.7,
+            "file_mb": 12.8,
+            "rss_mb": 138.6
+          },
+          {
+            "pid": 21138,
+            "role": "WebKitWebProces",
+            "pss_mb": 40.0,
+            "anon_mb": 30.0,
+            "file_mb": 8.2,
+            "rss_mb": 124.2
+          },
+          {
+            "pid": 21245,
+            "role": "WebKitWebProces",
+            "pss_mb": 39.9,
+            "anon_mb": 29.9,
+            "file_mb": 8.2,
+            "rss_mb": 124.3
+          },
+          {
+            "pid": 21259,
+            "role": "WebKitWebProces",
+            "pss_mb": 38.4,
+            "anon_mb": 28.5,
+            "file_mb": 8.1,
+            "rss_mb": 122.2
+          },
+          {
+            "pid": 21289,
+            "role": "WebKitWebProces",
+            "pss_mb": 37.2,
+            "anon_mb": 24.1,
+            "file_mb": 9.7,
+            "rss_mb": 127.3
+          },
+          {
+            "pid": 20509,
+            "role": "WebKitNetworkPr",
+            "pss_mb": 27.3,
+            "anon_mb": 22.0,
+            "file_mb": 5.4,
+            "rss_mb": 74.9
+          }
+        ]
+      },
+      "before": {
+        "pss_mb": 431.2,
+        "target_pss_mb": 230,
+        "target_met": false,
+        "anon_mb": 272.6,
+        "shmem_mb": 37.0,
+        "private_dirty_mb": 276.0,
+        "rss_mb": 1287.8,
+        "processes": 12,
+        "per_process": [
+          {
+            "pid": 20496,
+            "role": "search",
+            "pss_mb": 101.1,
+            "anon_mb": 45.6,
+            "file_mb": 37.6,
+            "rss_mb": 281.8
+          },
+          {
+            "pid": 21271,
+            "role": "WebKitWebProces",
+            "pss_mb": 49.6,
+            "anon_mb": 30.1,
+            "file_mb": 17.6,
+            "rss_mb": 137.8
+          },
+          {
+            "pid": 21232,
+            "role": "WebKitWebProces",
+            "pss_mb": 45.3,
+            "anon_mb": 30.4,
+            "file_mb": 9.7,
+            "rss_mb": 134.1
+          },
+          {
+            "pid": 20617,
+            "role": "WebKitWebProces",
+            "pss_mb": 44.9,
+            "anon_mb": 28.7,
+            "file_mb": 12.8,
+            "rss_mb": 138.6
+          },
+          {
+            "pid": 21138,
+            "role": "WebKitWebProces",
+            "pss_mb": 40.0,
+            "anon_mb": 30.0,
+            "file_mb": 8.2,
+            "rss_mb": 124.1
+          },
+          {
+            "pid": 21245,
+            "role": "WebKitWebProces",
+            "pss_mb": 39.9,
+            "anon_mb": 29.9,
+            "file_mb": 8.2,
+            "rss_mb": 124.2
+          },
+          {
+            "pid": 21259,
+            "role": "WebKitWebProces",
+            "pss_mb": 38.3,
+            "anon_mb": 28.5,
+            "file_mb": 8.1,
+            "rss_mb": 122.2
+          },
+          {
+            "pid": 21289,
+            "role": "WebKitWebProces",
+            "pss_mb": 38.3,
+            "anon_mb": 25.2,
+            "file_mb": 9.7,
+            "rss_mb": 128.3
+          },
+          {
+            "pid": 20509,
+            "role": "WebKitNetworkPr",
+            "pss_mb": 27.2,
+            "anon_mb": 21.9,
+            "file_mb": 5.3,
+            "rss_mb": 74.8
+          },
+          {
+            "pid": 20573,
+            "role": "glycin-svg",
+            "pss_mb": 6.3,
+            "anon_mb": 2.1,
+            "file_mb": 4.2,
+            "rss_mb": 18.6
+          },
+          {
+            "pid": 20571,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.1,
+            "rss_mb": 2.1
+          },
+          {
+            "pid": 20572,
+            "role": "bwrap",
+            "pss_mb": 0.1,
+            "anon_mb": 0.1,
+            "file_mb": 0.0,
+            "rss_mb": 1.1
+          }
+        ]
+      },
+      "seconds": 18.62
+    },
+    {
+      "name": "panels open and close",
+      "ok": true,
+      "detail": "mean 24ms, p95 53ms, worst 56ms over 80",
+      "mean_ms": 23.9,
+      "p95_ms": 53.3,
+      "worst_ms": 55.7,
+      "seconds": 13.84
+    },
+    {
+      "name": "bench mode never animates",
+      "ok": true,
+      "detail": "animations=False, gtk=False, enter=180ms",
+      "gtk_animations": false,
+      "enter_ms": 180,
+      "seconds": 13.84
+    },
+    {
+      "name": "text contrast is measured, not asserted",
+      "ok": true,
+      "detail": "lowest 4.91:1 across 12 named pairs",
+      "lowest_ratio": 4.91,
+      "pairs": [
+        {
+          "pair": "light ink/ground",
+          "ratio": 13.03
+        },
+        {
+          "pair": "light muted/ground",
+          "ratio": 6.07
+        },
+        {
+          "pair": "light faint/ground",
+          "ratio": 4.91
+        },
+        {
+          "pair": "light danger/ground",
+          "ratio": 5.3
+        },
+        {
+          "pair": "light ink/side",
+          "ratio": 13.03
+        },
+        {
+          "pair": "light muted/side",
+          "ratio": 6.07
+        },
+        {
+          "pair": "dark ink/ground",
+          "ratio": 14.93
+        },
+        {
+          "pair": "dark muted/ground",
+          "ratio": 8.79
+        },
+        {
+          "pair": "dark faint/ground",
+          "ratio": 7.45
+        },
+        {
+          "pair": "dark danger/ground",
+          "ratio": 5.65
+        },
+        {
+          "pair": "dark ink/side",
+          "ratio": 14.93
+        },
+        {
+          "pair": "dark muted/side",
+          "ratio": 8.79
+        }
+      ],
+      "seconds": 13.84
+    },
+    {
+      "name": "type ramp follows the desktop font",
+      "ok": true,
+      "detail": "default {'caption': 12, 'body': 14, 'title': 18, 'headline': 40, 'panel': 30}, large {'caption': 22, 'body': 24, 'title': 28, 'headline': 50, 'panel': 40}",
+      "default": {
+        "caption": 12,
+        "body": 14,
+        "title": 18,
+        "headline": 40,
+        "panel": 30
+      },
+      "large": {
+        "caption": 22,
+        "body": 24,
+        "title": 28,
+        "headline": 50,
+        "panel": 40
+      },
+      "seconds": 13.84
+    },
+    {
+      "name": "panel motion has no long main-loop gaps",
+      "ok": true,
+      "detail": "open 0ms, close 0ms, 860 ticks, gaps []",
+      "open_worst_ms": 0,
+      "close_worst_ms": 0,
+      "ticks": 860,
+      "seconds": 13.84
+    },
+    {
+      "name": "the field opens on the address you are on",
+      "ok": true,
+      "detail": "field holds '/long'",
+      "seconds": 13.84
+    },
+    {
+      "name": "down moves the pick through the list",
+      "ok": true,
+      "detail": "picked 0 then 1 then 2 of 8",
+      "seconds": 13.84
+    },
+    {
+      "name": "a panel filters as you type",
+      "ok": true,
+      "detail": "filter 'quiet' in Bookmarks",
+      "seconds": 13.84
+    },
+    {
+      "name": "clearing the filter shows everything again",
+      "ok": true,
+      "detail": "filter ''",
+      "seconds": 13.84
+    },
+    {
+      "name": "Ctrl / lists every key",
+      "ok": true,
+      "detail": "Shortcuts",
+      "seconds": 13.84
+    },
+    {
+      "name": "find searches",
+      "ok": true,
+      "detail": "{'ok': True}",
+      "seconds": 13.84
+    },
+    {
+      "name": "find bar state",
+      "ok": true,
+      "detail": "open",
+      "seconds": 13.84
+    },
+    {
+      "name": "find counts its matches",
+      "ok": true,
+      "detail": "count '1 of 11'",
+      "seconds": 13.84
+    },
+    {
+      "name": "F3 steps to the next match",
+      "ok": true,
+      "detail": "scrollY 204 to 5244",
+      "seconds": 13.84
+    },
+    {
+      "name": "Shift F3 steps back to the previous match",
+      "ok": true,
+      "detail": "scrollY 5244 to 204",
+      "seconds": 13.84
+    },
+    {
+      "name": "reading mode replaces the page",
+      "ok": true,
+      "detail": "text 20000 chars, container set",
+      "seconds": 13.84
+    },
+    {
+      "name": "the strip is there",
+      "ok": true,
+      "detail": "{'ok': True, 'value': '1'}",
+      "seconds": 1.66
+    },
+    {
+      "name": "an untrusted page cannot hide elements on its own",
+      "ok": true,
+      "detail": "{'ok': True, 'hidden': []}",
+      "seconds": 1.66
+    },
+    {
+      "name": "a hidden thing is kept",
+      "ok": true,
+      "detail": "{'ok': True, 'hidden': [{'host': '127.0.0.1', 'selector': '#hide-me'}]}",
+      "seconds": 1.66
+    },
+    {
+      "name": "and stays hidden after a reload",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'none'}",
+      "seconds": 1.66
+    },
+    {
+      "name": "a pop-up becomes a tab",
+      "ok": true,
+      "detail": "5 -> 6 tabs",
+      "seconds": 5.13
+    },
+    {
+      "name": "and the tab bar still names the page on screen",
+      "ok": true,
+      "detail": "active 52 -> 52, showing tab-52",
+      "seconds": 5.13
+    },
+    {
+      "name": "a pop-up without a click does not open a tab",
+      "ok": true,
+      "detail": "7 -> 7 tabs, target open: False",
+      "seconds": 5.13
+    },
+    {
+      "name": "and the browser still answers after it",
+      "ok": true,
+      "detail": "probe answered",
+      "seconds": 5.13
+    },
+    {
+      "name": "a download is recorded and finishes",
+      "ok": true,
+      "detail": "[{'name': 'fixture.bin', 'path': '/tmp/search-stress-pft97qu1/downloads/fixture.bin', 'done': True}]",
+      "seconds": 5.13
+    },
+    {
+      "name": "a failed page has readable text and real geometry",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "page": [
+          355,
+          284
+        ],
+        "holder": [
+          915,
+          928
+        ],
+        "stackSize": [
+          915,
+          928
+        ],
+        "reason": "There is nothing at this address (404).",
+        "address": "http://127.0.0.1:58053/missing",
+        "visible": true,
+        "mapped": true,
+        "stack": "error"
+      },
+      "seconds": 5.13
+    },
+    {
+      "name": "a failed page capture is not blank",
+      "ok": true,
+      "detail": "67279 bytes",
+      "seconds": 5.13
+    },
+    {
+      "name": "the file landed",
+      "ok": true,
+      "detail": "/tmp/search-stress-pft97qu1/downloads/fixture.bin 98304 bytes, inside the suite's folder: True",
+      "seconds": 5.13
+    },
+    {
+      "name": "downloads can be searched",
+      "ok": true,
+      "detail": "1 file\nOpen folder\nSaved in /tmp/search-stress-pft97qu1/downloads\nF\nfixture.bin\n96 KB \u00b7 /tmp/search-stress-pft97qu1/downloads/fixture.bin\nOpen\nRemove",
+      "seconds": 5.13
+    },
+    {
+      "name": "a download search has an empty answer",
+      "ok": true,
+      "detail": "1 file\nOpen folder\nSaved in /tmp/search-stress-pft97qu1/downloads\nNo files match this search.\nSearch by file name or location, or clear the field to see all you",
+      "seconds": 5.13
+    },
+    {
+      "name": "clearing a download search keeps its rows",
+      "ok": true,
+      "detail": "fixture.bin",
+      "seconds": 5.13
+    },
+    {
+      "name": "arrow keys move between panel tabs",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "handled": true
+      },
+      "seconds": 5.13
+    },
+    {
+      "name": "arrow keys move back to Downloads",
+      "ok": true,
+      "detail": "Downloads",
+      "seconds": 5.13
+    },
+    {
+      "name": "Tab moves into the panel",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "inside": true,
+        "focus": "GtkButton",
+        "focusParent": "GtkBox",
+        "focusChain": "GtkButton>GtkBox>GtkBox>GtkBox>GtkFixed>GtkOverlay>GtkWindow"
+      },
+      "seconds": 5.13
+    },
+    {
+      "name": "extensions can be chosen with a native picker",
+      "ok": true,
+      "detail": " shows its compatibility here.\nAdd an extension\nBrowse a store or install an archive or folder from this computer.\nF\nFirefox Add-ons\naddons.mozilla.org, in a new tab. Add to Firefox installs it here.\nOpen\nChoose\u2026\nContent scripts and styles can run on the sites an extension requests. WebExtensions background-page APIs are not supported. Each installed extension lists the parts that do not run here.",
+      "seconds": 5.13
+    },
+    {
+      "name": "the blocker hides what it says it hides",
+      "ok": true,
+      "detail": "{\"keep\": true, \"banner\": false, \"ad\": false, \"news\": false}",
+      "seconds": 4.71
+    },
+    {
+      "name": "turning it off for a site brings the rules back",
+      "ok": true,
+      "detail": "{\"keep\": true, \"banner\": true, \"ad\": true, \"news\": true}",
+      "seconds": 4.71
+    },
+    {
+      "name": "and turning it on again hides them",
+      "ok": true,
+      "detail": "{\"keep\": true, \"banner\": false, \"ad\": false, \"news\": false}",
+      "seconds": 4.71
+    },
+    {
+      "name": "an ordinary tab keeps a cookie",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'true'}",
+      "seconds": 6.91
+    },
+    {
+      "name": "a private tab is marked private",
+      "ok": true,
+      "detail": "tab 60",
+      "seconds": 6.91
+    },
+    {
+      "name": "and starts with an empty jar",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'false'}",
+      "seconds": 6.91
+    },
+    {
+      "name": "a private visit is not written down",
+      "ok": true,
+      "detail": "4291 bytes of history",
+      "seconds": 6.91
+    },
+    {
+      "name": "a window a private tab opens is private too",
+      "ok": true,
+      "detail": "1 new tabs, private: [True]",
+      "seconds": 6.91
+    },
+    {
+      "name": "two private tabs share nothing with the ordinary one",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'false'}",
+      "seconds": 6.91
+    },
+    {
+      "name": "a fresh start brings the tabs back",
+      "ok": true,
+      "detail": "2 tabs",
+      "seconds": 1.94
+    },
+    {
+      "name": "and they come back asleep",
+      "ok": true,
+      "detail": "asleep [True]",
+      "seconds": 1.94
+    },
+    {
+      "name": "except the one in front, which shows its page",
+      "ok": true,
+      "detail": "active 1 -> tab-1",
+      "seconds": 1.94
+    },
+    {
+      "name": "the tab that was in front comes back in front",
+      "ok": true,
+      "detail": "active url 'http://127.0.0.1:58053/titled?t=Front'",
+      "seconds": 1.94
+    },
+    {
+      "name": "and it comes back once, not twice",
+      "ok": true,
+      "detail": "1 Front tabs",
+      "seconds": 1.94
+    },
+    {
+      "name": "reading mode enters",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'true'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "the browser knows which tab is being read",
+      "ok": true,
+      "detail": "{'ok': True, 'active': 3, 'url': 'http://127.0.0.1:58053/long', 'title': 'A long read', 'tabs': [{'id': 1, 'url': 'http://127.0.0.1:58053/titled?t=Front', 'title': 'Front', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}, {'id': 3, 'url': 'http://127.0.0.1:58053/long', 'title': 'A long read', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}, {'id': 2, 'url': 'http://127.0.0.1:58053/titled?t=Remembered', 'title': 'Remembered', 'pinned': False, 'loading': False, 'private': False, 'asleep': True, 'hasView': False}], 'omni': False, 'omniCount': 0, 'omniPicked': -1, 'omniText': '', 'panel': '', 'panelFilter': '', 'find': False, 'findText': '', 'findCount': '', 'hideMode': False, 'maximised': False, 'bookmarkBar': False, 'bookmarkCount': 2, 'visibleChild': 'tab-3', 'stackChildren': 4, 'orphanViews': 0, 'reading': True, 'width': 1180, 'height': 1001, 'viewWidth': 915, 'viewHeight': 928, 'gdkWidth': 1180, 'gdkHeight': 1001, 'minimumWidth': 222, 'naturalWidth': 836, 'screen': {'width': 1920, 'height': 1080}, 'error': False, 'errorAction': 'Try again'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "and carries its own way out",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'true'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "reader byline has measured contrast",
+      "ok": true,
+      "detail": "{'ok': True, 'value': '6.74'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "the page's exit button leaves reading mode",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'false'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "and the browser is told the page left it",
+      "ok": true,
+      "detail": "{'ok': True, 'active': 3, 'url': 'http://127.0.0.1:58053/long', 'title': 'A long read', 'tabs': [{'id': 1, 'url': 'http://127.0.0.1:58053/titled?t=Front', 'title': 'Front', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}, {'id': 3, 'url': 'http://127.0.0.1:58053/long', 'title': 'A long read', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}, {'id': 2, 'url': 'http://127.0.0.1:58053/titled?t=Remembered', 'title': 'Remembered', 'pinned': False, 'loading': False, 'private': False, 'asleep': True, 'hasView': False}], 'omni': False, 'omniCount': 0, 'omniPicked': -1, 'omniText': '', 'panel': '', 'panelFilter': '', 'find': False, 'findText': '', 'findCount': '', 'hideMode': False, 'maximised': False, 'bookmarkBar': False, 'bookmarkCount': 2, 'visibleChild': 'tab-3', 'stackChildren': 4, 'orphanViews': 0, 'reading': False, 'width': 1180, 'height': 1001, 'viewWidth': 915, 'viewHeight': 928, 'gdkWidth': 1180, 'gdkHeight': 1001, 'minimumWidth': 222, 'naturalWidth': 836, 'screen': {'width': 1920, 'height': 1080}, 'error': False, 'errorAction': 'Try again'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "the exit button puts the page back where it was read from",
+      "ok": true,
+      "detail": "scrollY '200', was 200",
+      "seconds": 4.54
+    },
+    {
+      "name": "reading mode enters again after the page left it",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'true'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "and leaves again",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'false'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "the browser knows reading ended",
+      "ok": true,
+      "detail": "{'ok': True, 'active': 3, 'url': 'http://127.0.0.1:58053/long', 'title': 'A long read', 'tabs': [{'id': 1, 'url': 'http://127.0.0.1:58053/titled?t=Front', 'title': 'Front', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}, {'id': 3, 'url': 'http://127.0.0.1:58053/long', 'title': 'A long read', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}, {'id': 2, 'url': 'http://127.0.0.1:58053/titled?t=Remembered', 'title': 'Remembered', 'pinned': False, 'loading': False, 'private': False, 'asleep': True, 'hasView': False}], 'omni': False, 'omniCount': 0, 'omniPicked': -1, 'omniText': '', 'panel': '', 'panelFilter': '', 'find': False, 'findText': '', 'findCount': '', 'hideMode': False, 'maximised': False, 'bookmarkBar': False, 'bookmarkCount': 2, 'visibleChild': 'tab-3', 'stackChildren': 4, 'orphanViews': 0, 'reading': False, 'width': 1180, 'height': 1001, 'viewWidth': 915, 'viewHeight': 928, 'gdkWidth': 1180, 'gdkHeight': 1001, 'minimumWidth': 222, 'naturalWidth': 836, 'screen': {'width': 1920, 'height': 1080}, 'error': False, 'errorAction': 'Try again'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "leaving restores the page",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'false,200'}",
+      "seconds": 4.54
+    },
+    {
+      "name": "the window survives resizing",
+      "ok": true,
+      "detail": "1060x942, asked for 1060x941",
+      "seconds": 2.36
+    },
+    {
+      "name": "the page fills the resized window",
+      "ok": true,
+      "detail": "view 795x869, viewport [795, 869] at [265, 72] inside 1060x942",
+      "seconds": 2.36
+    },
+    {
+      "name": "maximise toggles",
+      "ok": true,
+      "detail": "False -> True -> False",
+      "seconds": 2.36
+    },
+    {
+      "name": "closing every tab leaves one",
+      "ok": true,
+      "detail": "1 tabs",
+      "seconds": 3.02
+    },
+    {
+      "name": "memory comes back down",
+      "ok": true,
+      "detail": "{\"pss_mb\": 124.5, \"target_pss_mb\": 230, \"target_met\": true, \"anon_mb\": 62.9, \"shmem_mb\": 7.7, \"private_dirty_mb\": 63.2, \"rss_mb\": 323.7, \"processes\": 2, \"per_process\": [{\"pid\": 21742, \"role\": \"search\", \"pss_mb\": 93.8, \"anon_mb\": 41.9, \"file_mb\": 44.3, \"rss_mb\": 249.7}, {\"pid\": 21752, \"role\": \"WebKitNetworkPr\", \"pss_mb\": 30.6, \"anon_mb\": 21.0, \"file_mb\": 9.6, \"rss_mb\": 74.0}]}",
+      "memory": {
+        "pss_mb": 124.5,
+        "target_pss_mb": 230,
+        "target_met": true,
+        "anon_mb": 62.9,
+        "shmem_mb": 7.7,
+        "private_dirty_mb": 63.2,
+        "rss_mb": 323.7,
+        "processes": 2,
+        "per_process": [
+          {
+            "pid": 21742,
+            "role": "search",
+            "pss_mb": 93.8,
+            "anon_mb": 41.9,
+            "file_mb": 44.3,
+            "rss_mb": 249.7
+          },
+          {
+            "pid": 21752,
+            "role": "WebKitNetworkPr",
+            "pss_mb": 30.6,
+            "anon_mb": 21.0,
+            "file_mb": 9.6,
+            "rss_mb": 74.0
+          }
+        ]
+      },
+      "seconds": 3.02
+    },
+    {
+      "name": "nothing grows while nothing happens",
+      "ok": true,
+      "detail": "192.5MB -> 190.8MB (-1.7MB), own 89.9MB -> 88.2MB (-1.7MB)",
+      "drift_mb": -1.7,
+      "own_drift_mb": -1.7,
+      "seconds": 66.24
+    },
+    {
+      "name": "a fresh browser has no extensions",
+      "ok": true,
+      "detail": "[]",
+      "seconds": 0.23
+    },
+    {
+      "name": "and no extension touch in the page",
+      "ok": true,
+      "detail": "null",
+      "seconds": 0.23
+    },
+    {
+      "name": "every filter list compiled",
+      "ok": true,
+      "detail": "{'ok': True, 'lists': 3, 'finished': 3, 'rules': 17550}",
+      "seconds": 0.0
+    },
+    {
+      "name": "and carries the rules the list has",
+      "ok": true,
+      "detail": "{'ok': True, 'lists': 3, 'finished': 3, 'rules': 17550}",
+      "seconds": 0.0
+    },
+    {
+      "name": "a browser with nothing kept hides the bar",
+      "ok": true,
+      "detail": "False",
+      "seconds": 3.66
+    },
+    {
+      "name": "keeping a page shows the bar",
+      "ok": true,
+      "detail": "True",
+      "seconds": 3.66
+    },
+    {
+      "name": "with one chip in it",
+      "ok": true,
+      "detail": "1",
+      "seconds": 3.66
+    },
+    {
+      "name": "a kept page is still kept after a restart",
+      "ok": true,
+      "detail": "count=1, bar=True",
+      "seconds": 3.66
+    },
+    {
+      "name": "download records survive the same restart",
+      "ok": true,
+      "detail": "['fixture.bin', 'release-notes.pdf', 'field-report.csv', 'setup.dmg']",
+      "seconds": 3.66
+    },
+    {
+      "name": "peek card sits beside tab column and below top edge",
+      "ok": true,
+      "detail": "sideWidth=264, card={'type': 'GtkBox', 'name': 'peek-card', 'at': [356, 165], 'size': [733, 742], 'border': 0, 'margins': [356, 92, 165, 93], 'children': [{'type': 'GtkBox', 'name': 'GtkBox', 'at': [13, 7], 'size': [711, 36]}, {'type': 'WebKitWebView', 'name': 'peek-view', 'at': [2, 49], 'size': [729, 688]}]}",
+      "seconds": 7.67
+    },
+    {
+      "name": "peek page fits inside peek-view",
+      "ok": true,
+      "detail": "scrollW=729, clientW=729, peek-view=729",
+      "seconds": 7.67
+    },
+    {
+      "name": "escape dismisses peek card",
+      "ok": true,
+      "detail": "cards after escape: []",
+      "seconds": 7.67
+    },
+    {
+      "name": "keep with no peek open is refused",
+      "ok": true,
+      "detail": "{'ok': False, 'error': 'no peek card is open'}",
+      "seconds": 7.67
+    },
+    {
+      "name": "the peeked page loads before Keep",
+      "ok": true,
+      "detail": "http://127.0.0.1:58053/titled?t=Kept",
+      "seconds": 7.67
+    },
+    {
+      "name": "keep on an open peek is accepted",
+      "ok": true,
+      "detail": "{'ok': True}",
+      "seconds": 7.67
+    },
+    {
+      "name": "keep makes exactly one new tab, in front",
+      "ok": true,
+      "detail": "new=[{'id': 3, 'url': 'http://127.0.0.1:58053/titled?t=Kept', 'title': 'Kept', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}], active=3",
+      "seconds": 7.67
+    },
+    {
+      "name": "and it sits right after the tab it was peeked from",
+      "ok": true,
+      "detail": "order=[1, 2, 3], opener=2",
+      "seconds": 7.67
+    },
+    {
+      "name": "the kept tab shows the peeked address and keeps the private flag",
+      "ok": true,
+      "detail": "kept={'id': 3, 'url': 'http://127.0.0.1:58053/titled?t=Kept', 'title': 'Kept', 'pinned': False, 'loading': False, 'private': False, 'asleep': False, 'hasView': True}, opener private=False",
+      "seconds": 7.67
+    },
+    {
+      "name": "the kept page is the peeked page, not loaded again",
+      "ok": true,
+      "detail": "{'ok': True, 'value': 'kept-once'}",
+      "seconds": 7.67
+    },
+    {
+      "name": "keep takes the peek card down and leaves no stray view",
+      "ok": true,
+      "detail": "cards=[], orphanViews=0",
+      "seconds": 7.67
+    },
+    {
+      "name": "a second keep right after the first is refused",
+      "ok": true,
+      "detail": "{'ok': False, 'error': 'no peek card is open'}",
+      "seconds": 7.67
+    },
+    {
+      "name": "and it makes no second tab and leaves no stray view",
+      "ok": true,
+      "detail": "before=[1, 2, 3], after=[1, 2, 3], active=3, orphanViews=0",
+      "seconds": 7.67
+    },
+    {
+      "name": "keep from a private tab makes exactly one private tab",
+      "ok": true,
+      "detail": "loaded=True, keep={'ok': True}, born=[{'id': 5, 'url': 'http://127.0.0.1:58053/titled?t=PeekSecret', 'title': 'PeekSecret', 'pinned': False, 'loading': False, 'private': True, 'asleep': False, 'hasView': True}], orphanViews=0",
+      "seconds": 7.67
+    },
+    {
+      "name": "and the kept private page stays out of history",
+      "ok": true,
+      "detail": "4705 bytes of history",
+      "seconds": 7.67
+    },
+    {
+      "name": "the tab strip can be filled to its limit for the Keep check",
+      "ok": true,
+      "detail": "40 tabs, limit 40",
+      "seconds": 7.67
+    },
+    {
+      "name": "keep at the tab limit makes no new tab",
+      "ok": true,
+      "detail": "loaded=True, before=40, after=40",
+      "seconds": 7.67
+    },
+    {
+      "name": "and still takes the peek card down and leaves no stray view",
+      "ok": true,
+      "detail": "cards=[{'type': 'GtkBox', 'name': 'toast-bar', 'at': [560, 942], 'size': [324, 34], 'border': 0, 'margins': [276, 12, 0, 24], 'children': [{'type': 'GtkLabel', 'name': 'GtkLabel', 'at': [13, 8], 'size': [298, 18]}]}], orphanViews=0",
+      "seconds": 7.67
+    },
+    {
+      "name": "site card opens with clean top inset",
+      "ok": true,
+      "detail": "card={'type': 'GtkBox', 'name': 'site-card', 'at': [442, 65], 'size': [465, 453], 'border': 0, 'margins': [442, 0, 65, 8], 'children': [{'type': 'GtkLabel', 'name': 'GtkLabel', 'at': [19, 19], 'size': [427, 18]}, {'type': 'GtkBox', 'name': 'GtkBox', 'at': [19, 45], 'size': [427, 389]}]}",
+      "seconds": 7.67
+    },
+    {
+      "name": "escape dismisses site card",
+      "ok": true,
+      "detail": "cards after escape: [{'type': 'GtkBox', 'name': 'toast-bar', 'at': [560, 942], 'size': [324, 34], 'border': 0, 'margins': [276, 12, 0, 24], 'children': [{'type': 'GtkLabel', 'name': 'GtkLabel', 'at': [13, 8], 'size': [298, 18]}]}]",
+      "seconds": 7.67
+    },
+    {
+      "name": "folding tab column collapses to strip",
+      "ok": true,
+      "detail": "sideWidth 264 -> 11",
+      "seconds": 7.67
+    },
+    {
+      "name": "unfolding tab column restores width",
+      "ok": true,
+      "detail": "sideWidth 11 -> 264",
+      "seconds": 7.67
+    },
+    {
+      "name": "duplicating a private tab keeps it private",
+      "ok": true,
+      "detail": "orig=44, dup={'id': 45, 'url': 'http://127.0.0.1:58053/titled?t=PrivateDup', 'title': 'PrivateDup', 'pinned': False, 'loading': False, 'private': True, 'asleep': False, 'hasView': True}",
+      "seconds": 2.25
+    },
+    {
+      "name": "reopening closed tab restores exact URL",
+      "ok": true,
+      "detail": "reopened={'id': 47, 'url': 'http://127.0.0.1:58053/titled?t=ReopenMe', 'title': 'ReopenMe', 'pinned': False, 'loading': True, 'private': False, 'asleep': False, 'hasView': True}",
+      "seconds": 2.25
+    },
+    {
+      "name": "disk-full stderr starts, pings, and quits cleanly",
+      "ok": true,
+      "detail": "ping_ok=True, exit_code=0",
+      "seconds": 0.39
+    },
+    {
+      "name": "the tab starts awake",
+      "ok": true,
+      "detail": "tab 4 asleep=False",
+      "seconds": 136.49
+    },
+    {
+      "name": "a tab left alone falls asleep",
+      "ok": true,
+      "detail": "asleep=True, hasView=False",
+      "seconds": 136.49
+    },
+    {
+      "name": "sleeping gives memory back",
+      "ok": true,
+      "detail": "121.4MB -> 85.1MB own, total PSS 223.4MB -> 181.7MB, RSS 566.5MB -> 435.5MB",
+      "own_before_mb": 121.4,
+      "own_after_mb": 85.1,
+      "pss_before_mb": 223.4,
+      "pss_after_mb": 181.7,
+      "rss_before_mb": 566.5,
+      "rss_after_mb": 435.5,
+      "seconds": 136.49
+    },
+    {
+      "name": "a slept tab wakes when it is selected",
+      "ok": true,
+      "detail": "asleep=False",
+      "seconds": 136.49
+    },
+    {
+      "name": "the active tab is the one on screen",
+      "ok": true,
+      "detail": "2 -> tab-2",
+      "seconds": 0.0
+    },
+    {
+      "name": "the browser is still one browser",
+      "ok": true,
+      "detail": "ok",
+      "seconds": 0.01
+    },
+    {
+      "name": "process count is sane",
+      "ok": true,
+      "detail": "3 processes",
+      "seconds": 0.01
+    }
+  ],
+  "passed": 142,
+  "failed": 0,
+  "startup_seconds": 0.38,
+  "idle_rss_mb": 487.2,
+  "idle_own_mb": 98.2,
+  "spray_growth_mb": 898.1
+}

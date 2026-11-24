@@ -56,6 +56,9 @@ pub fn area(kind: Icon, size: i32, color: Rgb) -> gtk::DrawingArea {
     area.set_size_request(size, size);
     area.connect_draw(move |widget, cr| {
         let w = size as f64;
+        let x = (widget.allocated_width() - size).max(0) as f64 / 2.0;
+        let y = (widget.allocated_height() - size).max(0) as f64 / 2.0;
+        cr.translate(x, y);
         set_source_color(widget, cr, color);
         cr.set_line_width(1.5);
         cr.set_line_cap(cairo::LineCap::Round);

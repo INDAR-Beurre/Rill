@@ -8,7 +8,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-38bdf8?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
 [![WebKitGTK](https://img.shields.io/badge/WebKitGTK-4.1-14b8a6?style=flat-square)](docs/ARCHITECTURE.md)
-[![Rust tests: 303 passed, 1 ignored (304 total)](https://img.shields.io/badge/Tests-303%20passed%20%C2%B7%201%20ignored-22c55e?style=flat-square)](#testing)
+[![Rust tests: 303 passed, 1 ignored (304 total)](https://img.shields.io/badge/Tests-304%20passed%20%C2%B7%201%20ignored-22c55e?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/MIT-license-a5b4fc?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Linux-Wayland%20%2F%20X11-818cf8?style=flat-square&logo=linux&logoColor=white)](#build-from-source)
 
@@ -181,7 +181,7 @@ xdg-mime default search.desktop x-scheme-handler/http
 ## Testing
 
 ```sh
-cargo test --release                     # 303 passed, 1 ignored (304 total)
+cargo test --release                     # 304 passed, 1 ignored (305 total)
 python3 tools/test_ui.py                 # Current real GTK walkthrough and captures
 python3 tools/stress.py                  # End-to-end behavior and memory checks
 GDK_BACKEND=wayland python3 tools/extensions.py
@@ -189,7 +189,7 @@ python3 tools/check_shield.py            # Compile the generated WebKit filter l
 python3 tools/report_figures.py --check  # Compare docs with the saved stress report
 ```
 
-The Rust tally is **303 passing tests and 1 ignored (304 total)** (round 76). `tools/test_ui.py` uses an
+The Rust tally is **304 passing tests and 1 ignored (305 total)** (final round). `tools/test_ui.py` uses an
 isolated profile and real GTK widgets for light/dark appearances, responsive
 sizes, actual URL entry, normal/private data separation, settings, navigation
 overflow, and screenshot palette review. See [docs/TESTING.md](docs/TESTING.md)
@@ -202,8 +202,9 @@ report with `tools/report_figures.py` is not a new measurement or UI check.
 
 ## Memory, honestly
 
-**The original ~100 MB total-RAM request is not met.** Round 75 measured
-**218.6 MB total PSS** for one idle tab, including **96.0 MB anonymous PSS**.
+**The original ~100 MB total-RAM request is not met.** The final round measured
+**203.6 MB resident** for one idle tab, including **98.2 MB of the browser's own
+memory**; the archived round-75 sample measured 218.6 MB total PSS / 96.0 MB anonymous PSS.
 Because WebKitGTK's three processes have a higher floor (216-219 MB measured
 over rounds 62-75), the stress suite now enforces a documented **230 MB floor**;
 this is a re-baselining, not a claim the original request was achieved. It also recorded tab switches at **1.0 ms mean**, **1.7 ms
@@ -212,7 +213,7 @@ the local UI makeover. Total memory varies with WebKit, graphics initialization,
 page content, and host state; see [docs/LIMITS.md](docs/LIMITS.md) for memory
 definitions and limits.
 
-The suite records `target_pss_mb: 230` and `target_met: true` for that floor rather than reporting anonymous memory as total RAM. Settings → **Use less memory** applies at the next launch. It turns off the page cache, switches WebKit to its document-viewer cache model, skips spellcheck and turns off the compositing path (`WEBKIT_DISABLE_COMPOSITING_MODE=1`), so pages may animate less smoothly. The earlier four-run measurement in [docs/LIMITS.md](docs/LIMITS.md) found the browser's own memory lowest with all of these together. Turning compositing off by itself used more memory, not less. This profile has not been measured against the current round-76 baseline (`council/round-76/stress-report-slide-quick.json`: 218.6 MB total PSS, 96.0 MB own, for one idle tab).
+The suite records `target_pss_mb: 230` and `target_met: true` for that floor rather than reporting anonymous memory as total RAM. Settings → **Use less memory** applies at the next launch. It turns off the page cache, switches WebKit to its document-viewer cache model, skips spellcheck and turns off the compositing path (`WEBKIT_DISABLE_COMPOSITING_MODE=1`), so pages may animate less smoothly. The earlier four-run measurement in [docs/LIMITS.md](docs/LIMITS.md) found the browser's own memory lowest with all of these together. Turning compositing off by itself used more memory, not less. The archived round-76 baseline was 218.6 MB total PSS / 96.0 MB own for one idle tab; the final round's 203.6 MB resident / 98.2 MB own is reported separately because the harness records resident memory, not PSS.
 
 ## Origin and license
 

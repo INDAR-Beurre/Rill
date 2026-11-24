@@ -152,8 +152,16 @@ CFG_DIR="$(mktemp -d)"
 DATA_DIR="$(mktemp -d)"
 export XDG_CONFIG_HOME="$CFG_DIR"
 export XDG_DATA_HOME="$DATA_DIR"
-unset DISPLAY
-export GDK_BACKEND=wayland
+if [[ "${SHOT_BACKEND:-wayland}" == "x11" ]]; then
+  export GDK_BACKEND=x11
+else
+  unset DISPLAY
+  export GDK_BACKEND=wayland
+  # Wayland reports the desktop's 2x output scale to WebKit while the GTK
+  # allocation is still logical; pages paint twice as large and clip.
+  # Evidence rounds need one CSS pixel per GTK pixel.
+  export GDK_SCALE=1
+fi
 export SEARCH_BENCH=1
 
 APPEARANCE=light
@@ -406,13 +414,19 @@ try:
     bench.go(f"http://127.0.0.1:{port}/office")
     bench.wait_loaded(timeout=25)
     bench.must("key omni")
+    time.sleep(0.2)
+    bench.must("omnitext ")
+    bench.must("pump")
     time.sleep(0.4)
-    shot("04-omni", "the field with suggestions")
+    shot("04-omni", "the field with unfiltered suggestions")
     bench.must("escape")
 
     # 4b. the field with a row picked, the way Up and Down leave it
     bench.must("key omni")
-    time.sleep(0.3)
+    time.sleep(0.2)
+    bench.must("omnitext ")
+    bench.must("pump")
+    time.sleep(0.2)
     bench.must("key down")
     bench.must("key down")
     time.sleep(0.3)
@@ -424,7 +438,7 @@ try:
     # the exact match is what keeps two same-host tabs apart.
     bench.must("key omni")
     time.sleep(0.2)
-    bench.must("omnitext /office")
+    bench.must("omnitext office")
     time.sleep(0.4)
     shot("04c-omni-ranking", "exact path match over other tabs")
     bench.must("escape")

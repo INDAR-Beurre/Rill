@@ -181,7 +181,9 @@ impl Omnibox {
         let list_scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         list_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         crate::ui::class(&list_scroll, "suggestscroll");
-        list_scroll.set_no_show_all(true);
+        // Visibility is explicit: `no_show_all` leaves later rows allocated
+        // 1x1 even after the flags are cleared, which renders as a blank list.
+        list_scroll.hide();
 
         let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&block, "omni-block");
@@ -329,7 +331,7 @@ impl Omnibox {
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "suggest");
         list.set_hexpand(true);
-        list.set_no_show_all(true);
+        list.hide();
         list_scroll.add(&list);
         block.add(&list_scroll);
 
@@ -564,10 +566,8 @@ impl Omnibox {
             self.relayout();
             return;
         }
-        self.list.set_no_show_all(false);
-        self.list_scroll.set_no_show_all(false);
         self.list_scroll.show();
-        self.list.show_all();
+        self.list.show();
         let mut last_kind = String::new();
         for (index, offer) in offers.into_iter().enumerate() {
             if offer.kind != last_kind {
@@ -681,6 +681,12 @@ impl Omnibox {
             self.list.add(&row);
         }
         self.list.show_all();
+        // Rows added while a hidden overlay is being raised can miss their
+        // first draw. Queue only a resize: forcing an allocation here makes
+        // GTK lay out a GtkBox inside a one-pixel scroll and emit negative
+        // child allocations on startup.
+        self.list_scroll.queue_resize();
+        self.list.queue_resize();
         // Typing changes how tall the list is, and the cap is a scroll: the
         // scroll has to be given the new height or it keeps the old one.
         self.relayout();

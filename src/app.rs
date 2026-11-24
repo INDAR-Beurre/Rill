@@ -3542,9 +3542,15 @@ impl App {
     /// near-black words on a near-black ground.
     const DARK_PAGE_TONE: &str = "html { background: #0b0b0b !important; color: #ededed !important; }\n\
         body { background-color: transparent !important; color: #ededed !important; }\n\
-        p, span, div, li, dt, dd, td, th, h1, h2, h3, h4, h5, h6, blockquote, label, figcaption,\n\
-        b, strong, em, small, code, pre, time, font, abbr, q, cite { color: #ededed !important; }\n\
-        a, a:visited { color: #9ecbff !important; }\n\
+        /* Forcing ink without forcing a site's pale card backgrounds leaves\n\
+           near-white text on a near-white banner. Paint every painted surface\n\
+           in the same charcoal as the page, then restore the readable ink. */\n\
+        div, section, article, aside, header, footer, main, nav, pre, code, blockquote,\n\
+        table, td, th, figure, figcaption, form, fieldset, details, summary, dialog,\n\
+        p, span, li, dt, dd, h1, h2, h3, h4, h5, h6, label, time, font, abbr, q, cite,\n\
+        b, strong, em, small { background-color: #151715 !important; color: #ededed !important; }\n\
+        body, html { background-color: #0b0b0b !important; color: #ededed !important; }\n\
+        a, a:visited { color: #9ecbff !important; background-color: transparent !important; }\n\
         a[class] { color: #ededed !important; }\n\
         :root { color-scheme: dark; }";
 
@@ -4705,7 +4711,7 @@ impl App {
         );
         self.layout_layers(target.0, target.1);
         self.ui.window.check_resize();
-        for _ in 0..120 {
+        for _ in 0..8 {
             let context = glib::MainContext::default();
             let mut dispatched = 0;
             while dispatched < 256 && context.iteration(false) {
@@ -4715,21 +4721,19 @@ impl App {
         }
         // A rebuild of the suggestion list, or a pick that changes a row's
         // fill, leaves an allocation pending, and GTK silently drops a draw
-        // call on a widget that needs one. Run the pass until nothing is
-        // pending any more, or a capture of a state reached by a keystroke
-        // documents the state before it.
-        for _ in 0..6 {
+        // call on a widget that needs one. A bounded pass settles ordinary
+        // layout; WebKit snapshots carry their own nested main loop and have
+        // to be left to their callback, or this pump starves them.
+        for _ in 0..2 {
             self.ui.window.check_resize();
             self.ui.overlay.check_resize();
             self.ui.start.root.check_resize();
-            // The panel's scroller is moved by the bench's panelscroll without
-            // a resize of its own, so its pending allocation is settled here too.
             let panels = self.panels.borrow();
             panels.scroll.check_resize();
             panels.holder.check_resize();
             drop(panels);
             let mut events = 0;
-            while events < 256 && gtk::events_pending() {
+            while events < 64 && gtk::events_pending() {
                 gtk::main_iteration_do(false);
                 events += 1;
             }
@@ -4743,13 +4747,21 @@ impl App {
             .overlay
             .translate_coordinates(&self.ui.window, 0, 0)
             .unwrap_or((0, 0));
-        let page = self.view(self.active_id())
-            .filter(|view| self.ui.stack.visible_child().as_ref() == Some(view.upcast_ref()) && view.is_mapped())
-            .and_then(|view| {
-                let surface = self.page_snapshot(&view);
-                let origin = view.translate_coordinates(&self.ui.overlay, 0, 0).unwrap_or((0, 0));
-                surface.map(|surface| (surface, origin.0, origin.1, view.allocated_width(), view.allocated_height()))
-            });
+        // With the omnibox or a panel open, a translucent scrim covers the
+        // page completely. Skipping the engine snapshot there avoids a nested
+        // GLib loop while the page is behind a modal surface.
+        let overlay_open = self.omni.visible.get() || self.panels.borrow().open.is_some();
+        let page = if overlay_open {
+            None
+        } else {
+            self.view(self.active_id())
+                .filter(|view| self.ui.stack.visible_child().as_ref() == Some(view.upcast_ref()) && view.is_mapped())
+                .and_then(|view| {
+                    let surface = self.page_snapshot(&view);
+                    let origin = view.translate_coordinates(&self.ui.overlay, 0, 0).unwrap_or((0, 0));
+                    surface.map(|surface| (surface, origin.0, origin.1, view.allocated_width(), view.allocated_height()))
+                })
+        };
         // Any WebView living inside an overlay (such as the Peek card's view)
         // must be composited from WebKit's own snapshot too: `gtk_widget_draw`
         // on an offset WebView shifts its backing surface right and clips it.

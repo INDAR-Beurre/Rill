@@ -85,8 +85,10 @@ match patterns, the stylesheet's contrast pairs, the key table, VSync motion
 easing curves (`src/motion.rs`), permission rules (`src/permissions.rs`), site
 card security/data rules (`src/sitecard.rs`), and 6-browser import
 (`src/import.rs`). These run without a display. Current Rust suite tally:
-**303 passed, 1 ignored (304 total)**, from `cargo test --release` on 22 November
-(round 76, log `build/test-r76-known-fixes.log`).
+**304 passed, 1 ignored (305 total)**, from the final `cargo test --release`
+(log `baseline/cargo_test-r18.log`). The ignored test is a live DuckDuckGo
+shape check, documented in `src/suggest.rs` and run explicitly with
+`cargo test --release live_duckduckgo -- --ignored --nocapture`.
 
 ## 2. The bench socket
 

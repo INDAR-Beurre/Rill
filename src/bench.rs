@@ -544,6 +544,30 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             }
             ok(&format!(",\"overlay\":[{},{}],\"cards\":[{}]", app.ui.overlay.allocated_width(), app.ui.overlay.allocated_height(), out.join(",")))
         }
+        "pump" => {
+            // Bench commands run synchronously inside one main-context
+            // dispatch. Widgets added in that dispatch are still 1x1 until a
+            // real allocation pass; the browser gets one before a person can
+            // see the field, but the capture harness must ask for it.
+            app.ui.window.queue_resize();
+            let context = glib::MainContext::default();
+            for _ in 0..256 {
+                if !context.iteration(false) {
+                    break;
+                }
+            }
+            ok("")
+        }
+        "omnigeo" => {
+            let omni = &app.omni;
+            let rows: Vec<String> = omni.list.children().iter().map(|child| format!(
+                "{{\"type\":\"{}\",\"w\":{},\"h\":{},\"vis\":{},\"mapped\":{},\"childvis\":{}}}",
+                child.type_().name(), child.allocated_width(), child.allocated_height(),
+                child.is_visible(), child.is_mapped(), child.is_child_visible())).collect();
+            ok(&format!(",\"list\":{{\"w\":{},\"h\":{},\"vis\":{},\"mapped\":{},\"children\":[{}]}}",
+                omni.list.allocated_width(), omni.list.allocated_height(), omni.list.is_visible(),
+                omni.list.is_mapped(), rows.join(",")))
+        }
         "omni" => {
             app.open_omni(true);
             app.omni.entry.set_text(argument);

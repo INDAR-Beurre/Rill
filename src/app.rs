@@ -3554,6 +3554,9 @@ impl App {
     /// buttons, so the sheet deliberately touches only the document root.
     const DARK_PAGE_TONE: &str = "html { background-color: #121413 !important; color: #ededed !important; }\n\
         body { background-color: transparent !important; color: inherit !important; }\n\
+        :where(p, li, td, th, h1, h2, h3, h4, h5, h6, b, strong, small, figcaption) {\n\
+          background-color: transparent !important; color: inherit !important;\n\
+        }\n\
         a, a:visited { color: #9ecbff !important; }\n\
         :root { color-scheme: dark; }";
 
@@ -3621,9 +3624,14 @@ impl App {
             }
         };
         if changed {
+            // Layer::place pins the scrim to the old window size. Releasing
+            // only the holder left that request behind as a minimum size, so
+            // the next resize stopped 56px short of the request.
             self.omni.holder.set_size_request(-1, -1);
+            self.omni.scrim.set_size_request(-1, -1);
             if let Ok(panels) = self.panels.try_borrow() {
                 panels.holder.set_size_request(-1, -1);
+                panels.scrim.set_size_request(-1, -1);
             }
             if let Ok(find) = self.find.try_borrow() {
                 find.holder.set_size_request(-1, -1);
@@ -4587,10 +4595,21 @@ impl App {
             return;
         }
         let (title, action) = error_copy(reason);
+        let security = reason.contains("certificate") || reason.contains("secure connection");
         self.ui.error_title.set_text(title);
         self.ui.error_reason.set_text(reason);
         self.ui.error_address.set_text(url);
         self.ui.error_retry.set_label(action);
+        // A rejected certificate must lead with the safe way out, like Chrome
+        // and Firefox. The retry stays available as the secondary action.
+        if security {
+            self.ui.error_retry.style_context().remove_class("primary");
+            self.ui.error_retry.style_context().add_class("act");
+            self.ui.error_back.style_context().add_class("primary");
+        } else {
+            self.ui.error_retry.style_context().add_class("primary");
+            self.ui.error_back.style_context().remove_class("primary");
+        }
         // A child added to a stack after the window was shown still has to be
         // told it is visible before it can be the visible child.
         self.ui.errorpage.show_all();
@@ -4858,8 +4877,7 @@ impl App {
             let panels_scrim_visible = self.panels.borrow().scrim.is_visible();
             if self.omni.visible.get() || self.panels.borrow().open.is_some() {
                 context.set_source_rgba(red, green, blue, alpha);
-                let column = self.side_width() as f64;
-                context.rectangle(column, 0.0, width as f64 - column, height as f64);
+                context.rectangle(0.0, 0.0, width as f64, height as f64);
                 let _ = context.fill();
             }
 
@@ -5884,6 +5902,8 @@ mod state_logic_tests {
             "html { background-color",
             "body { background-color: transparent",
             "#ededed !important",
+            ":where(p, li, td, th, h1, h2, h3, h4, h5, h6, b, strong, small, figcaption)",
+            "color: inherit !important",
             "color-scheme: dark",
         ] {
             assert!(sheet.contains(selector), "the dark sheet is missing {selector}");

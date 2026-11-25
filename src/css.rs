@@ -7,18 +7,18 @@ pub mod quiet {
         Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
     }
 
-    pub const PIN_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xD0D6C9));
+    pub const PIN_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xD0D0D0));
     pub const PIN_LIVE_FG: (Rgb, Rgb) = (hex(0x24261F), hex(0xFFFFFF));
-    pub const ROW_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xC7CEBF));
-    pub const TILE_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
-    pub const MUTED: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
-    pub const FAINT: (Rgb, Rgb) = (hex(0x62635A), hex(0xA4AD9C));
+    pub const ROW_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xC7C7C7));
+    pub const TILE_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB5B5B5));
+    pub const MUTED: (Rgb, Rgb) = (hex(0x595A52), hex(0xB5B5B5));
+    pub const FAINT: (Rgb, Rgb) = (hex(0x62635A), hex(0xA5A5A5));
     pub const EMPTY_FG: (Rgb, Rgb) = MUTED;
     pub const BLANK_HINT: (Rgb, Rgb) = MUTED;
-    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x89917E));
-    pub const DISABLED: (Rgb, Rgb) = (hex(0x74766A), hex(0x929A89));
+    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x898989));
+    pub const DISABLED: (Rgb, Rgb) = (hex(0x74766A), hex(0x929292));
     pub const DANGER: (Rgb, Rgb) = (hex(0xAF392C), hex(0xF29C88));
-    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x89917E));
+    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x898989));
 
     pub fn pick(pair: (Rgb, Rgb), dark: bool) -> Rgb {
         if dark { pair.1 } else { pair.0 }

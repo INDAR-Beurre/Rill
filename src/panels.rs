@@ -174,9 +174,6 @@ pub struct Panels {
     /// The card width the body was last measured at. A resize changes the width
     /// a wrapping line needs, so the height has to be asked again.
     fitted_width: std::cell::Cell<i32>,
-    /// Cached height measurement, keyed by card width and filter text. It is
-    /// only reused while the same Settings view is rebuilt for typing.
-    settings_height: std::cell::RefCell<Option<(i32, i32)>>,
     /// A permanent home for the Settings body. Other panels clear `body` on
     /// open; keeping Settings here avoids jumping the scroller while typing.
     settings_holder: gtk::Box,
@@ -228,7 +225,13 @@ fn widget_text(widget: &gtk::Widget) -> String {
         return text(label.text());
     }
     if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
-        return text(button.label().unwrap_or_default());
+        // Custom-child buttons (the Light/Dark/System theme cards) have no
+        // `label`. Falling through to Container traversal lets their words
+        // take part in filtering instead of orphaning the section heading.
+        let label = text(button.label().unwrap_or_default());
+        if !label.is_empty() {
+            return label;
+        }
     }
     if let Ok(entry) = widget.clone().downcast::<gtk::Entry>() {
         return text(entry.text());
@@ -407,7 +410,6 @@ impl Panels {
             compact: std::cell::Cell::new(false),
             refit_queued: std::rc::Rc::new(std::cell::Cell::new(false)),
             fitted_width: std::cell::Cell::new(0),
-            settings_height: std::cell::RefCell::new(None),
             settings_holder,
 
         };
@@ -679,8 +681,8 @@ impl Panels {
     }
 
     pub fn layout_with_column(&self, width: i32, height: i32, column: i32) {
-        // The column stays readable while a panel is up: the scrim covers the
-        // page, not the tabs.
+        // A modal veil covers the whole window. Leaving the sidebar bright
+        // split the frame in two and made the panel read as a page dialog.
         self.column.set(column);
         self.band.set(0);
         self.layout_card(width, height);
@@ -690,7 +692,7 @@ impl Panels {
         let column = self.column.get();
         let band = self.band.get();
         let page = (width - column).max(0);
-        self.layer.place(&self.scrim, column, band, page, (height - band).max(0));
+        self.layer.place(&self.scrim, 0, 0, width, height);
         let card_width = panel_card_width(page);
         let changed = self.open.is_some() && self.configure_layout(card_width, height);
         // A narrower window wraps the body's sentences onto more lines, so the
@@ -1013,14 +1015,6 @@ impl Panels {
     /// round 140 and hoping: the guess was 34px short, which cut the last row of
     /// a list in half and made a scrollable card look broken.
     fn fit_height(&self, card_width: i32) -> i32 {
-        let settings = matches!(self.open, Some(PanelKind::Settings));
-        if settings {
-            if let Some((width, height)) = *self.settings_height.borrow() {
-                if width == card_width {
-                    return height;
-                }
-            }
-        }
         Self::adapt_content(self.body.upcast_ref(), self.content_width(card_width));
         let inner = self.body_width(card_width);
         let above = self.chrome_height(card_width);
@@ -1035,21 +1029,11 @@ impl Panels {
             // so the bottom edge cut through a row (History, Settings).
             // card_height only snaps when the window shrinks the card further,
             // so snap here too and end the card on a whole row.
-            let height = if settings {
-                capped
-            } else {
-                self.snap_to_row(inner_scrolled, capped).max(minimum).min(capped)
-            };
-            if settings {
-                *self.settings_height.borrow_mut() = Some((card_width, height));
-            }
+            let height = self.snap_to_row(inner_scrolled, capped).max(minimum).min(capped);
             return height;
         }
         self.fitted_width.set(card_width);
         let height = wanted.clamp(minimum, MAX_HEIGHT);
-        if settings {
-            *self.settings_height.borrow_mut() = Some((card_width, height));
-        }
         height
     }
 
@@ -1948,7 +1932,6 @@ impl Panels {
         if !query.is_empty() {
             filter_settings_list(&list, &query);
         }
-        self.settings_height.borrow_mut().take();
         self.settings_holder.add(&self.body_scroll(&list));
         self.settings_holder.show_all();
         Some(field)

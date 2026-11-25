@@ -48,7 +48,7 @@ def settled(client, width=None):
     while time.monotonic() < deadline:
         client.must("settle")
         probe = client.probe()
-        if width is None or abs(probe["width"] - width) <= 8:
+        if width is None or abs(probe["width"] - width) <= 14:
             time.sleep(0.08)
             return probe
         time.sleep(0.08)

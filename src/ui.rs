@@ -263,10 +263,11 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pin_heading.hide();
     pack(&pins_holder, &pin_heading, false);
     let pins = gtk::Grid::new();
-    pins.set_column_spacing(3);
+    pins.set_column_spacing(6);
     pins.set_row_spacing(4);
-    pins.set_column_homogeneous(false);
-    pins.set_halign(gtk::Align::Start);
+    pins.set_column_homogeneous(true);
+    pins.set_halign(gtk::Align::Fill);
+    pins.set_hexpand(true);
     pack(&pins_holder, &pins, false);
     pins_holder.set_no_show_all(true);
     pack(&body, &pins_holder, false);
@@ -408,13 +409,13 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     class(&address, "address-button");
     address.set_hexpand(true);
     label_a11y(&address, "Search or enter an address (Ctrl L)", gtk::atk::Role::PushButton);
-    let address_content = widget_box(gtk::Orientation::Horizontal, 10);
+    let address_content = widget_box(gtk::Orientation::Horizontal, 0);
     let address_label = gtk::Label::new(Some("New tab"));
     class(&address_label, "address-label");
     address_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     address_label.set_max_width_chars(24);
     address_label.set_xalign(0.0);
-    pack(&address_content, &address_label, true);
+    pack(&address_content, &address_label, false);
     let address_path = gtk::Label::new(Some(""));
     class(&address_path, "address-path");
     address_path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -423,6 +424,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pack(&address_content, &address_path, false);
     let address_hint = gtk::Label::new(Some("Ctrl L"));
     class(&address_hint, "address-hint");
+    address_hint.set_margin_start(10);
     pack(&address_content, &address_hint, false);
     address.add(&address_content);
     pack(&location, &site_info, false);

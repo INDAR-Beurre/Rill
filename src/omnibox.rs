@@ -381,7 +381,7 @@ impl Omnibox {
         let band = band.max(0);
         self.band.set(band);
         let page = (width - column).max(0);
-        self.layer.place(&self.scrim, column, band, page, (height - band).max(0));
+        self.layer.place(&self.scrim, 0, 0, width, height);
         let field_width = field_width_for(page);
         // Centred on the page, not on the window: the column is not part of
         // the page the field is over.

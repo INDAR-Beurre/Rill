@@ -485,6 +485,18 @@ try:
     if show_panel("downloads"):
         shot("05-panel-downloads-filled", "finished, failed and active downloads")
         bench.must("key closepanel")
+    # The empty states matter as much as the seeded ones: an unloaded History
+    # page must explain itself instead of showing a blank box.
+    extension_dir = out / "installed-extension"
+    extension_dir.mkdir(exist_ok=True)
+    (extension_dir / "manifest.json").write_text(
+        '{"manifest_version":3,"name":"Quit Note","version":"1.0",'
+        '"description":"A real unpacked extension used only for visual evidence."}'
+    )
+    bench.must(f"installext {extension_dir}")
+    if show_panel("extensions"):
+        shot("05-panel-extensions-installed", "an installed unpacked extension")
+        bench.must("key closepanel")
 
     # 6. find
     bench.must("closeall")
@@ -664,7 +676,10 @@ if not is_dark() and (out / "05-panel-history.png").exists():
     # than both the white card and the warm sidebar, wherever the window lands.
     veil = pixels(out / "05-panel-history.png",
                   [(image.width - 120, image.height - 89), (100, 200)])
-    ok = bool(veil) and 120 <= sum(veil[0]) / 3 <= 180 and min(veil[1]) >= 230
+    # The modal veil now covers the whole window, including the sidebar.
+    # Both samples must be the same dimmed surface; a bright side would mean
+    # only the page area was dimmed.
+    ok = bool(veil) and all(120 <= sum(c) / 3 <= 180 for c in veil)
     manifest.append({"name": "pixel light scrim", "ok": ok, "note": str(veil)})
     print(("  ok   " if ok else "  FAIL ") + "pixel light scrim — " + str(veil))
 
@@ -705,8 +720,6 @@ if (out / "05-panel-settings.png").exists():
     card_right = card_xs[0] if card_xs else width - 301
     track_x = max(2, card_right - 9)
     side_x = min(width - 3, card_right + 4)
-    track_col, side_col = column(path, track_x), column(path, side_x)
-    rows = min(len(track_col), len(side_col))
     # The card casts a soft shadow, so the light backdrop directly under it
     # gets lighter slowly, from 126 at y=741 to 133 by y=847 (round 41). Only
     # a tolerance of 3 waited out the shadow, and the check then picked y=786
@@ -718,26 +731,24 @@ if (out / "05-panel-settings.png").exists():
     # 22, only 10 apart, so a tolerance of 12 matched the card itself and
     # stopped at its top, y=428 (round 42). The dark shadow is within 1 of the
     # backdrop, so 3 is enough there and finds y=741 (round 41).
-    tolerance = 3 if dark else 12
-    bottom = next((y for y in range(301, rows)
-                   if max(abs(a - b) for a, b in zip(track_col[y], side_col[y])) <= tolerance), None)
-    probe_y = bottom - 12 if bottom and bottom - 12 > 300 else None
-    thumb = pixels(path, [(track_x, 300), (track_x, probe_y)]) if probe_y else []
-    # The gate's purpose is opacity: the track column must read as the card
-    # surface, not the backdrop. The warm palette moved the thumb off this
-    # probe row, so accept the card colour at either end of the track.
-    if dark:
-        # The dark card surface is several steps above the charcoal backdrop;
-        # its exact value changes with shot size (#4a4f45 at 1500px, #272b25
-        # at 820px). Both ends of the track must read as that surface, not as
-        # the backdrop.
-        ok = bool(thumb) and backdrop + 10 <= sum(thumb[0]) / 3 <= 110 and \
-             max(abs(a - b) for a, b in zip(thumb[0], thumb[1])) <= 12
-    else:
-        # The top of the track is the warm toolbar (241,239,233) and the
-        # lower probe is the white card body; both are card, not backdrop.
-        ok = bool(thumb) and min(sum(c) / 3 for c in thumb) >= 225
-    note = f"{thumb} (card bottom y={bottom}, track read at y={probe_y})"
+    # With a full-window veil the pixels beside the card are dimmed too, so
+    # the old card-versus-backdrop edge detector cannot locate the track.
+    # Read two points inside the card near the right edge instead: both must
+    # be the card surface (white in light, charcoal in dark), not the 148/22
+    # modal veil outside it.
+    # The coloured strip at x=card_right-9 is the native scrollbar: a neutral
+    # divider in light and a lighter rail in dark. It must be distinct from
+    # the card surface beside it in both themes; that is the feature the gate
+    # is checking.
+    rail = pixels(path, [(track_x - 3, 300), (track_x, 300)])
+    card = pixels(path, [(track_x + 3, 300), (track_x + 5, 300)])
+    ok = (
+        len(rail) == 2
+        and len(card) == 2
+        and max(abs(a - b) for a, b in zip(rail[0], rail[1])) <= 3
+        and abs(sum(rail[0]) / 3 - sum(card[0]) / 3) >= 12
+    )
+    note = f"rail={rail} card={card} (card right x={card_right}, track read at x={track_x})"
     manifest.append({"name": "pixel panel scrollbar", "ok": ok, "note": note})
     print(("  ok   " if ok else "  FAIL ") + "pixel panel scrollbar — " + note)
 

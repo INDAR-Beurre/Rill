@@ -423,6 +423,23 @@ impl Panels {
         if let Some(access) = self.card.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, kind.title());
         }
+        if kind == PanelKind::Settings {
+            // Build the large form once before showing the card. The first
+            // open must not stall the main loop while 20 controls appear.
+            let signature = settings_signature(&app.prefs.borrow());
+            let stale = self
+                .settings_body
+                .borrow()
+                .as_ref()
+                .map(|(stamp, _)| *stamp != signature)
+                .unwrap_or(true);
+            if stale {
+                self.build_settings(app);
+                let widgets = self.settings_holder.children();
+                *self.settings_body.borrow_mut() = Some((signature, widgets));
+                *self.settings_height.borrow_mut() = None;
+            }
+        }
         self.build_nav(app, &kind);
         let field = match kind {
             PanelKind::Bookmarks => self.build_bookmarks(app),

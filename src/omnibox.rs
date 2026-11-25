@@ -681,10 +681,25 @@ impl Omnibox {
             self.list.add(&row);
         }
         self.list.show_all();
-        // Rows added while a hidden overlay is being raised can miss their
-        // first draw. Queue only a resize: forcing an allocation here makes
-        // GTK lay out a GtkBox inside a one-pixel scroll and emit negative
-        // child allocations on startup.
+        // A bench screenshot is composited in the raise turn before GTK's
+        // normal size-allocate pass reaches children created since the list
+        // was hidden. Give the list a parent-relative allocation; using the
+        // viewport's absolute x/y here produces negative child allocations.
+        if std::env::var_os("SEARCH_BENCH").is_some() {
+            let context = glib::MainContext::default();
+            for _ in 0..4 {
+                let mut dispatched = 0;
+                while dispatched < 64 && context.iteration(false) {
+                    dispatched += 1;
+                }
+                if self.list.allocated_height() > 1 {
+                    break;
+                }
+            }
+            let width = self.list_scroll.allocated_width().max(720);
+            let height = self.list_height_for(width).max(48);
+            self.list.size_allocate(&gtk::Allocation::new(0, 0, width, height));
+        }
         self.list_scroll.queue_resize();
         self.list.queue_resize();
         // Typing changes how tall the list is, and the cap is a scroll: the

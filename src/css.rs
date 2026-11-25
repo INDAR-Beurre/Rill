@@ -7,9 +7,9 @@ pub mod quiet {
         Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
     }
 
-    pub const PIN_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
-    pub const PIN_LIVE_FG: (Rgb, Rgb) = (hex(0x34362F), hex(0xEDEFE8));
-    pub const ROW_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
+    pub const PIN_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xD0D6C9));
+    pub const PIN_LIVE_FG: (Rgb, Rgb) = (hex(0x24261F), hex(0xFFFFFF));
+    pub const ROW_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xC7CEBF));
     pub const TILE_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
     pub const MUTED: (Rgb, Rgb) = (hex(0x595A52), hex(0xB4BBAE));
     pub const FAINT: (Rgb, Rgb) = (hex(0x62635A), hex(0xA4AD9C));

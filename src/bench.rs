@@ -818,6 +818,11 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             if let Ok(mut gaps) = GAPS.lock() {
                 gaps.clear();
             }
+            // A reset starts a fresh observation window. Without clearing the
+            // previous tick the first tick measures idle time before reset.
+            if let Ok(mut last) = LAST_TICK.lock() {
+                *last = None;
+            }
             ok("")
         }
         "quit" => {
@@ -1209,12 +1214,22 @@ fn key(app: &AppRef, name: &str) -> String {
             return ok("");
         }
         "maximise" => {
-            if app.ui.window.is_maximized() {
+            let before = app.ui.window.is_maximized();
+            if before {
                 app.ui.window.unmaximize();
             } else {
                 app.ui.window.maximize();
             }
-            return ok("");
+            let mut pumped = 0;
+            while app.ui.window.is_maximized() == before && pumped < 20 {
+                let context = glib::MainContext::default();
+                let mut dispatched = 0;
+                while dispatched < 64 && context.iteration(false) {
+                    dispatched += 1;
+                }
+                pumped += 1;
+            }
+            return ok(&format!(",\"maximised\":{}", app.ui.window.is_maximized()));
         }
         other => {
             if let Ok(number) = other.parse::<usize>() {

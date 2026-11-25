@@ -85,7 +85,7 @@ impl Palette {
             hover: pick(0xECEAE3, 0x30362D),
             side_hover: pick(0xE7E4DB, 0x34382F),
             side_tile: pick(0xF8F6F0, 0x292E27),
-            side_pin_live: pick(0xD8D3C6, 0x404638),
+            side_pin_live: pick(0xD8D3C6, 0x3E4539),
             card: pick(0xFCFBF8, 0x202321),
             danger: pick(0xAF392C, 0xE07463),
         }

@@ -1378,10 +1378,14 @@ class Run:
                 max(700, screen.get("height", 1080) - 64),
                 initial.get("height", 1080),
             )
+            # The start page has a real 320x260 canvas plus its editorial
+            # columns, so sub-900px window requests are clamped by GTK.
+            # Test the usable design range rather than a size the toolkit
+            # refuses; 820px compact captures cover the narrow layout.
             sizes = [
-                (min(1000, max_width), min(700, max_height)),
-                (min(1400, max_width), min(900, max_height)),
-                (min(900, max_width), min(620, max_height)),
+                (min(1000, max_width), min(1000, max_height)),
+                (min(1400, max_width), min(1000, max_height)),
+                (min(900, max_width), min(1000, max_height)),
                 (max_width, max_height),
                 (max_width - 120, max_height - 60),
             ]
@@ -1397,7 +1401,7 @@ class Run:
             # The native start page needs 940px of height, so a shorter
             # request is clamped; taking the width proves the resize landed.
             self.check("the window survives resizing",
-                       abs(width - final_width) <= 40 and height >= min(620, max_height - 40),
+                       abs(width - final_width) <= 40 and abs(height - final_height) <= 40,
                        f"{width}x{height}, asked for {final_width}x{final_height}")
             # The window taking the size is not the page taking it. A resize
             # that reaches the frame but not the view leaves the page painted

@@ -4,8 +4,8 @@
 // The reader owns its type size for this session. The host can drive these
 // buttons through the bench `js` verb, and a person can click A- / A+.
 window.__searchReaderFont = function (delta) {
-  const current = Number(window.__searchReaderSize) || 19;
-  const next = Math.max(15, Math.min(28, current + delta));
+  const current = Number(window.__searchReaderSize) || 18;
+  const next = Math.max(14, Math.min(22, current + delta));
   window.__searchReaderSize = next;
   document.documentElement.style.setProperty('--search-reader-size', next + 'px');
   return String(next);
@@ -127,14 +127,14 @@ window.__searchReader = function (palette) {
   style.setAttribute('data-search-reader', '');
   style.textContent = `
     html, body { ${pageCss} !important; }
-    body { margin: 0 auto !important; padding: 0 !important; max-width: 720px !important; font: var(--search-reader-size, 19px)/1.62 Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif !important;
+    body { margin: 0 auto !important; padding: 0 !important; max-width: 720px !important; font: var(--search-reader-size, 18px)/1.62 Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif !important;
       -webkit-font-smoothing: antialiased; }
     #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 48px 28px 120px; }
     #__search_reader h1 { font-size: 1.79em; line-height: 1.18; letter-spacing: -0.012em; font-weight: 700; margin: 0 0 12px; }
-    /* Secondary text is sized in em from the 19px body instead of fixed
+    /* Secondary text is sized in em from the 18px body instead of fixed
        pixels, so it follows the reader's text size and page zoom along with
-       everything else. 0.72em of 19px is about 13.7px, close to the old 13px. */
-    #__search_reader .byline { color: ${muted}; font-size: 0.72em; margin: 0 0 40px; }
+       everything else. 0.76em of 18px is about 13.7px. */
+    #__search_reader .byline { color: ${muted}; font-size: 0.76em; margin: 0 0 40px; }
     #__search_reader p, #__search_reader li, #__search_reader blockquote { margin: 0 0 1.05em; }
     #__search_reader h2, #__search_reader h3 { line-height: 1.25; margin: 1.8em 0 0.5em; letter-spacing: -0.01em; }
     #__search_reader h2 { font-size: 1.32em; font-weight: 600; }
@@ -224,7 +224,7 @@ window.__searchReader = function (palette) {
   container.appendChild(exit);
   const font = document.createElement('div');
   font.id = '__search_reader_font';
-  for (const [label, delta, name] of [['A-', -2, 'Smaller reading text'], ['A+', 2, 'Larger reading text']]) {
+  for (const [label, delta, name] of [['A-', -4, 'Smaller reading text'], ['A+', 4, 'Larger reading text']]) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = label;

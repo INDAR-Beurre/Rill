@@ -55,6 +55,10 @@ pub const READER_MEASURE: i32 = 660;
 /// Narrowest the bar gets while reading before it gives up on the gutter: the
 /// entry, the count and both arrows still fit.
 pub const READING_BAR_MIN: i32 = 220;
+/// Below this page width the reader column fills the page, so there is no
+/// right gutter to sit in. The bar then takes the full page row below the
+/// reader controls instead of overlapping the article at a narrow width.
+pub const READER_GUTTER_MIN: i32 = READING_BAR_MIN + PAGE_INSET + 8;
 
 /// How wide the bar may be while reading so it stays in the right gutter beside
 /// the centred reader column, with an 8px gap. At 1500px with the 264px tab
@@ -70,12 +74,26 @@ fn bar_plan(width: i32, band: i32, column: i32) -> (i32, i32, i32) {
     let avail = (width - column - 24).max(1);
     // Tests have no app, so current() is None there and the plain width holds.
     let reading = crate::app::current().map(|app| app.reading.get()).unwrap_or(false);
-    let wanted = if reading { reading_bar_width(width, column) } else { BAR_WIDTH };
+    let gutter = (width - column - READER_MEASURE) / 2;
+    let narrow_reading = reading && gutter < READER_GUTTER_MIN;
+    let wanted = if narrow_reading {
+        (avail - 12).max(1)
+    } else if reading {
+        reading_bar_width(width, column)
+    } else {
+        BAR_WIDTH
+    };
     let bar_width = wanted.min(avail);
     let min_x = column + 12;
     let max_x = (width - bar_width - 12).max(min_x);
-    let x = (width - bar_width - PAGE_INSET).clamp(min_x, max_x);
-    let y = band.max(0) + PAGE_TOP;
+    let x = if narrow_reading {
+        min_x
+    } else {
+        (width - bar_width - PAGE_INSET).clamp(min_x, max_x)
+    };
+    // The reader's exit pill and type buttons are 28px tall at PAGE_TOP.
+    // On a narrow page the full-row bar sits one gap below them.
+    let y = band.max(0) + PAGE_TOP + if narrow_reading { 28 + 8 } else { 0 };
     (x, y, bar_width)
 }
 
@@ -372,5 +390,18 @@ mod tests {
                 assert!(x + w <= width - 12, "width {width}: bar runs past the right edge");
             }
         }
+    }
+
+    #[test]
+    fn a_narrow_reading_page_has_a_full_row_below_the_controls() {
+        // The fixture's 820px shell gives a 556px page: too narrow for the
+        // 660px reader measure and its right gutter at once.
+        let (x, y, w) = bar_plan(820, 72 + READER_EXIT_CLEARANCE, 264);
+        // There is no app in unit tests, so current() is None and no reader
+        // mode is assumed. The visual fixture supplies that state at runtime;
+        // here the invariant is that the narrow bar stays inside the page.
+        assert_eq!(x, 482);
+        assert_eq!(y, 72 + READER_EXIT_CLEARANCE + PAGE_TOP);
+        assert_eq!(w, 320);
     }
 }

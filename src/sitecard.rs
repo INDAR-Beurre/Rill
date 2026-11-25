@@ -334,7 +334,15 @@ fn anchor_point(app: &crate::app::App, card: &gtk::Box) -> Option<(i32, i32)> {
     // the left guide wins.
     let max_left = (overlay.allocated_width() - card_width - crate::find::PAGE_INSET).max(12);
     let left = x.clamp(12, max_left);
-    let top = y + GAP;
+    // Keep the card below the chrome. A button near the top edge can anchor
+    // the card over the address row, which hides the very control it explains.
+    let toolbar_bottom = app
+        .ui
+        .toolbar
+        .translate_coordinates(overlay, 0, app.ui.toolbar.allocated_height())
+        .map(|(_, bottom)| bottom + GAP)
+        .unwrap_or(0);
+    let top = y.max(toolbar_bottom) + GAP;
     Some((left, top))
 }
 

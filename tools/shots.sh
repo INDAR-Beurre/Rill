@@ -461,6 +461,12 @@ try:
             continue
         shot(name, kind)
         if kind == "settings":
+            # A filter is only a feature when a typed query narrows the form;
+            # the field itself is not enough evidence.
+            bench.must("filter theme")
+            time.sleep(0.5)
+            shot("05-panel-settings-filtered", "Settings filtered to matching rows")
+            bench.must("filter ")
             # The last two switches are below the fold. A scrolled picture is
             # the only honest proof they are reachable with the mouse.
             bench.must("panelscroll 10000")
@@ -490,6 +496,9 @@ try:
     bench.must("find Paragraph")
     time.sleep(0.6)
     shot("06-find", "find over a page")
+    bench.must("find zzzznomatch")
+    time.sleep(0.4)
+    shot("06b-find-zero", "find with zero matches")
     bench.must("escape")
 
     # 7. reading mode on a long page
@@ -499,6 +508,19 @@ try:
     bench.must("key reader")
     time.sleep(1.2)
     shot("07-reading", "reading mode")
+    bench.must("js window.__searchReaderFont(-4)")
+    time.sleep(0.4)
+    shot("07-reading-small", "reading mode with 14px type")
+    bench.must("pagefont 14")
+    time.sleep(0.4)
+    assert bench.must("pagefont").get("value") == "14px", "reader font did not reach 14px"
+    bench.must("js window.__searchReaderFont(4)")
+    time.sleep(0.4)
+    bench.must("js window.__searchReaderFont(4)")
+    time.sleep(0.4)
+    shot("07-reading-large", "reading mode with 22px type")
+    bench.must("pagefont")
+    assert bench.must("pagefont").get("value") == "22px", "reader font did not reach 22px"
     bench.must("key reload")
 
     # 7b. reading mode on a structured page. /long is paragraphs only, so the
@@ -556,6 +578,8 @@ try:
         ("tls", "an expired certificate"),
         ("dns", "a name that cannot be resolved"),
         ("offline", "no network"),
+        ("refused", "a connection refused by the host"),
+        ("timeout", "a request that timed out"),
     ):
         bench.must("closeall")
         time.sleep(0.3)
@@ -564,6 +588,9 @@ try:
         bench.must(f"showerror {kind}")
         time.sleep(0.5)
         shot(f"09-{kind}", note)
+        bench.must("errorgeometry")
+        if kind == "missing":
+            bench.must("showerror The site broke while answering (503).")
 
     # 16. site card over a loaded page
     bench.must("closeall")
@@ -575,6 +602,7 @@ try:
     bench.must("settle")
     time.sleep(0.3)
     shot("16-sitecard", "site card")
+    bench.must("cards")
     bench.must("escape")
     settle()
 
@@ -603,7 +631,7 @@ finally:
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 bad = [item for item in manifest if not item["ok"] and not item.get("skipped")]
-tried = [item for item in manifest if not item.get("skipped")]
+tried = [item for item in manifest if not item.get("skipped") and item["name"] != "binary"]
 skipped = f", {len(unavailable)} state(s) with no way to open" if unavailable else ""
 print(f"\n{len(tried) - len(bad)}/{len(tried)} states captured in {out}{skipped}")
 

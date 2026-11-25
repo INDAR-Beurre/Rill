@@ -174,35 +174,71 @@ pub struct Panels {
     /// The card width the body was last measured at. A resize changes the width
     /// a wrapping line needs, so the height has to be asked again.
     fitted_width: std::cell::Cell<i32>,
-    /// Settings is a static form whose widgets used to be rebuilt on every
-    /// open, which stalled the main loop for ~138ms (round-75 stress). The
-    /// body is keyed by the preferences it actually shows and reattached when
-    /// nothing it displays has changed.
-    /// Measuring the settings form on every open cost another ~120ms of main
-    /// loop time after the widgets were cached. Its height only depends on the
-    /// card width and the same preferences signature.
+    /// Cached height measurement, keyed by card width and filter text. It is
+    /// only reused while the same Settings view is rebuilt for typing.
     settings_height: std::cell::RefCell<Option<(i32, i32)>>,
     /// A permanent home for the Settings body. Other panels clear `body` on
-    /// open; keeping Settings here avoids detaching and re-measuring its large
-    /// widget tree, which stalled the main loop (round-75 motion probe).
+    /// open; keeping Settings here avoids jumping the scroller while typing.
     settings_holder: gtk::Box,
-    settings_body: std::cell::RefCell<Option<(u64, Vec<gtk::Widget>)>>,
 }
 
-/// The preferences the Settings form draws. Any change rebuilds the form.
-fn settings_signature(prefs: &crate::store::Prefs) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    format!(
-        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        prefs.appearance, prefs.sidebar, prefs.roomy_tabs, prefs.shield,
-        prefs.curtain, prefs.memory_saver, prefs.sleep_minutes,
-        prefs.restore_session, prefs.search_engine, prefs.show_bookmarks_bar,
-        prefs.low_memory, prefs.darken_pages, prefs.engine_suggestions,
-        prefs.column_folded
-    )
-    .hash(&mut hasher);
-    hasher.finish()
+/// The Settings query hides widgets in place. Rebuilding the panel on each
+/// keystroke destroyed the entry while its changed callback was still running.
+fn filter_settings_list(list: &gtk::Box, query: &str) {
+    for section in list.children() {
+        if !section.is_visible() {
+            continue;
+        }
+        let children = child_widgets(&section);
+        let mut matches = false;
+        for child in children.iter() {
+            if widget_text(child).to_lowercase().contains(query) {
+                matches = true;
+            }
+        }
+        if !matches {
+            section.hide();
+        } else {
+            for child in children {
+                if !widget_text(&child).to_lowercase().contains(query) {
+                    child.hide();
+                }
+            }
+        }
+    }
+}
+
+fn child_widgets(widget: &gtk::Widget) -> Vec<gtk::Widget> {
+    widget
+        .clone()
+        .downcast::<gtk::Container>()
+        .map(|container| container.children())
+        .unwrap_or_default()
+}
+
+fn widget_text(widget: &gtk::Widget) -> String {
+    use gtk::prelude::*;
+    fn text(value: glib::GString) -> String {
+        value.as_str().to_owned()
+    }
+    if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+        return text(label.text());
+    }
+    if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+        return text(button.label().unwrap_or_default());
+    }
+    if let Ok(entry) = widget.clone().downcast::<gtk::Entry>() {
+        return text(entry.text());
+    }
+    if let Ok(combo) = widget.clone().downcast::<gtk::ComboBoxText>() {
+        return text(combo.active_text().unwrap_or_default());
+    }
+    if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+        let mut parts = Vec::new();
+        container.foreach(|child| parts.push(widget_text(child.upcast_ref::<gtk::Widget>())));
+        return parts.join(" ");
+    }
+    String::new()
 }
 
 impl Panels {
@@ -370,7 +406,7 @@ impl Panels {
             fitted_width: std::cell::Cell::new(0),
             settings_height: std::cell::RefCell::new(None),
             settings_holder,
-            settings_body: std::cell::RefCell::new(None),
+
         };
 
         close.connect_clicked(move |_| {
@@ -391,9 +427,34 @@ impl Panels {
         panels
     }
 
-    /// A filter typed into a panel: the panel is rebuilt with it applied, and
-    /// the field is given back what was typed so the caret stays where it was.
+    /// A filter typed into Bookmarks, History or Downloads rebuilds that list.
+    /// Settings hides rows in place: rebuilding its form destroys the entry
+    /// while its changed signal is still running.
     pub fn set_filter(&mut self, app: &AppRef, kind: PanelKind, text: &str) {
+        if kind == PanelKind::Settings {
+            let query = text.to_lowercase();
+            *self.filter.borrow_mut() = query.clone();
+            let list = self
+                .settings_holder
+                .children()
+                .first()
+                .and_then(|scroll| scroll.clone().downcast::<gtk::ScrolledWindow>().ok())
+                .and_then(|scroll| scroll.child())
+                .and_then(|child| child.downcast::<gtk::Box>().ok());
+            if let Some(list) = list {
+                if query.is_empty() {
+                    for section in list.children() {
+                        section.show_all();
+                        for child in child_widgets(&section) {
+                            child.show_all();
+                        }
+                    }
+                } else {
+                    filter_settings_list(&list, &query);
+                }
+            }
+            return;
+        }
         *self.filter.borrow_mut() = text.to_lowercase();
         let caret = text.chars().count() as i32;
         let entry = self.open_panel_with(app, kind);
@@ -423,23 +484,6 @@ impl Panels {
         if let Some(access) = self.card.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, kind.title());
         }
-        if kind == PanelKind::Settings {
-            // Build the large form once before showing the card. The first
-            // open must not stall the main loop while 20 controls appear.
-            let signature = settings_signature(&app.prefs.borrow());
-            let stale = self
-                .settings_body
-                .borrow()
-                .as_ref()
-                .map(|(stamp, _)| *stamp != signature)
-                .unwrap_or(true);
-            if stale {
-                self.build_settings(app);
-                let widgets = self.settings_holder.children();
-                *self.settings_body.borrow_mut() = Some((signature, widgets));
-                *self.settings_height.borrow_mut() = None;
-            }
-        }
         self.build_nav(app, &kind);
         let field = match kind {
             PanelKind::Bookmarks => self.build_bookmarks(app),
@@ -449,28 +493,10 @@ impl Panels {
                 self.build_extensions(app);
                 None
             }
-            PanelKind::Settings => {
-                let signature = settings_signature(&app.prefs.borrow());
-                let cached = self
-                    .settings_body
-                    .borrow()
-                    .as_ref()
-                    .filter(|(stamp, _)| *stamp == signature)
-                    .map(|(_, widgets)| widgets.clone());
-                if let Some(widgets) = cached {
-                    self.clear_body();
-                    for widget in widgets {
-                        self.settings_holder.add(&widget);
-                    }
-                    self.settings_holder.show_all();
-                } else {
-                    self.build_settings(app);
-                    let widgets = self.settings_holder.children();
-                    *self.settings_body.borrow_mut() = Some((signature, widgets));
-                    *self.settings_height.borrow_mut() = None;
-                }
-                None
-            }
+            PanelKind::Settings => self.build_settings(app).map(|field| {
+                field.set_text(&self.filter.borrow());
+                field
+            }),
             PanelKind::Shortcuts => {
                 self.build_shortcuts();
                 None
@@ -1656,11 +1682,14 @@ impl Panels {
         self.body.show_all();
     }
 
-    fn build_settings(&self, app: &AppRef) {
+    fn build_settings(&self, app: &AppRef) -> Option<gtk::Entry> {
         self.clear_body();
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
         let prefs = app.prefs.borrow().clone();
+        let query = self.filter.borrow().clone();
+        let field = self.filter_field("Search settings", |_| {});
+        list.add(&field);
 
         let appearance = self.section(app, crate::icons::Icon::Spark, "Appearance", "Light, dark, or matched to your desktop.");
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -1893,8 +1922,16 @@ impl Panels {
 
         // Settings is intentionally compact in a small window. Its scroller
         // owns the overflow; the capture clips the viewport to the card.
+        // A search narrows the form to matching sections and rows. Sections
+        // stay visible when a row inside them matches, so the result still
+        // reads as Settings rather than a bare list of controls.
+        if !query.is_empty() {
+            filter_settings_list(&list, &query);
+        }
+        self.settings_height.borrow_mut().take();
         self.settings_holder.add(&self.body_scroll(&list));
         self.settings_holder.show_all();
+        Some(field)
     }
 
     /// Every key the browser keeps, in one table. A browser that hides its

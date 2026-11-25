@@ -1796,9 +1796,11 @@ impl App {
         if has_error {
             let active = self.state.borrow().active;
             if let Some(error) = self.state.borrow().errors.get(&active) {
+                let (title, action) = error_copy(&error.reason);
+                self.ui.error_title.set_text(title);
                 self.ui.error_reason.set_text(&error.reason);
                 self.ui.error_address.set_text(&error.url);
-                self.ui.error_retry.set_label(error_action(&error.reason));
+                self.ui.error_retry.set_label(action);
             }
             self.ui.errorpage.show_all();
             self.ui.stack.set_visible_child_name("error");
@@ -4583,10 +4585,11 @@ impl App {
             self.render_rows();
             return;
         }
-        self.ui.error_title.set_text("This page didn't open");
+        let (title, action) = error_copy(reason);
+        self.ui.error_title.set_text(title);
         self.ui.error_reason.set_text(reason);
         self.ui.error_address.set_text(url);
-        self.ui.error_retry.set_label(error_action(reason));
+        self.ui.error_retry.set_label(action);
         // A child added to a stack after the window was shown still has to be
         // told it is visible before it can be the visible child.
         self.ui.errorpage.show_all();
@@ -5609,12 +5612,23 @@ fn error_is_client(reason: &str) -> bool {
     matches!(http_status(reason), Some(status) if (400..500).contains(&status))
 }
 
-/// What the one button on the error page should say.
-fn error_action(reason: &str) -> &'static str {
+/// The sentence and next step a failure puts in front of the reader. A 4xx
+/// is a missing address, not a temporary failure, so it must not invite a
+/// retry; DNS and connection failures get their own plain-language titles.
+fn error_copy(reason: &str) -> (&'static str, &'static str) {
+    let lower = reason.to_lowercase();
     if error_is_client(reason) {
-        "Change address"
+        ("There's nothing at this address", "Change address")
+    } else if lower.contains("dns")
+        || lower.contains("host")
+        || lower.contains("name")
+        || lower.contains("could not be found")
+    {
+        ("This address doesn't resolve", "Try again")
+    } else if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
+        ("This site can't be verified", "Try again")
     } else {
-        "Try again"
+        ("This page didn't open", "Try again")
     }
 }
 
@@ -5701,12 +5715,13 @@ mod tests {
         // The reason is the only place a 4xx announces itself, so this pins the
         // sentences src/web.rs writes: if they change shape, the button would
         // quietly go back to reloading a dead address.
-        assert_eq!(error_action("There is nothing at this address (404)."), "Change address");
-        assert_eq!(error_action("The site would not let this page be read (403)."), "Change address");
-        assert_eq!(error_action("The site broke while answering (503)."), "Try again");
-        assert_eq!(error_action("The site refused the connection."), "Try again");
-        assert_eq!(error_action("That address could not be found."), "Try again");
-        assert_eq!(error_action("The page stopped arriving. (There is no network to reach it on.)"), "Try again");
+        assert_eq!(error_copy("There is nothing at this address (404)."), ("There's nothing at this address", "Change address"));
+        assert_eq!(error_copy("The site would not let this page be read (403)."), ("There's nothing at this address", "Change address"));
+        assert_eq!(error_copy("The site broke while answering (503)."), ("This page didn't open", "Try again"));
+        assert_eq!(error_copy("The site refused the connection.").1, "Try again");
+        assert_eq!(error_copy("That address could not be found.").0, "This address doesn't resolve");
+        assert_eq!(error_copy("The certificate could not be verified.").0, "This site can't be verified");
+        assert_eq!(error_copy("The page stopped arriving. (There is no network to reach it on.)").1, "Try again");
     }
 
     #[test]
@@ -5716,7 +5731,7 @@ mod tests {
         // A port is a number too, so the test is not that it parses nothing but
         // that what it parses is never a client error: a 404's reload must not
         // come from an address that happens to have three digits in it.
-        assert_eq!(error_action("There is nothing at 127.0.0.1:8099 (going nowhere)."), "Try again");
+        assert_eq!(error_copy("There is nothing at 127.0.0.1:8099 (going nowhere).").1, "Try again");
     }
 }
 

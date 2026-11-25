@@ -122,6 +122,18 @@ fn run(line: &str) -> String {
             "text" => page_text(&app, &sender),
             "js" => page_eval(&app, &argument, &sender),
             "peekjs" => peek_eval(&app, &argument, &sender),
+            "pagefont" => {
+                let code = if argument.is_empty() {
+                    "getComputedStyle(document.body).fontSize".to_string()
+                } else {
+                    format!(
+                        "(() => {{ document.body.style.fontSize = '{}px'; return getComputedStyle(document.body).fontSize; }})()",
+                        argument.trim()
+                    )
+                };
+                page_eval(&app, &code, &sender);
+                return;
+            }
             _ => {
                 let answer = dispatch(&app, &command, &argument);
                 let _ = immediate.send(answer);

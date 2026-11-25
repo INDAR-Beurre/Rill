@@ -264,7 +264,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let pins = gtk::Grid::new();
     pins.set_column_spacing(3);
     pins.set_row_spacing(4);
-    pins.set_halign(gtk::Align::Start);
+    pins.set_column_homogeneous(true);
+    pins.set_halign(gtk::Align::Fill);
     pack(&pins_holder, &pins, false);
     pins_holder.set_no_show_all(true);
     pack(&body, &pins_holder, false);
@@ -403,8 +404,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let address_content = widget_box(gtk::Orientation::Horizontal, 10);
     let address_label = gtk::Label::new(Some("New tab"));
     class(&address_label, "address-label");
-    address_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-    address_label.set_max_width_chars(1);
+    address_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    address_label.set_max_width_chars(24);
     address_label.set_xalign(0.0);
     pack(&address_content, &address_label, true);
     let address_path = gtk::Label::new(Some(""));

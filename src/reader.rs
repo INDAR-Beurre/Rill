@@ -166,6 +166,11 @@ mod tests {
         assert!(script.contains("--search-reader-size"), "no size variable");
         assert!(script.contains("Smaller reading text"), "no smaller control");
         assert!(script.contains("Larger reading text"), "no larger control");
+        assert!(script.contains("|| 18"), "the default is not the middle step");
+        assert!(script.contains("Math.max(14"), "the small step is missing");
+        assert!(script.contains("Math.min(22"), "the large step is missing");
+        assert!(script.contains("['A-', -4"), "the controls do not step 14/18/22");
+        assert!(script.contains("['A+', 4"), "the controls do not step 14/18/22");
     }
 
     #[test]

@@ -424,8 +424,10 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pack(&address_content, &address_path, false);
     let address_hint = gtk::Label::new(Some("Ctrl L"));
     class(&address_hint, "address-hint");
+    address_hint.set_hexpand(true);
+    address_hint.set_halign(gtk::Align::End);
     address_hint.set_margin_start(10);
-    pack(&address_content, &address_hint, false);
+    pack(&address_content, &address_hint, true);
     address.add(&address_content);
     pack(&location, &site_info, false);
     pack(&location, &address, true);
@@ -489,7 +491,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     crate::ui::class(&errorpage, "error-content");
     errorpage.set_valign(gtk::Align::Center);
     errorpage.set_halign(gtk::Align::Center);
-    let error_glyph = icons::area(Icon::Globe, 48, palette.accent());
+    let error_glyph = icons::area(Icon::Shield, 48, palette.accent());
     class(&error_glyph, "error-glyph");
     error_glyph.set_halign(gtk::Align::Center);
     error_glyph.set_margin_bottom(16);
@@ -661,7 +663,7 @@ fn window_controls(palette: Palette) -> (gtk::EventBox, gtk::EventBox, gtk::Even
         // button role says what it is; the tooltip and the accessible name say
         // which.
         label_a11y(&e, tooltip, gtk::atk::Role::PushButton);
-        let mark = icons::area(kind, 12, palette.muted);
+        let mark = icons::area(kind, 15, palette.muted);
         mark.set_halign(gtk::Align::Center);
         mark.set_valign(gtk::Align::Center);
         e.add(&mark);

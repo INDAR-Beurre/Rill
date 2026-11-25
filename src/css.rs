@@ -320,7 +320,7 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .panel-note {{ padding: 14px; border-left: 2px solid {accent}; background-color: {card}; }}
 .panel .panel-about {{ font-family: {font}; font-size: {caption}px; color: {faint}; padding-top: 14px; border-top: 1px solid {divider}; }}
 .panel .panel-shortcut-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
-.panel .panel-shortcut-key {{ border: none; background-color: transparent; color: {accent}; padding: 0; font-family: {mono}; font-size: {caption}px; }}
+.panel .panel-shortcut-key {{ border: none; background-color: transparent; color: {ink}; padding: 1px 5px; border-radius: 4px; font-family: {mono}; font-size: {caption}px; text-decoration: none; }}
 .panel-empty-tip {{ padding-top: 12px; }}
 button.act {{ background-color: {card}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 8px 13px; min-height: 18px; }}
 button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
@@ -369,9 +369,9 @@ menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 .dlbar .welcome-status {{ color: {accent}; }}
 .dlbar .welcome-start, .dlbar .welcome-start label {{ color: {accentink}; }}
 
-scrollbar {{ background-color: transparent; }}
-scrollbar trough {{ background-color: transparent; }}
-scrollbar slider {{ background-color: {divider}; border-radius: 4px; min-width: 6px; min-height: 6px; margin: 2px; }}
+entry selection, label selection, textview selection {{ background-color: {tint}; color: {ink}; }}
+scrollbar, scrollbar trough {{ background-color: transparent; border: none; }}
+scrollbar slider {{ background-color: {divider}; border: none; border-radius: 4px; min-width: 6px; min-height: 6px; margin: 2px; }}
 scrollbar slider:hover {{ background-color: {faint}; }}
 button, .control, .row, .pin, .tile, .colstrip, menuitem, .sgrow {{ transition: background-color {micro}ms {ease}, color {micro}ms {ease}, border-color {micro}ms {ease}, opacity {micro}ms {ease}, box-shadow {micro}ms {ease}; }}
 .rowtitle, .row-subtitle, .favicon {{ transition: color {micro}ms {ease}, opacity {micro}ms {ease}; }}

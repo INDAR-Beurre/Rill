@@ -104,11 +104,11 @@ impl Palette {
     }
 
     pub fn surface(&self) -> Rgb {
-        hex(if self.is_dark() { 0x272B25 } else { 0xFFFFFF })
+        hex(if self.is_dark() { 0x262626 } else { 0xFFFFFF })
     }
 
     pub fn tint(&self) -> Rgb {
-        hex(if self.is_dark() { 0x3E3027 } else { 0xF4DDCF })
+        hex(if self.is_dark() { 0x303030 } else { 0xF4DDCF })
     }
 
     pub fn is_dark(&self) -> bool {

@@ -121,6 +121,7 @@ window.__searchReader = function (palette) {
   const rule = tokens.rule;
   const muted = tokens.muted;
   const ground = tokens.ground;
+  const paper = tokens.paper || rule;
 
   document.head.querySelectorAll('[data-search-reader]').forEach((n) => n.remove());
   const style = document.createElement('style');
@@ -150,7 +151,7 @@ window.__searchReader = function (palette) {
        body text, and it scales inside headings too) and gets a little padding
        so the tint does not touch the letters. Blocks keep the smaller 0.76em,
        their own line height and the 14px inset. */
-    #__search_reader code { font-family: "SF Mono", "DejaVu Sans Mono", monospace; font-size: 0.86em; background: ${rule}; border-radius: 4px; padding: 0.12em 0.36em; -webkit-box-decoration-break: clone; box-decoration-break: clone; overflow-wrap: anywhere; }
+    #__search_reader code { font-family: "SF Mono", "DejaVu Sans Mono", monospace; font-size: 0.86em; background: ${paper}; border-radius: 4px; padding: 0.12em 0.36em; -webkit-box-decoration-break: clone; box-decoration-break: clone; overflow-wrap: anywhere; }
     /* Code blocks wrap instead of scrolling sideways. Reading mode is for
        reading, and a horizontal scrollbar inside a 604px measure hides the
        end of each long line (Gemini R59 fix 4). pre-wrap keeps the block's
@@ -158,12 +159,12 @@ window.__searchReader = function (palette) {
        overflow. overflow-wrap: anywhere breaks a long token with no spaces,
        such as a URL or a hash. overflow-x: auto stays as a fallback for
        anything that still cannot break. */
-    #__search_reader pre { font: 0.76em/1.5 "SF Mono", "DejaVu Sans Mono", monospace; background: ${rule}; border-radius: 6px; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }
+    #__search_reader pre { font: 0.76em/1.5 "SF Mono", "DejaVu Sans Mono", monospace; background: ${paper}; border-radius: 6px; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }
     /* Code inside a block takes the block's size, not 0.86 of 0.76, and has no tint or padding of its own.
        It inherits the block's wrapping, so a long line inside <pre><code> wraps too. */
     #__search_reader pre code { font-size: 1em; background: none; padding: 0; border-radius: 0; white-space: inherit; overflow-wrap: inherit; }
     #__search_reader hr { border: none; border-top: 1px solid ${rule}; margin: 2.4em 0; }
-    #__search_reader .search-reader-origin { font-size: 0.68em; color: ${muted}; margin-bottom: 28px; }
+    #__search_reader .search-reader-origin { font-size: max(12px, 0.68em); color: ${muted}; margin-bottom: 28px; }
     /* The exit button's inline style starts with all: unset, which removes the
        browser's default focus ring, and nothing replaced it. A stylesheet rule
        marked !important beats an inline declaration without !important, so

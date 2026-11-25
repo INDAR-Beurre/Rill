@@ -1009,10 +1009,12 @@ fn set_enabled_at(base: &Path, id: &str, on: bool) {
     }
 }
 
+#[allow(dead_code)]
 pub fn remove(id: &str) {
     remove_at(&files::data_dir(), id);
 }
 
+#[allow(dead_code)]
 fn remove_at(base: &Path, id: &str) {
     let mut registry = registry_at(base);
     let root = root_at(base);

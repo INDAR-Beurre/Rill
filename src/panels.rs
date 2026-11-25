@@ -1537,7 +1537,7 @@ impl Panels {
                 move |app: &AppRef| {
                     crate::extensions::set_enabled(&id, !on);
                     app.rebuild_every_view();
-                    app.toggle_panel_switch(PanelKind::Extensions);
+                    app.open_panel(PanelKind::Extensions);
                 }
             });
             installed_section.add(&row);
@@ -1547,21 +1547,13 @@ impl Panels {
                 let row = self.link_row(app, &format!("{} options", entry.name), "Opens the page the extension ships", "Options", {
                     let url = format!("file://{page}");
                     move |app: &AppRef| {
-                        app.toggle_panel_switch(PanelKind::Extensions);
+                        app.open_panel(PanelKind::Extensions);
                         app.new_tab(Some(&url), false, false);
                     }
                 });
                 installed_section.add(&row);
             }
-            let remove = self.link_row(app, &format!("Remove {}", entry.name), &entry.source, "Remove", {
-                let id = entry.id.clone();
-                move |app: &AppRef| {
-                    crate::extensions::remove(&id);
-                    app.rebuild_every_view();
-                    app.toggle_panel_switch(PanelKind::Extensions);
-                }
-            });
-            installed_section.add(&remove);
+
         }
         list.add(&installed_section);
 

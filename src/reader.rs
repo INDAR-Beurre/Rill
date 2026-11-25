@@ -24,6 +24,7 @@ fn script_for(tokens: &Reader) -> String {
     let arguments = serde_json::json!({
         "palette": css, "ground": tokens.ground.hex(),
         "muted": tokens.muted.hex(), "rule": tokens.rule.hex(),
+        "paper": tokens.paper.hex(),
     }).to_string();
     // The source contains JavaScript braces; only the argument placeholder
     // belongs to Rust's formatter.

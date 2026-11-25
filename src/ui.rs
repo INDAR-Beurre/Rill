@@ -68,6 +68,7 @@ pub struct Ui {
     /// that can receive the click and is the child the stack holds as "error".
     pub error_holder: gtk::EventBox,
     pub errorpage: gtk::Box,
+    pub error_glyph: gtk::EventBox,
     pub error_title: gtk::Label,
     pub error_reason: gtk::Label,
     pub error_address: gtk::Label,
@@ -402,7 +403,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     location.set_valign(gtk::Align::Center);
     location.set_margin_start(8);
     location.set_margin_end(8);
-    let site_info = icons::button(Icon::Shield, 16, palette.accent(), "site-info");
+    let site_info = icons::button(Icon::Globe, 16, palette.muted, "site-info");
     label_a11y(&site_info, "Site information (Ctrl I)", gtk::atk::Role::PushButton);
     site_info.set_can_focus(true);
     let address = gtk::Button::new();
@@ -491,10 +492,11 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     crate::ui::class(&errorpage, "error-content");
     errorpage.set_valign(gtk::Align::Center);
     errorpage.set_halign(gtk::Align::Center);
-    let error_glyph = icons::area(Icon::Shield, 48, palette.accent());
+    let error_glyph = gtk::EventBox::new();
     class(&error_glyph, "error-glyph");
     error_glyph.set_halign(gtk::Align::Center);
     error_glyph.set_margin_bottom(16);
+    error_glyph.add(&icons::area(Icon::Warning, 48, palette.accent()));
     let error_title = gtk::Label::new(Some("This page didn't open"));
     crate::ui::class(&error_title, "blanktitle");
     error_title.set_width_chars(1);
@@ -642,6 +644,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         bmarks,
         error_holder,
         errorpage,
+        error_glyph,
         error_title,
         error_reason,
         error_address,

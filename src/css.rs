@@ -18,7 +18,7 @@ pub mod quiet {
     pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x898989));
     pub const DISABLED: (Rgb, Rgb) = (hex(0x74766A), hex(0x929292));
     pub const DANGER: (Rgb, Rgb) = (hex(0xAF392C), hex(0xF29C88));
-    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x898989));
+    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x6B6B6B));
 
     pub fn pick(pair: (Rgb, Rgb), dark: bool) -> Rgb {
         if dark { pair.1 } else { pair.0 }
@@ -317,10 +317,10 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .panel-list-row {{ padding: 10px 0; }}
 .panel .panel-list-row .panel-row-actions button.act {{ border-color: transparent; background-color: transparent; padding: 6px 8px; min-height: 18px; }}
 .panel .panel-list-row .panel-row-actions button.act:hover {{ background-color: {hover}; border-color: {divider}; }}
-.panel-note {{ padding: 14px; border-left: 2px solid {accent}; background-color: {card}; }}
+.panel-note {{ padding: 14px; border-left: 2px solid {accent}; background-color: {ground}; }}
 .panel .panel-about {{ font-family: {font}; font-size: {caption}px; color: {faint}; padding-top: 14px; border-top: 1px solid {divider}; }}
 .panel .panel-shortcut-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
-.panel .panel-shortcut-key {{ border: none; background-color: transparent; color: {ink}; padding: 1px 5px; border-radius: 4px; font-family: {mono}; font-size: {caption}px; text-decoration: none; }}
+.panel .panel-shortcut-key {{ border: none; box-shadow: none; background-color: transparent; color: {ink}; padding: 1px 5px; border-radius: 4px; font-family: {mono}; font-size: {caption}px; text-decoration: none; }}
 .panel-empty-tip {{ padding-top: 12px; }}
 button.act {{ background-color: {card}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 8px 13px; min-height: 18px; }}
 button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}

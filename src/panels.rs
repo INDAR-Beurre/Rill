@@ -176,7 +176,7 @@ pub struct Panels {
     fitted_width: std::cell::Cell<i32>,
     /// A permanent home for the Settings body. Other panels clear `body` on
     /// open; keeping Settings here avoids jumping the scroller while typing.
-    settings_holder: gtk::Box,
+    pub(crate) settings_holder: gtk::Box,
 }
 
 /// The Settings query hides widgets in place. Rebuilding the panel on each
@@ -1531,15 +1531,27 @@ impl Panels {
             } else {
                 format!("{}  ·  {}", entry.version, notes.join("; "))
             };
-            let row = self.link_row(app, &entry.name, &subtitle, if entry.enabled { "Off" } else { "On" }, {
-                let id = entry.id.clone();
-                let on = entry.enabled;
-                move |app: &AppRef| {
-                    crate::extensions::set_enabled(&id, !on);
+            let id = entry.id.clone();
+            let on = entry.enabled;
+            let row = self.row_with(
+                app,
+                &entry.name,
+                &subtitle,
+                if entry.enabled { "Disable" } else { "Enable" },
+                {
+                    let id = id.clone();
+                    move |app: &AppRef| {
+                        crate::extensions::set_enabled(&id, !on);
+                        app.rebuild_every_view();
+                        app.open_panel(PanelKind::Extensions);
+                    }
+                },
+                Some(("Remove", Box::new(move |app: &AppRef| {
+                    crate::extensions::remove(&id);
                     app.rebuild_every_view();
                     app.open_panel(PanelKind::Extensions);
-                }
-            });
+                }))),
+            );
             installed_section.add(&row);
             // An extension that ships an options page gets a way to open it.
             // It is a file on disk, so it opens as a page, which is what it is.

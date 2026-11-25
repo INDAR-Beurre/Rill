@@ -2276,6 +2276,25 @@ impl App {
         };
         let secure = url.starts_with("https://") && !failed;
         let protected = secure && web::shielded_for(self, &url);
+        // The glyph is a state, not decoration: a failed secure page must not
+        // wear the shield that means "blocking on a secure connection".
+        let site_glyph = if failed {
+            crate::icons::Icon::Warning
+        } else if protected {
+            crate::icons::Icon::Shield
+        } else if secure {
+            crate::icons::Icon::Lock
+        } else {
+            crate::icons::Icon::Globe
+        };
+        if let Some(child) = self.ui.site_info.child() {
+            self.ui.site_info.remove(&child);
+        }
+        self.ui.site_info.add(&crate::icons::area(
+            site_glyph,
+            16,
+            if protected { self.palette.borrow().accent() } else { self.palette.borrow().muted },
+        ));
         let context = self.ui.site_info.style_context();
         if protected { context.add_class("protected"); } else { context.remove_class("protected"); }
         self.ui.site_info.set_tooltip_text(Some(if url.is_empty() {
@@ -3552,12 +3571,12 @@ impl App {
     /// Dark pages only need a ground and readable ink. Painting every block
     /// individually turned paragraphs into zebra stripes and destroyed site
     /// buttons, so the sheet deliberately touches only the document root.
-    const DARK_PAGE_TONE: &str = "html { background-color: #121413 !important; color: #ededed !important; }\n\
+    const DARK_PAGE_TONE: &str = "html { background-color: #1A1A1A !important; color: #ededed !important; }\n\
         body { background-color: transparent !important; color: inherit !important; }\n\
         :where(p, li, td, th, h1, h2, h3, h4, h5, h6, b, strong, small, figcaption) {\n\
           background-color: transparent !important; color: inherit !important;\n\
         }\n\
-        a, a:visited { color: #9ecbff !important; }\n\
+        :where(a, a:visited):not([class]):not([style]) { color: #9ecbff !important; }\n\
         :root { color-scheme: dark; }";
 
     /// When dark pages are asked for, a site that paints white gets the
@@ -4596,6 +4615,19 @@ impl App {
         }
         let (title, action) = error_copy(reason);
         let security = reason.contains("certificate") || reason.contains("secure connection");
+        let glyph = if reason.contains("offline") || reason.contains("resolve") {
+            crate::icons::Icon::Offline
+        } else {
+            crate::icons::Icon::Warning
+        };
+        // The state mark is swapped as a whole: `icons::area` itself is the
+        // DrawingArea that the error box holds, so replace that child.
+        if let Some(child) = self.ui.error_glyph.child() {
+            self.ui.error_glyph.remove(&child);
+        }
+        let colour = self.palette.borrow().danger;
+        self.ui.error_glyph.add(&crate::icons::area(glyph, 48, colour));
+        self.ui.error_glyph.show_all();
         self.ui.error_title.set_text(title);
         self.ui.error_reason.set_text(reason);
         self.ui.error_address.set_text(url);

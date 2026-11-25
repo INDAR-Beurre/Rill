@@ -124,6 +124,7 @@ pub struct Reader {
     pub ink: Rgb,
     pub muted: Rgb,
     pub rule: Rgb,
+    pub paper: Rgb,
 }
 
 impl Palette {
@@ -138,6 +139,7 @@ impl Palette {
             ink: self.ink,
             muted: self.muted,
             rule: self.hairline,
+            paper: self.wash,
         }
     }
 }

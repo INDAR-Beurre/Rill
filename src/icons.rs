@@ -35,6 +35,8 @@ pub enum Icon {
     Orbit,
     /// A private tab: the mask, not a hat. Two eye holes in a rounded band.
     Mask,
+    Warning,
+    Offline,
 }
 
 /// Read the widget's live CSS foreground color, falling back to `fallback` if transparent.
@@ -310,6 +312,29 @@ fn draw(cr: &cairo::Context, kind: Icon, w: f64) {
         }
         Icon::Stop => {
             cr.rectangle(s * 0.28, s * 0.28, s * 0.44, s * 0.44);
+            let _ = cr.stroke();
+        }
+        Icon::Warning => {
+            cr.move_to(c, s * 0.16);
+            cr.line_to(s * 0.84, s * 0.80);
+            cr.line_to(s * 0.16, s * 0.80);
+            cr.close_path();
+            let _ = cr.stroke();
+            cr.move_to(c, s * 0.38);
+            cr.line_to(c, s * 0.58);
+            let _ = cr.stroke();
+            cr.arc(c, s * 0.68, s * 0.025, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+        Icon::Offline => {
+            cr.arc(c, s * 0.50, s * 0.34, std::f64::consts::PI * 0.72, std::f64::consts::PI * 2.28);
+            let _ = cr.stroke();
+            cr.arc(c, s * 0.50, s * 0.20, std::f64::consts::PI * 0.72, std::f64::consts::PI * 2.28);
+            let _ = cr.stroke();
+            cr.arc(c, s * 0.50, s * 0.07, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+            cr.move_to(s * 0.12, s * 0.88);
+            cr.line_to(s * 0.88, s * 0.12);
             let _ = cr.stroke();
         }
         Icon::Orbit => {

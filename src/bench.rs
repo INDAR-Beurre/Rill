@@ -314,7 +314,21 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         "panelscroll" => {
             let amount: f64 = argument.parse().unwrap_or(0.0);
             let panels = app.panels.borrow();
-            let adjustment = panels.scroll.vadjustment();
+            // Settings nests its rows in a second scroller inside `body`.
+            // Scrolling only the outer card left the scrolled evidence shot
+            // byte-identical to the unscrolled one, so pick the deepest
+            // scrollable child that is actually visible.
+            let scroll = if panels.open.as_ref() == Some(&crate::panels::PanelKind::Settings) {
+                panels
+                    .settings_holder
+                    .children()
+                    .first()
+                    .and_then(|holder| holder.clone().downcast::<gtk::ScrolledWindow>().ok())
+                    .unwrap_or_else(|| panels.scroll.clone())
+            } else {
+                panels.scroll.clone()
+            };
+            let adjustment = scroll.vadjustment();
             adjustment.set_value((adjustment.value() + amount).clamp(adjustment.lower(), adjustment.upper() - adjustment.page_size()));
             ok(&format!(",\"value\":{},\"upper\":{},\"page\":{}", adjustment.value(), adjustment.upper(), adjustment.page_size()))
         }

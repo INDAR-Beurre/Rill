@@ -368,6 +368,19 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             let ui = &app.ui;
             ok(&format!(",\"page\":[{},{}],\"holder\":[{},{}],\"stackSize\":[{},{}],\"reason\":\"{}\",\"address\":\"{}\",\"visible\":{},\"mapped\":{},\"stack\":\"{}\"", ui.errorpage.allocated_width(), ui.errorpage.allocated_height(), ui.error_holder.allocated_width(), ui.error_holder.allocated_height(), ui.stack.allocated_width(), ui.stack.allocated_height(), json_escape(&ui.error_reason.text()), json_escape(&ui.error_address.text()), ui.errorpage.get_visible(), ui.errorpage.is_mapped(), ui.stack.visible_child_name().unwrap_or_default()))
         }
+        "toolbar" => {
+            match argument.trim() {
+                "on" => app.set_toolbar_visible(true),
+                "off" => app.set_toolbar_visible(false),
+                "toggle" => app.toggle_toolbar(),
+                _ => {}
+            }
+            settle(app);
+            ok(&format!(
+                ",\"toolbarShown\":{}",
+                app.ui.toolbar.is_child_visible()
+            ))
+        }
         "fullscreen" => {
             // Proves page_fullscreen without a screenshot. The bench capture
             // draws the shell itself, so a shot can still show the column

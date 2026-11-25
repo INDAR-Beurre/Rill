@@ -959,6 +959,8 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     app.wire();
     app.apply_style();
     app.render();
+    // Apply a saved toolbar preference before the first mapped frame.
+    app.sync_toolbar();
     // A restored session comes back asleep, which is right for every tab but
     // the one in front: nothing made its view, so the window opened on the
     // blank page while the column highlighted a tab with an address. Waking
@@ -2907,6 +2909,25 @@ impl App {
             .is_some_and(|w| w.state().contains(gtk::gdk::WindowState::FULLSCREEN))
     }
 
+    /// Chrome is normally hidden: the page is the browser. Ctrl+L still opens
+    /// the command field, and the menu can reveal the controls again.
+    pub fn sync_toolbar(&self) {
+        let on = self.prefs.borrow().show_toolbar && !self.fullscreen.get();
+        self.ui.toolbar.set_child_visible(on);
+    }
+
+    pub fn set_toolbar_visible(&self, on: bool) {
+        self.prefs.borrow_mut().show_toolbar = on;
+        self.prefs.borrow().save();
+        self.sync_toolbar();
+        self.ui.window.queue_resize();
+    }
+
+    pub fn toggle_toolbar(&self) {
+        let on = !self.prefs.borrow().show_toolbar;
+        self.set_toolbar_visible(on);
+    }
+
     /// Full screen, and back. The window is the only thing that changes.
     pub fn toggle_fullscreen(&self) {
         // window_full follows window-state-event; the window itself may still
@@ -2994,8 +3015,8 @@ impl App {
     pub fn page_fullscreen(&self, on: bool) {
         self.apply_column(on);
         self.ui.bmarkbar.set_child_visible(!on);
-        self.ui.toolbar.set_child_visible(!on);
         self.fullscreen.set(on || self.window_full.get());
+        self.sync_toolbar();
         self.ui.window.queue_resize();
         let (w, h) = (self.ui.overlay.allocated_width(), self.ui.overlay.allocated_height());
         if w > 1 && h > 1 {
@@ -4503,6 +4524,11 @@ impl App {
             ("Extensions", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Extensions))),
             ("Settings", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Settings))),
             ("Shortcuts", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Shortcuts))),
+            (
+                if self.prefs.borrow().show_toolbar { "Hide Top Controls" } else { "Show Top Controls" },
+                true,
+                Box::new(|app: &App| app.toggle_toolbar()),
+            ),
             (blocker_label, is_http && !host.is_empty(), Box::new(|app: &App| app.toggle_blocker())),
         ];
         for (label, sensitive, action) in items {

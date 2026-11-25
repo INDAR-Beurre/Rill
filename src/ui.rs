@@ -260,8 +260,6 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pin_heading.set_xalign(0.0);
     pin_heading.set_margin_start(12);
     pin_heading.set_margin_bottom(8);
-    pin_heading.set_no_show_all(true);
-    pin_heading.hide();
     pack(&pins_holder, &pin_heading, false);
     let pins = gtk::Grid::new();
     pins.set_column_spacing(6);
@@ -270,8 +268,15 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pins.set_halign(gtk::Align::Fill);
     pins.set_hexpand(true);
     pack(&pins_holder, &pins, false);
-    pins_holder.set_no_show_all(true);
     pack(&body, &pins_holder, false);
+    // The divider is the quiet boundary between saved places and this
+    // session's open tabs.
+    let pin_divider = gtk::Separator::new(gtk::Orientation::Horizontal);
+    class(&pin_divider, "hairline");
+    pin_divider.set_margin_start(12);
+    pin_divider.set_margin_end(12);
+    pin_divider.set_margin_bottom(10);
+    pack(&body, &pin_divider, false);
 
     let section = widget_box(gtk::Orientation::Horizontal, 6);
     // Label at the 24px text edge, so it lines up with the row content below.
@@ -283,18 +288,14 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let tabs_heading = gtk::Label::new(Some("Open tabs"));
     class(&tabs_heading, "sidebar-section");
     tabs_heading.set_xalign(0.0);
-    tabs_heading.set_no_show_all(true);
-    tabs_heading.hide();
     pack(&section, &tabs_heading, true);
     let tab_count = gtk::Label::new(Some("01"));
     class(&tab_count, "sidebar-count");
-    tab_count.set_no_show_all(true);
-    tab_count.hide();
     pack(&section, &tab_count, false);
     pack(&body, &section, false);
 
     // The rows.
-    let rows = widget_box(gtk::Orientation::Vertical, 4);
+    let rows = widget_box(gtk::Orientation::Vertical, 0);
     rows.set_margin_start(12);
     rows.set_margin_end(12);
     let rows_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);

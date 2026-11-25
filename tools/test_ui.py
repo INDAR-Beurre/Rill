@@ -271,10 +271,15 @@ def exercise(client, base):
     shot(client, "folded-dark")
     client.must("uiclick fold")
     require(client.must("fullscreen")["sideWidth"] >= 200, "Toolbar can restore the tab column")
+    # Reference mode hides navigation by default. Leaving page fullscreen
+    # restores the person's prior choice, which here is hidden; the explicit
+    # toggle is the way back.
     client.must("fullscreen on")
     require(not client.must("fullscreen")["toolbarShown"], "Video fullscreen hides the redesigned toolbar")
     client.must("fullscreen off")
-    require(client.must("fullscreen")["toolbarShown"], "Leaving video fullscreen restores browser navigation")
+    require(not client.must("fullscreen")["toolbarShown"], "Leaving video fullscreen keeps the chosen quiet chrome")
+    require(client.must("toolbar on")["toolbarShown"], "Ctrl Shift S can reveal navigation")
+    client.must("toolbar off")
     client.must("resize 1180x1000")
     settled(client, 1180)
     for action in ["uiclick newtab", "key newtab"]:

@@ -1707,6 +1707,13 @@ impl Panels {
             buttons.pack_start(&self.appearance_option(app, look.clone(), look == prefs.appearance), true, true, 0);
         }
         appearance.add(&buttons);
+        appearance.add(&self.setting_switch(
+            app,
+            "Show the top controls",
+            "Keeps the address and navigation row on screen. Ctrl Shift S also toggles it.",
+            prefs.show_toolbar,
+            |app, on| app.set_toolbar_visible(on),
+        ));
         list.add(&appearance);
 
         let browsing = self.section(app, crate::icons::Icon::Shield, "Browsing", "Blocking, memory use, and the bookmarks bar.");

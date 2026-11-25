@@ -37,6 +37,11 @@ pub struct Prefs {
     #[serde(default)]
     pub column_folded: bool,
     pub side_width: f64,
+    /// The reference keeps the page clear of browser chrome until asked for
+    /// it. Ctrl+L still opens the command field, and the menu can reveal the
+    /// persistent controls again.
+    #[serde(default)]
+    pub show_toolbar: bool,
     pub roomy_tabs: bool,
     pub shield: bool,
     pub curtain: bool,
@@ -110,7 +115,8 @@ impl Default for Prefs {
             appearance: Look::System,
             sidebar: true,
             column_folded: false,
-            side_width: 264.0,
+            side_width: 240.0,
+            show_toolbar: false,
             roomy_tabs: false,
             shield: true,
             curtain: true,
@@ -159,9 +165,9 @@ impl Prefs {
 
     pub fn row_height(&self) -> i32 {
         if self.roomy_tabs {
-            60
-        } else {
             48
+        } else {
+            34
         }
     }
 
@@ -534,6 +540,7 @@ mod tests {
         let path = dir.join("prefs.json");
 
         let prefs = Prefs {
+            show_toolbar: false,
             appearance: Look::Dark,
             sidebar: false,
             column_folded: true,

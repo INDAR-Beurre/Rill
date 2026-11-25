@@ -33,6 +33,7 @@ pub enum Intent {
     Print,
     HideSomething,
     ShowHidden,
+    ToggleToolbar,
     Inspector,
     NextTab,
     PreviousTab,
@@ -148,6 +149,7 @@ impl Key {
                 ("k", false) => Intent::SwitchTab,
                 ("k", true) => Intent::DuplicateTab,
                 ("s", false) => Intent::FoldColumn,
+                ("s", true) => Intent::ToggleToolbar,
                 (digit, _) if digit.len() == 1 && digit.as_bytes()[0].is_ascii_digit() => {
                     match digit.parse::<usize>() {
                         Ok(number) => Intent::Jump(number),
@@ -215,6 +217,7 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("switchtab", "Ctrl K", "Switch to a tab by typing its name", "k", true, false, false),
     ("duplicatetab", "Ctrl Shift K", "Duplicate this tab", "k", true, true, false),
     ("foldcolumn", "Ctrl S", "Fold the tab column to a strip, or open it", "s", true, false, false),
+    ("toolbar", "Ctrl Shift S", "Show or hide the top controls", "s", true, true, false),
     ("back", "Alt Left", "Back", "left", false, false, true),
     ("forward", "Alt Right", "Forward", "right", false, false, true),
     ("reload", "Ctrl R", "Reload", "r", true, false, false),
@@ -346,6 +349,7 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::SwitchTab => app.open_tab_switcher(),
         Intent::DuplicateTab => app.duplicate_tab(),
         Intent::FoldColumn => app.toggle_fold(),
+        Intent::ToggleToolbar => app.toggle_toolbar(),
         Intent::SiteCard => crate::sitecard::open(app),
     }
 }
@@ -560,7 +564,8 @@ mod sheet_tests {
             | Intent::SwitchTab
             | Intent::DuplicateTab
             | Intent::SiteCard
-            | Intent::FoldColumn => true,
+            | Intent::FoldColumn
+            | Intent::ToggleToolbar => true,
         }
     }
 
@@ -615,6 +620,7 @@ mod sheet_tests {
             Intent::PanelFocus,
             Intent::SiteCard,
             Intent::FoldColumn,
+            Intent::ToggleToolbar,
         ];
         for wanted in all {
             if !must_be_advertised(wanted) {

@@ -112,12 +112,12 @@ decoration {{ box-shadow: none; border: none; margin: 0; padding: 0; background:
 .shell separator:hover, paned separator:hover {{ background-color: {accent}; }}
 /* The site card's group rules. The card lives on the page overlay, which may not sit inside .shell, so the shell rule above is not enough to reach it. Without a rule of its own the separator falls back to the theme's default look. Same divider colour, 1px tall, and no hover accent, because it is not a handle you can drag. */
 separator.sitecard-rule {{ background-color: {divider}; background-image: none; min-height: 1px; border: none; }}
-.side {{ background-color: {sidebg}; border-right: 1px solid {divider}; }}
+.side {{ background-color: {ground}; border-right: 1px solid {divider}; }}
 .colstrip {{ background-color: {ground}; border-right: 1px solid {divider}; }}
 .colstrip:hover {{ background-color: {tint}; border-right-color: {accent}; }}
 .topband, .toolbar {{ background-color: {ground}; }}
 .toolbar {{ border-bottom: 1px solid {divider}; }}
-.brand-mark {{ background-color: {accent}; color: {accentink}; border-radius: 8px; }}
+.brand-mark {{ background-color: {accent}; color: {accentink}; border-radius: 7px; }}
 .brand-word {{ font-family: {font}; font-size: {brand}px; font-weight: 600; letter-spacing: -0.4px; color: {ink}; }}
 .sidebar-section, .sidebar-count {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; }}
 .sidebar-count {{ letter-spacing: 0; }}
@@ -135,8 +135,8 @@ button.mark {{ background-color: transparent; border: none; padding: 4px; color:
 button.mark:hover {{ background-color: {hover}; color: {ink}; }}
 button.mark:focus {{ outline: 2px solid {accent}; outline-offset: 1px; }}
 button.mark:disabled {{ opacity: 0.35; }}
-button.create-tab {{ background-color: {tint}; color: {accent}; border-radius: 7px; padding: 10px 11px; min-height: 20px; }}
-button.create-tab label {{ color: {accent}; font-size: {small}px; font-weight: 600; }}
+button.create-tab {{ background-color: {card}; border: 1px solid {divider}; color: {ink}; border-radius: 7px; padding: 8px 11px; min-height: 20px; }}
+button.create-tab label {{ color: {ink}; font-size: {small}px; font-weight: 500; }}
 button.create-tab:hover {{ background-color: {hover}; }}
 button.create-tab .create-hint {{ font-family: {font}; font-size: {caption}px; font-weight: normal; color: {muted}; }}
 button.private-tab {{ min-width: 30px; border: 1px solid {divider}; border-radius: 7px; }}
@@ -384,7 +384,6 @@ button, .control, .row, .pin, .tile, .colstrip, menuitem, .sgrow {{ transition: 
         micro = crate::motion::dur::MICRO,
         ease = "cubic-bezier(0.215, 0.61, 0.355, 1)",
         ground = palette.ground.hex(),
-        sidebg = palette.side_bg().hex(),
         card = palette.card.hex(),
         surface = palette.surface().hex(),
         ink = palette.ink.hex(),

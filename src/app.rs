@@ -4699,11 +4699,16 @@ impl App {
     /// the browser's own widgets are drawn into a surface, and the page is
     /// taken from the engine's snapshot, then the two are laid together.
     pub fn capture(&self, path: &std::path::Path) -> Result<(), String> {
-        let width = self.ui.overlay.allocated_width().max(self.ui.shell.allocated_width());
-        let height = self.ui.overlay.allocated_height().max(self.ui.shell.allocated_height());
+        let width = self.ui.window.allocated_width();
+        let height = self.ui.window.allocated_height();
         if width < 2 || height < 2 {
             return Err("the window has not been laid out".into());
         }
+        // The overlay is allowed to keep its last smaller allocation after a
+        // window-manager resize. Pin every layer to the window's frame before
+        // compositing so the picture matches the real window, not the old one.
+        self.ui.overlay.size_allocate(&gtk::Allocation::new(0, 0, width, height));
+        self.layout_layers(width, height);
         // Let GTK finish any allocation it has queued: a window that has not
         // been on screen since its last resize is only drawn once this runs.
         // A window that has not been on screen yet has not allocated its

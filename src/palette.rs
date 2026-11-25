@@ -76,17 +76,17 @@ impl Palette {
         };
         let pick = |light, night| hex(if dark { night } else { light });
         Palette {
-            ground: pick(0xF1EFE9, 0x191B1A),
+            ground: pick(0xF7F7F5, 0x191B1A),
             ink: pick(0x272724, 0xEDEFE8),
             muted: pick(0x595A52, 0xB4BBAE),
             faint: pick(0x67685E, 0xA4AD9C),
-            hairline: pick(0xC1BDB2, 0x4A4F45),
-            wash: pick(0xE2E0D8, 0x3B4037),
-            hover: pick(0xECEAE3, 0x30362D),
-            side_hover: pick(0xE7E4DB, 0x34382F),
-            side_tile: pick(0xF8F6F0, 0x292E27),
-            side_pin_live: pick(0xD8D3C6, 0x3E4539),
-            card: pick(0xFCFBF8, 0x202321),
+            hairline: pick(0xC6C6C0, 0x4A4F45),
+            wash: pick(0xF0F0ED, 0x3B4037),
+            hover: pick(0xF3F3F0, 0x30362D),
+            side_hover: pick(0xF1F1EE, 0x34382F),
+            side_tile: pick(0xFAFAF8, 0x292E27),
+            side_pin_live: pick(0xDEDED8, 0x3E4539),
+            card: pick(0xFFFFFF, 0x202321),
             danger: pick(0xAF392C, 0xE07463),
         }
     }

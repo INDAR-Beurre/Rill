@@ -167,19 +167,18 @@ fn main() {
     if url.is_some() {
         prefs.skip_restore = true;
     }
+    // The window is mapped inside `start`; setting its size after that point
+    // lets the window manager keep its first allocation (820px on this host).
+    if let Some(size) = size {
+        let parts: Vec<i32> = size.split('x').filter_map(|part| part.trim().parse().ok()).collect();
+        if parts.len() == 2 {
+            prefs.window_size = (parts[0], parts[1]);
+        }
+    }
 
     // `start` installs the handle itself, and that install is what arms the
     // memory tick, so doing it again here armed a second one.
     let app = app::start(prefs);
-
-    // A default size only applies before the window is mapped. Setting it after
-    // show_all()/present() lets Wayland keep its first tiled allocation.
-    if let Some(size) = size {
-        let parts: Vec<i32> = size.split('x').filter_map(|part| part.trim().parse().ok()).collect();
-        if parts.len() == 2 {
-            app.ui.window.set_default_size(parts[0], parts[1]);
-        }
-    }
 
     if bench::enabled() {
         bench::watch_loop();

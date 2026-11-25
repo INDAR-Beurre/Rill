@@ -187,7 +187,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
 
     let top = gtk::EventBox::new();
     crate::ui::class(&top, "topband");
-    top.set_size_request(-1, 72);
+    top.set_size_request(-1, 34);
     top.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
     let band = widget_box(gtk::Orientation::Horizontal, 10);
     // Brand at the 24px text edge, the same edge as the section labels and
@@ -215,7 +215,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     // the pin tiles and the row fills. At 16px it sat between the two guides.
     create.set_margin_start(12);
     create.set_margin_end(12);
-    create.set_margin_bottom(18);
+    create.set_margin_bottom(12);
     let newtab = gtk::Button::new();
     class(&newtab, "create-tab");
     newtab.set_hexpand(true);
@@ -229,16 +229,15 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let create_hint = gtk::Label::new(Some("Ctrl T"));
     class(&create_hint, "create-hint");
     create_hint.set_no_show_all(true);
-    side.connect_size_allocate({
-        let hint = create_hint.clone();
-        move |_, allocation| hint.set_visible(allocation.width() >= 240)
-    });
+    create_hint.hide();
     pack(&create_content, &create_hint, false);
     newtab.add(&create_content);
     label_a11y(&newtab, "New tab (Ctrl T)", gtk::atk::Role::PushButton);
     let private_tab = icons::button(Icon::Mask, 17, palette.muted, "private-tab");
     private_tab.set_can_focus(true);
     label_a11y(&private_tab, "New private tab (Ctrl Shift N)", gtk::atk::Role::PushButton);
+    private_tab.set_no_show_all(true);
+    private_tab.hide();
     pack(&create, &newtab, true);
     pack(&create, &private_tab, false);
     pack(&body, &create, false);
@@ -260,12 +259,14 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pin_heading.set_xalign(0.0);
     pin_heading.set_margin_start(12);
     pin_heading.set_margin_bottom(8);
+    pin_heading.set_no_show_all(true);
+    pin_heading.hide();
     pack(&pins_holder, &pin_heading, false);
     let pins = gtk::Grid::new();
     pins.set_column_spacing(3);
     pins.set_row_spacing(4);
-    pins.set_column_homogeneous(true);
-    pins.set_halign(gtk::Align::Fill);
+    pins.set_column_homogeneous(false);
+    pins.set_halign(gtk::Align::Start);
     pack(&pins_holder, &pins, false);
     pins_holder.set_no_show_all(true);
     pack(&body, &pins_holder, false);
@@ -280,9 +281,13 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let tabs_heading = gtk::Label::new(Some("Open tabs"));
     class(&tabs_heading, "sidebar-section");
     tabs_heading.set_xalign(0.0);
+    tabs_heading.set_no_show_all(true);
+    tabs_heading.hide();
     pack(&section, &tabs_heading, true);
     let tab_count = gtk::Label::new(Some("01"));
     class(&tab_count, "sidebar-count");
+    tab_count.set_no_show_all(true);
+    tab_count.hide();
     pack(&section, &tab_count, false);
     pack(&body, &section, false);
 
@@ -300,25 +305,27 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     rows_scroll.add(&rows);
     pack(&body, &rows_scroll, true);
 
-    let footer = widget_box(gtk::Orientation::Vertical, 4);
+    let footer = widget_box(gtk::Orientation::Horizontal, 4);
     class(&footer, "sidebar-footer");
     footer.set_margin_start(12);
     footer.set_margin_end(12);
     footer.set_margin_bottom(14);
-    let library = sidebar_action(Icon::Book, "Library", "Bookmarks (Ctrl Shift B)", palette);
-    pack(&footer, &library, false);
-    let utilities = widget_box(gtk::Orientation::Horizontal, 4);
+    let library = icons::button(Icon::Book, 17, palette.muted, "sidebar-tool");
+    label_a11y(&library, "Library (Ctrl Shift B)", gtk::atk::Role::PushButton);
     let history = icons::button(Icon::Clock, 17, palette.muted, "sidebar-tool");
     label_a11y(&history, "History (Ctrl H)", gtk::atk::Role::PushButton);
     let downloads = icons::button(Icon::Download, 17, palette.muted, "sidebar-tool");
     label_a11y(&downloads, "Downloads (Ctrl J)", gtk::atk::Role::PushButton);
-    let menu = sidebar_action(Icon::Settings, "Settings", "Settings and more", palette);
+    let menu = icons::button(Icon::Settings, 17, palette.muted, "sidebar-tool");
+    label_a11y(&menu, "Settings and more", gtk::atk::Role::PushButton);
+    library.set_can_focus(true);
     history.set_can_focus(true);
     downloads.set_can_focus(true);
-    pack(&utilities, &menu, true);
-    pack(&utilities, &history, false);
-    pack(&utilities, &downloads, false);
-    pack(&footer, &utilities, false);
+    menu.set_can_focus(true);
+    pack(&footer, &library, false);
+    pack(&footer, &history, false);
+    pack(&footer, &downloads, false);
+    pack(&footer, &menu, false);
     pack(&body, &footer, false);
 
     // The column is the paned's first child itself, with no wrapper around
@@ -637,25 +644,6 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         error_retry,
         error_back,
     }
-}
-
-/// Three window controls, drawn as marks on a wash instead of borrowed from
-/// another operating system: a desktop that is not a Mac should not wear its
-/// buttons. They sit on the left because the column is there, and they read
-/// the way the rest of this desktop redraws them.
-fn sidebar_action(kind: Icon, text: &str, tooltip: &str, palette: Palette) -> gtk::Button {
-    let button = gtk::Button::new();
-    class(&button, "sidebar-action");
-    label_a11y(&button, tooltip, gtk::atk::Role::PushButton);
-    let content = widget_box(gtk::Orientation::Horizontal, 10);
-    let glyph = icons::area(kind, 17, palette.muted);
-    glyph.set_valign(gtk::Align::Center);
-    pack(&content, &glyph, false);
-    let label = gtk::Label::new(Some(text));
-    label.set_xalign(0.0);
-    pack(&content, &label, true);
-    button.add(&content);
-    button
 }
 
 fn window_controls(palette: Palette) -> (gtk::EventBox, gtk::EventBox, gtk::EventBox) {

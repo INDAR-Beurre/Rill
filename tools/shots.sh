@@ -463,7 +463,7 @@ try:
         if kind == "settings":
             # A filter is only a feature when a typed query narrows the form;
             # the field itself is not enough evidence.
-            bench.must("filter theme")
+            bench.must("filter dark")
             time.sleep(0.5)
             shot("05-panel-settings-filtered", "Settings filtered to matching rows")
             bench.must("filter ")

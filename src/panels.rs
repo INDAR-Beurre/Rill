@@ -438,9 +438,8 @@ impl Panels {
                 .settings_holder
                 .children()
                 .first()
-                .and_then(|scroll| scroll.clone().downcast::<gtk::ScrolledWindow>().ok())
-                .and_then(|scroll| scroll.child())
-                .and_then(|child| child.downcast::<gtk::Box>().ok());
+                .cloned()
+                .and_then(|list| list.downcast::<gtk::Box>().ok());
             if let Some(list) = list {
                 if query.is_empty() {
                     for section in list.children() {
@@ -450,6 +449,9 @@ impl Panels {
                         }
                     }
                 } else {
+                    // `show_all()` above restores rows hidden by an earlier
+                    // query before the new one is applied.
+                    list.show_all();
                     filter_settings_list(&list, &query);
                 }
             }
@@ -1688,7 +1690,14 @@ impl Panels {
         crate::ui::class(&list, "panel-list");
         let prefs = app.prefs.borrow().clone();
         let query = self.filter.borrow().clone();
-        let field = self.filter_field("Search settings", |_| {});
+        let app_weak = std::rc::Rc::<crate::app::App>::downgrade(app);
+        let field = self.filter_field("Search settings", move |text| {
+            if let Some(app) = app_weak.upgrade() {
+                app.filter_panel(crate::panels::PanelKind::Settings, text);
+            }
+        });
+        field.set_text(&query);
+        field.set_position(query.chars().count() as i32);
         list.add(&field);
 
         let appearance = self.section(app, crate::icons::Icon::Spark, "Appearance", "Light, dark, or matched to your desktop.");

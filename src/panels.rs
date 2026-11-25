@@ -184,26 +184,29 @@ pub struct Panels {
 
 /// The Settings query hides widgets in place. Rebuilding the panel on each
 /// keystroke destroyed the entry while its changed callback was still running.
+/// Settings owns a search entry as the first child of its list. Filtering
+/// must leave that entry visible and keep a section header with any row that
+/// matches, or the result reads as an orphaned subtitle.
 fn filter_settings_list(list: &gtk::Box, query: &str) {
-    for section in list.children() {
-        if !section.is_visible() {
+    let mut sections = list.children().into_iter();
+    sections.next(); // the search field, never filtered
+    for section in sections {
+        section.show_all();
+        let children = child_widgets(&section);
+        let found = children
+            .iter()
+            .any(|child| widget_text(child).to_lowercase().contains(query));
+        if !found {
+            section.hide();
             continue;
         }
-        let children = child_widgets(&section);
-        let mut matches = false;
-        for child in children.iter() {
-            if widget_text(child).to_lowercase().contains(query) {
-                matches = true;
-            }
+        let mut iter = children.into_iter();
+        if let Some(header) = iter.next() {
+            header.show();
         }
-        if !matches {
-            section.hide();
-        } else {
-            for child in children {
-                if !widget_text(&child).to_lowercase().contains(query) {
-                    child.hide();
-                }
-            }
+        for child in iter {
+            let visible = widget_text(&child).to_lowercase().contains(query);
+            child.set_visible(visible);
         }
     }
 }
@@ -441,6 +444,14 @@ impl Panels {
                 .cloned()
                 .and_then(|list| list.downcast::<gtk::Box>().ok());
             if let Some(list) = list {
+                let entry = list.children().first().cloned().and_then(|child| child.downcast::<gtk::Entry>().ok());
+                if let Some(entry) = entry {
+                    if entry.text() != text {
+                        entry.set_text(text);
+                    }
+                    entry.set_position(text.chars().count() as i32);
+                    entry.grab_focus();
+                }
                 if query.is_empty() {
                     for section in list.children() {
                         section.show_all();

@@ -2133,21 +2133,22 @@ impl App {
         // is the one being asked: the flag comes off first.
         self.ui.pins_holder.set_no_show_all(false);
         self.ui.pins_holder.show_all();
-        // As many pins in a row as the column can hold: six 35px tiles and
-        // their spacing run past the 210px a 232px column leaves, so the sixth
-        // used to be clipped at the edge.
+        // Four pins stay in one row at the reference width. `pins` only
+        // allocates as wide as its children, so the holder/side measurement
+        // is the column width that actually decides wrapping.
         let across = {
-            // The column's real width, not the preference: the divider can be
-            // dragged, and a wrap computed from a stale number clipped the
-            // last tile in every row after the first drag.
             let usable = match usable_override {
                 Some(w) if w > 40 => w,
                 _ => {
-                    let measured = self.ui.pins.allocated_width();
-                    if measured > 40 { measured } else { (self.prefs.borrow().side_width as i32) - 20 }
+                    let measured = self
+                        .ui
+                        .pins_holder
+                        .allocated_width()
+                        .max(self.ui.side.allocated_width());
+                    if measured > 40 { measured } else { self.prefs.borrow().side_width as i32 - 20 }
                 }
             };
-            pin_columns(usable)
+            ((usable / 34) as usize).clamp(1, 6).max(1)
         };
         self.last_pin_across.set(across);
         // Same pins, same order, same words and same column count: the tiles
@@ -2187,6 +2188,7 @@ impl App {
         self.pin_signature.replace(Some(signature));
         for (index, (id, letter, title, live)) in pinned.iter().enumerate() {
             let tile = ui::pin_tile(letter, *live, *self.palette.borrow());
+            tile.event.set_size_request(32, 32);
             // A page that offers a mark shows it and drops the letter; a page
             // with neither keeps the letter, which is at least its own.
             if let Some(surface) = self.icons.borrow().get(id).cloned() {
@@ -2263,7 +2265,16 @@ impl App {
         // list. An http page is not protected in transit, so its shield stays
         // muted. The blocker still runs on it: web.rs builds content managers
         // from shielded_for directly, and that does not change here.
-        let secure = url.starts_with("https://");
+        // An https URL can still be an error page. Never paint the accent
+        // shield on an expired or otherwise rejected certificate.
+        let failed = {
+            let state = self.state.borrow();
+            state
+                .active_tab()
+                .map(|tab| tab.failed)
+                .unwrap_or(false)
+        };
+        let secure = url.starts_with("https://") && !failed;
         let protected = secure && web::shielded_for(self, &url);
         let context = self.ui.site_info.style_context();
         if protected { context.add_class("protected"); } else { context.remove_class("protected"); }
@@ -3538,22 +3549,12 @@ impl App {
         }
     }
 
-    /// Every colour a dark page forces. Kept as one string so a test can
-    /// check that inline-styled descendants are covered too: without `b`,
-    /// `strong` and classed links, round 77's dark office page still had
-    /// near-black words on a near-black ground.
-    const DARK_PAGE_TONE: &str = "html { background: #0b0b0b !important; color: #ededed !important; }\n\
-        body { background-color: transparent !important; color: #ededed !important; }\n\
-        /* Forcing ink without forcing a site's pale card backgrounds leaves\n\
-           near-white text on a near-white banner. Paint every painted surface\n\
-           in the same charcoal as the page, then restore the readable ink. */\n\
-        div, section, article, aside, header, footer, main, nav, pre, code, blockquote,\n\
-        table, td, th, figure, figcaption, form, fieldset, details, summary, dialog,\n\
-        p, span, li, dt, dd, h1, h2, h3, h4, h5, h6, label, time, font, abbr, q, cite,\n\
-        b, strong, em, small { background-color: #151715 !important; color: #ededed !important; }\n\
-        body, html { background-color: #0b0b0b !important; color: #ededed !important; }\n\
-        a, a:visited { color: #9ecbff !important; background-color: transparent !important; }\n\
-        a[class] { color: #ededed !important; }\n\
+    /// Dark pages only need a ground and readable ink. Painting every block
+    /// individually turned paragraphs into zebra stripes and destroyed site
+    /// buttons, so the sheet deliberately touches only the document root.
+    const DARK_PAGE_TONE: &str = "html { background-color: #121413 !important; color: #ededed !important; }\n\
+        body { background-color: transparent !important; color: inherit !important; }\n\
+        a, a:visited { color: #9ecbff !important; }\n\
         :root { color-scheme: dark; }";
 
     /// When dark pages are asked for, a site that paints white gets the
@@ -5877,11 +5878,19 @@ mod state_logic_tests {
     }
 
     #[test]
-    fn dark_page_tone_covers_styled_descendants() {
+    fn dark_page_tone_paints_the_document_not_each_block() {
         let sheet = App::DARK_PAGE_TONE;
-        for selector in ["b,", "strong,", "a[class]", "#ededed !important", "color-scheme: dark"] {
+        for selector in [
+            "html { background-color",
+            "body { background-color: transparent",
+            "#ededed !important",
+            "color-scheme: dark",
+        ] {
             assert!(sheet.contains(selector), "the dark sheet is missing {selector}");
         }
+        // Painting every block individually produced zebra stripes on the
+        // office page and blanked its black CTA button.
+        assert!(!sheet.contains("div, section"), "dark sheet repaints descendants");
     }
 
     #[test]

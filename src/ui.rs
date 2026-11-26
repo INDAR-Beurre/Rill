@@ -967,6 +967,10 @@ pub fn tab_row(
     subtitle.set_xalign(0.0);
     subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
     subtitle.set_max_width_chars(1);
+    // Compact rows are one line. A second line inside a 34px row collided
+    // with the next tab; only the roomy preference shows the URL.
+    subtitle.set_no_show_all(true);
+    subtitle.set_visible(row_height >= 44);
     pack(&text, &subtitle, false);
     pack(&hbox, &text, true);
 

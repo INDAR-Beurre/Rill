@@ -2913,7 +2913,11 @@ impl App {
     /// the command field, and the menu can reveal the controls again.
     pub fn sync_toolbar(&self) {
         let on = self.prefs.borrow().show_toolbar && !self.fullscreen.get();
-        self.ui.toolbar.set_child_visible(on);
+        // `set_child_visible` hid the marks but left the 72px EventBox in
+        // the layout, producing a dead band above every page. Hide the
+        // widget itself and opt it out of the window's show_all().
+        self.ui.toolbar.set_no_show_all(true);
+        self.ui.toolbar.set_visible(on);
     }
 
     pub fn set_toolbar_visible(&self, on: bool) {
@@ -3596,6 +3600,13 @@ impl App {
         body { background-color: transparent !important; color: inherit !important; }\n\
         :where(p, li, td, th, h1, h2, h3, h4, h5, h6, b, strong, small, figcaption) {\n\
           background-color: transparent !important; color: inherit !important;\n\
+        }\n\
+        :where(div, section, aside, header, footer, article)[style*='background'] {\n\
+          background-color: #242424 !important; color: #ededed !important;\n\
+          border-color: #4a4a4a !important;\n\
+        }\n\
+        :where(div, section, aside, header, footer, article)[style*='background'] * {\n\
+          color: inherit !important;\n\
         }\n\
         :where(a, a:visited):not([class]):not([style]) { color: #9ecbff !important; }\n\
         :root { color-scheme: dark; }";
@@ -5968,7 +5979,8 @@ mod state_logic_tests {
         }
         // Painting every block individually produced zebra stripes on the
         // office page and blanked its black CTA button.
-        assert!(!sheet.contains("div, section"), "dark sheet repaints descendants");
+        assert!(!sheet.contains("div, section {"), "dark sheet repaints every descendant block");
+        assert!(sheet.contains("[style*='background']"), "dark sheet leaves light inline blocks white");
     }
 
     #[test]

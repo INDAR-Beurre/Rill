@@ -128,7 +128,12 @@ fn main() {
         note!("search: could not open a display");
         std::process::exit(1);
     }
-    if std::env::var_os("SEARCH_BENCH").is_some() {
+    // Bench runs are deterministic by default: motion completes immediately
+    // so pixel gates read a settled frame. A motion probe opts back in with
+    // SEARCH_BENCH_ANIMATE=1 and still gets the scriptable bench socket.
+    if std::env::var_os("SEARCH_BENCH").is_some()
+        && std::env::var_os("SEARCH_BENCH_ANIMATE").is_none()
+    {
         if let Some(settings) = gtk::Settings::default() {
             settings.set_gtk_enable_animations(false);
         }

@@ -368,6 +368,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             let ui = &app.ui;
             ok(&format!(",\"page\":[{},{}],\"holder\":[{},{}],\"stackSize\":[{},{}],\"reason\":\"{}\",\"address\":\"{}\",\"visible\":{},\"mapped\":{},\"stack\":\"{}\"", ui.errorpage.allocated_width(), ui.errorpage.allocated_height(), ui.error_holder.allocated_width(), ui.error_holder.allocated_height(), ui.stack.allocated_width(), ui.stack.allocated_height(), json_escape(&ui.error_reason.text()), json_escape(&ui.error_address.text()), ui.errorpage.get_visible(), ui.errorpage.is_mapped(), ui.stack.visible_child_name().unwrap_or_default()))
         }
+
         "toolbar" => {
             match argument.trim() {
                 "on" => app.set_toolbar_visible(true),
@@ -376,10 +377,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 _ => {}
             }
             settle(app);
-            ok(&format!(
-                ",\"toolbarShown\":{}",
-                app.ui.toolbar.is_child_visible()
-            ))
+            ok(&format!(",\"toolbarShown\":{}", app.ui.toolbar.is_visible()))
         }
         "fullscreen" => {
             // Proves page_fullscreen without a screenshot. The bench capture
@@ -400,7 +398,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 app.ui.side.allocated_width(),
                 app.window_is_fullscreen(),
                 app.fullscreen.get(),
-                app.ui.toolbar.is_child_visible()
+                app.ui.toolbar.is_visible()
             ))
         }
         "debug" => debug(app),
@@ -910,7 +908,7 @@ fn chrome(app: &AppRef) -> String {
         "address": app.ui.address_label.text().as_str(),
         "tabCount": app.ui.tab_count.text().as_str(),
         "dark": app.dark(),
-        "toolbarShown": app.ui.toolbar.is_child_visible(),
+        "toolbarShown": app.ui.toolbar.is_visible(),
         "bookmarksShown": app.ui.bmarkbar.is_visible() && app.ui.bmarkbar.is_child_visible() && app.ui.bmarkbar.is_mapped(),
         "rowCount": app.ui.rows.children().len(),
         "startFocused": app.ui.window.focused_widget().as_ref() == Some(app.ui.start.search.upcast_ref()),

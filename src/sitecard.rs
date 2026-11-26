@@ -312,7 +312,13 @@ fn anchor_point(app: &crate::app::App, card: &gtk::Box) -> Option<(i32, i32)> {
     let button = &app.ui.site_info;
     let overlay = &app.ui.overlay;
     if !button.is_mapped() {
-        return None;
+        // The toolbar can be hidden by preference or fullscreen. A site card
+        // still needs a stable anchor, so use the page column's top-right.
+        let card_width = card.allocated_width().max(MIN_CARD_WIDTH);
+        let left = (overlay.allocated_width() - card_width - crate::find::PAGE_INSET)
+            .max(crate::find::PAGE_INSET);
+        let top = crate::find::PAGE_INSET + GAP;
+        return Some((left, top));
     }
     let (x, y) = button.translate_coordinates(overlay, 0, button.allocated_height())?;
     // Clamp with the width the card will actually be drawn at, not an

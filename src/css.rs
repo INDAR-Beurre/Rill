@@ -381,7 +381,18 @@ button, .control, .row, .pin, .tile, .colstrip, menuitem, .sgrow {{ transition: 
         // CSS transitions share the MICRO role and the cubic-out curve that
         // motion::ease_out_cubic uses, so hover states and code-driven fades
         // finish together.
-        micro = crate::motion::dur::MICRO,
+        // A reduced-motion desktop gets the final state immediately. This is
+        // the CSS half of motion::enabled(), which gates procedural tweens.
+        micro = {
+        // CSS generation also runs in unit tests without a display. Only ask
+        // the motion engine for GTK's preference when a display exists.
+        let animated = if gtk::is_initialized() {
+            crate::motion::enabled()
+        } else {
+            true
+        };
+        if animated { crate::motion::dur::MICRO } else { 0 }
+    },
         ease = "cubic-bezier(0.215, 0.61, 0.355, 1)",
         ground = palette.ground.hex(),
         card = palette.card.hex(),

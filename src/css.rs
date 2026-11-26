@@ -7,18 +7,18 @@ pub mod quiet {
         Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
     }
 
-    pub const PIN_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xD0D0D0));
+    pub const PIN_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xD3CEC5));
     pub const PIN_LIVE_FG: (Rgb, Rgb) = (hex(0x24261F), hex(0xFFFFFF));
-    pub const ROW_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xC7C7C7));
-    pub const TILE_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xB5B5B5));
-    pub const MUTED: (Rgb, Rgb) = (hex(0x595A52), hex(0xB5B5B5));
-    pub const FAINT: (Rgb, Rgb) = (hex(0x62635A), hex(0xA5A5A5));
+    pub const ROW_FG: (Rgb, Rgb) = (hex(0x4B4C45), hex(0xCBC5BC));
+    pub const TILE_FG: (Rgb, Rgb) = (hex(0x595A52), hex(0xBAB4AA));
+    pub const MUTED: (Rgb, Rgb) = (hex(0x595A52), hex(0xBAB4AA));
+    pub const FAINT: (Rgb, Rgb) = (hex(0x62635A), hex(0xA8A298));
     pub const EMPTY_FG: (Rgb, Rgb) = MUTED;
     pub const BLANK_HINT: (Rgb, Rgb) = MUTED;
-    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x707070));
-    pub const DISABLED: (Rgb, Rgb) = (hex(0x74766A), hex(0x929292));
+    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x79746C));
+    pub const DISABLED: (Rgb, Rgb) = (hex(0x74766A), hex(0x969087));
     pub const DANGER: (Rgb, Rgb) = (hex(0xAF392C), hex(0xF29C88));
-    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x6B6B6B));
+    pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x6E6962));
 
     pub fn pick(pair: (Rgb, Rgb), dark: bool) -> Rgb {
         if dark { pair.1 } else { pair.0 }
@@ -178,9 +178,9 @@ button.close:hover {{ background-color: {wash}; color: {ink}; }}
 .tileletter {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {tilefg}; }}
 .pin {{ border: 1px solid transparent; border-radius: 7px; background-color: {tilebg}; }}
 .pin:hover {{ background-color: {sidehover}; }}
-.pin.live {{ background-color: {pinlive}; box-shadow: none; }}
+.pin.live {{ background-color: {pinlive}; border-color: {divider}; box-shadow: inset 0 -2px 0 {accent}; }}
 .pinletter {{ font-family: {font}; font-size: {small}px; font-weight: 600; letter-spacing: -0.02em; color: {pinfg}; }}
-.pin.live .pinletter {{ color: {pinlivefg}; font-weight: 600; }}
+.pin.live .pinletter {{ color: {pinlivefg}; font-weight: 700; }}
 row, flowbox, flowboxchild {{ background-color: transparent; padding: 0; }}
 viewport {{ background-color: transparent; }}
 .card, .viewport, .blank, .error-page {{ background-color: {card}; }}
@@ -255,7 +255,7 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .suggest {{ background-color: {surface}; padding: 8px; }}
 .suggest .sgrow {{ border-radius: 6px; min-height: 50px; color: {muted}; }}
 .suggest .sgrow:hover {{ background-color: {hover}; }}
-.suggest .sgrow.picked {{ background-color: {wash}; color: {ink}; box-shadow: inset 3px 0 0 {accent}, inset 0 0 0 1px {accent}; }}
+.suggest .sgrow.picked {{ background-color: {wash}; color: {ink}; box-shadow: inset 3px 0 0 {accent}; }}
 .sghead {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; }}
 .sgtitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
 .sgurl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
@@ -289,7 +289,11 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .setting {{ font-family: {font}; font-size: {body}px; font-weight: 500; color: {ink}; }}
 .settingdesc {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .security-warning {{ color: {dangerink}; font-weight: 600; }}
+.sitecard-status {{ background-color: {ground}; border: 1px solid {divider}; border-radius: 6px; padding: 8px 10px; }}
+.sitecard-status.warning {{ border-color: {dangerink}; background-color: {tint}; }}
+.sitecard-status.secure {{ border-color: {divider}; }}
 .sitecard-clear {{ margin-top: 8px; }}
+.peek-header {{ border-bottom: 1px solid {divider}; }}
 .keycap, .keyhint {{ font-family: {mono}; font-size: {caption}px; color: {muted}; background-color: {card}; border: 1px solid {divider}; border-radius: 3px; padding: 3px 6px; }}
 .extensionnote {{ padding: 14px; background-color: {ground}; border-radius: 6px; }}
 .panel box, .panel stack, .panel scrolledwindow {{ background-color: transparent; }}
@@ -321,7 +325,7 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .panel .panel-shortcut-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
 .panel .panel-shortcut-key {{ border: 1px solid {divider}; box-shadow: none; background-color: {card}; color: {ink}; padding: 2px 5px; border-radius: 4px; font-family: {mono}; font-size: {caption}px; text-decoration: none; }}
 .panel-empty-tip {{ padding-top: 12px; }}
-button.act {{ background-color: {card}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 8px 13px; min-height: 18px; }}
+button.act {{ background-color: {surface}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 8px 13px; min-height: 18px; }}
 button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 button.act:hover {{ background-color: {hover}; }}
 button.act:active {{ background-color: {wash}; }}
@@ -351,6 +355,7 @@ menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 .findbar, .dlbar {{ background-color: {surface}; border: 1px solid {fieldborder}; border-radius: 8px; box-shadow: 0 8px 24px {shadow}; }}
 .findbar entry {{ background-color: transparent; border: none; box-shadow: none; }}
 .findbar label, .dlbar label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
+.findbar label.find-zero {{ color: {dangerink}; font-weight: 600; }}
 .dlbar.prompt {{ padding: 18px; }}
 .dlbar .group {{ margin-top: 12px; }}
 .dlbar .setting {{ color: {ink}; }}
@@ -370,8 +375,8 @@ menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 
 entry selection, label selection, textview selection {{ background-color: {tint}; color: {ink}; }}
 scrollbar, scrollbar trough {{ background-color: transparent; border: none; }}
-scrollbar slider {{ background-color: {divider}; border: none; border-radius: 4px; min-width: 6px; min-height: 6px; margin: 2px; }}
-scrollbar slider:hover {{ background-color: {faint}; }}
+scrollbar slider {{ background-color: {fieldborder}; border: none; border-radius: 4px; min-width: 6px; min-height: 6px; margin: 2px; }}
+scrollbar slider:hover {{ background-color: {muted}; }}
 button, .control, .row, .pin, .tile, .colstrip, menuitem, .sgrow {{ transition: background-color {micro}ms {ease}, color {micro}ms {ease}, border-color {micro}ms {ease}, opacity {micro}ms {ease}, box-shadow {micro}ms {ease}; }}
 .rowtitle, .row-subtitle, .favicon {{ transition: color {micro}ms {ease}, opacity {micro}ms {ease}; }}
 .panel switch {{ transition: background-color {micro}ms {ease}; }}

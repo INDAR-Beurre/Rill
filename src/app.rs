@@ -5122,6 +5122,7 @@ impl App {
 
         for (button, intent) in [
             (&self.ui.fold, crate::keys::Intent::FoldColumn),
+            (&self.ui.side_fold, crate::keys::Intent::FoldColumn),
             (&self.ui.address, crate::keys::Intent::Omni),
             (&self.ui.newtab, crate::keys::Intent::NewTab),
             (&self.ui.private_tab, crate::keys::Intent::NewPrivateTab),
@@ -5750,7 +5751,7 @@ fn error_copy(reason: &str) -> (&'static str, &'static str) {
 fn error_icon(reason: &str) -> crate::icons::Icon {
     let lower = reason.to_lowercase();
     if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
-        crate::icons::Icon::Shield
+        crate::icons::Icon::ShieldAlert
     } else if lower.contains("no network")
         || lower.contains("offline")
         || lower.contains("dns")
@@ -5760,7 +5761,7 @@ fn error_icon(reason: &str) -> crate::icons::Icon {
     {
         crate::icons::Icon::Offline
     } else if lower.contains("refused") {
-        crate::icons::Icon::Stop
+        crate::icons::Icon::Refused
     } else if lower.contains("too long") || lower.contains("timed out") {
         crate::icons::Icon::Clock
     } else if error_is_client(reason) {

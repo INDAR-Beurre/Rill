@@ -604,6 +604,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             // Set the field's words without committing: lets a harness test
             // arrow-key movement through the full, unfiltered offer list.
             app.omni.entry.set_text(argument);
+            app.omni.entry.set_position(-1);
             app.refresh_offers(argument);
             ok("")
         }
@@ -612,6 +613,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 app.toggle_find();
             }
             app.find.borrow().entry.set_text(argument);
+            app.find.borrow().entry.set_position(-1);
             app.find_query(argument);
             ok("")
         }

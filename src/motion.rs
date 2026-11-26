@@ -202,12 +202,14 @@ pub fn animate(
 
     step(0.0);
 
-    // The clock starts at the frame already on screen, not at the first tick.
-    // Starting at the first tick painted t=0 twice (once here, once on that
-    // tick), so every animation opened with a held frame: a visible hitch at
-    // 60Hz on short 120-180ms moves. A widget not yet realized has no frame
-    // clock, and then the first tick sets the start as before.
-    let start_us = Cell::new(widget.frame_clock().map(|clock| clock.frame_time()));
+    // Anchor the clock on the first tick, one 60Hz frame behind `now`, instead
+    // of reading `frame_clock().frame_time()` up front. While the window is
+    // idle or building a panel synchronously, `frame_time()` still holds the
+    // previous frame's timestamp (often 100ms+ in the past), which made the
+    // first tick jump straight to t=1.0 in a single frame. Anchoring at
+    // `now - 16_667` on the first tick avoids both a held t=0 frame and a
+    // stale-clock jump, so every entrance interpolates smoothly across frames.
+    let start_us: Cell<Option<i64>> = Cell::new(None);
     let ticked = Cell::new(false);
     let step_cell = RefCell::new(step);
     let done_cell = Cell::new(Some(on_done));
@@ -247,8 +249,9 @@ pub fn animate(
         let start = match start_us.get() {
             Some(s) => s,
             None => {
-                start_us.set(Some(now));
-                now
+                let s = now.saturating_sub(16_667);
+                start_us.set(Some(s));
+                s
             }
         };
 

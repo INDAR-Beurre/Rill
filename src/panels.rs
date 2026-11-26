@@ -173,27 +173,36 @@ pub struct Panels {
 /// Settings owns a search entry as the first child of its list. Filtering
 /// must leave that entry visible and keep a section header with any row that
 /// matches, or the result reads as an orphaned subtitle.
+fn is_section_chrome(widget: &gtk::Widget) -> bool {
+    let style = widget.style_context();
+    style.has_class("panel-section-header")
+        || style.has_class("group")
+        || style.has_class("panel-section-description")
+}
+
 fn filter_settings_list(list: &gtk::Box, query: &str) {
     for section in list.children() {
         section.show();
         let children = child_widgets(&section);
-        // Headers and descriptions only belong to a section whose actual
-        // rows match. Counting description text produced an orphaned
-        // heading with no control beneath it.
-        let found = children.iter().any(|child| {
+        // If the section title itself matches, keep the whole section so
+        // searching "Appearance" or "Browsing" reveals its controls. Otherwise
+        // require an actual control row to match — never an orphaned subtitle.
+        let title_matches = children.iter().any(|child| {
             let style = child.style_context();
-            !style.has_class("group")
-                && !style.has_class("panel-section-description")
+            (style.has_class("panel-section-header") || style.has_class("group"))
                 && widget_text(child).to_lowercase().contains(query)
         });
-        if !found {
+        let row_matches = children.iter().any(|child| {
+            !is_section_chrome(child) && widget_text(child).to_lowercase().contains(query)
+        });
+        if !title_matches && !row_matches {
             section.hide();
             continue;
         }
         for child in children {
-            let style = child.style_context();
-            let chrome = style.has_class("group") || style.has_class("panel-section-description");
-            let visible = chrome || widget_text(&child).to_lowercase().contains(query);
+            let visible = title_matches
+                || is_section_chrome(&child)
+                || widget_text(&child).to_lowercase().contains(query);
             child.set_visible(visible);
         }
     }
@@ -496,6 +505,14 @@ impl Panels {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, kind.title());
         }
         self.build_nav(app, &kind);
+        // Settings owns its own inner scroller below the pinned search field;
+        // turning off the outer scroller prevents a double scrollbar at narrow
+        // widths while keeping every other panel on the shared scroller.
+        if kind == PanelKind::Settings {
+            self.scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+        } else {
+            self.scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        }
         let field = match kind {
             PanelKind::Bookmarks => self.build_bookmarks(app),
             PanelKind::History => self.build_history(app),
@@ -1099,9 +1116,9 @@ impl Panels {
         let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_overlay_scrolling(false);
-        scroll.set_min_content_height(240);
-        scroll.set_max_content_height(240);
-        scroll.set_vexpand(false);
+        scroll.set_min_content_height(260);
+        scroll.set_max_content_height(380);
+        scroll.set_vexpand(true);
         scroll.add(content);
         scroll
     }
@@ -2405,10 +2422,12 @@ impl Panels {
 
         let button = gtk::Button::with_label(action);
         crate::ui::class(&button, "act");
-        let arrow = crate::icons::area(crate::icons::Icon::ArrowRight, 12, app.palette.borrow().muted);
-        button.set_image(Some(&arrow));
-        button.set_image_position(gtk::PositionType::Right);
-        button.set_always_show_image(true);
+        if !matches!(action, "Disable" | "Enable") {
+            let arrow = crate::icons::area(crate::icons::Icon::ArrowRight, 12, app.palette.borrow().muted);
+            button.set_image(Some(&arrow));
+            button.set_image_position(gtk::PositionType::Right);
+            button.set_always_show_image(true);
+        }
         button.set_valign(gtk::Align::Center);
         // One Tab stop per row (Gemini R60 polish): the row itself takes focus
         // and Return runs this action, so the button stays clickable but is

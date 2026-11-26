@@ -24,6 +24,7 @@ pub struct Ui {
     pub top: gtk::EventBox,
     pub toolbar: gtk::EventBox,
     pub fold: gtk::Button,
+    pub side_fold: gtk::Button,
     pub address: gtk::Button,
     pub address_label: gtk::Label,
     /// The path after the trusted origin chip. Kept as a separate, quiet
@@ -179,10 +180,10 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     strip.set_visible(plan.strip);
     label_a11y(&strip, "Show tab column", gtk::atk::Role::PushButton);
     strip.set_tooltip_text(Some("Show tab column"));
-    let strip_glyph = icons::area(Icon::Sidebar, 14, palette.muted);
+    let strip_glyph = icons::area(Icon::Sidebar, 15, palette.muted);
     strip_glyph.set_halign(gtk::Align::Center);
     strip_glyph.set_valign(gtk::Align::Start);
-    strip_glyph.set_margin_top(4);
+    strip_glyph.set_margin_top(14);
     strip.add(&strip_glyph);
     strip_glyph.show();
     strip.show();
@@ -346,10 +347,14 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     history.set_can_focus(true);
     downloads.set_can_focus(true);
     menu.set_can_focus(true);
+    let side_fold = icons::button(Icon::Sidebar, 16, palette.muted, "sidebar-tool");
+    side_fold.set_can_focus(true);
+    label_a11y(&side_fold, "Hide tab column (Ctrl S)", gtk::atk::Role::PushButton);
     pack(&footer, &library, false);
     pack(&footer, &history, false);
     pack(&footer, &downloads, false);
     pack(&footer, &menu, false);
+    footer.pack_end(&side_fold, false, false, 0);
     pack(&body, &footer, false);
 
     // The column is the paned's first child itself, with no wrapper around
@@ -625,6 +630,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         top,
         toolbar,
         fold,
+        side_fold,
         address,
         address_label,
         address_path,

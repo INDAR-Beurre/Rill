@@ -91,9 +91,10 @@ fn bar_plan(width: i32, band: i32, column: i32) -> (i32, i32, i32) {
     } else {
         (width - bar_width - PAGE_INSET).clamp(min_x, max_x)
     };
-    // The reader's exit pill and type buttons are 28px tall at PAGE_TOP.
-    // On a narrow page the full-row bar sits one gap below them.
-    let y = band.max(0) + PAGE_TOP + if narrow_reading { 28 + 8 } else { 0 };
+    // `toolbar_band` already adds `READER_EXIT_CLEARANCE` while reading, so
+    // narrow reading sits cleanly below the unified reader header without
+    // doubling the offset.
+    let y = band.max(0) + PAGE_TOP;
     (x, y, bar_width)
 }
 
@@ -323,6 +324,13 @@ impl FindBar {
             }
             // The engine reports -1 (as u32) until it has counted: printing
             // 4294967295 matches is worse than printing nothing.
+            let zero = matches == 0;
+            let ctx = count.style_context();
+            if zero {
+                ctx.add_class("find-zero");
+            } else {
+                ctx.remove_class("find-zero");
+            }
             count.set_text(&if matches > 1_000_000 {
                 String::new()
             } else {

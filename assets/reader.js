@@ -137,6 +137,8 @@ window.__searchReader = function (palette) {
     body { margin: 0 auto !important; padding: 0 !important; max-width: 720px !important; font: var(--search-reader-size, 18px)/1.62 Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif !important;
       -webkit-font-smoothing: antialiased; }
     #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 76px 28px 120px; }
+    #__search_reader_bar { position: fixed; top: 0; left: 0; right: 0; height: 46px; background: ${ground}; border-bottom: 1px solid ${rule}; z-index: 2147483647; display: flex; align-items: center; justify-content: center; }
+    #__search_reader_bar_inner { box-sizing: border-box; width: 100%; max-width: 660px; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     #__search_reader h1 { font-size: 1.79em; line-height: 1.18; letter-spacing: -0.012em; font-weight: 700; margin: 0 0 12px; }
     /* Secondary text is sized in em from the 18px body instead of fixed
        pixels, so it follows the reader's text size and page zoom along with
@@ -181,12 +183,13 @@ window.__searchReader = function (palette) {
     #__search_reader_exit:focus-visible { outline: 2px solid ${muted} !important; outline-offset: 2px !important; border-color: ${muted} !important; }
     /* The type controls sit on the opposite side from the exit pill and the
        find bar, so all three can be captured and used at once. */
-    #__search_reader_font { position: fixed; top: 10px; left: 18px; z-index: 2147483647; display: flex; align-items: center; gap: 6px; }
-    #__search_reader_size_label { min-width: 34px; color: ${muted}; font: 12px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif; text-align: center; }
+    #__search_reader_font { display: flex; align-items: center; gap: 6px; }
+    #__search_reader_size_label { min-width: 36px; color: ${muted}; font: 500 12px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif; text-align: center; }
     #__search_reader_font button { all: unset; box-sizing: border-box; min-width: 32px; min-height: 28px; cursor: pointer; text-align: center;
-      font: 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
+      font: 500 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
       color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; background: ${ground}; }
-    #__search_reader_font button:hover { border-color: ${muted} !important; }
+    #__search_reader_font button:hover:not(:disabled) { border-color: ${muted} !important; }
+    #__search_reader_font button:disabled { opacity: 0.35; cursor: default; }
     #__search_reader_font button:focus-visible { outline: 2px solid ${muted} !important; outline-offset: 2px !important; }
     /* Find selects the current match, and WebKit paints that selection in its
        own bright yellow while keeping the page's text colour. On the dark
@@ -213,9 +216,9 @@ window.__searchReader = function (palette) {
   // Same font as the browser chrome, and a 28px minimum height, so the way
   // out looks like a browser control and not like part of the page.
   exit.setAttribute('style', `all: unset; display: inline-block; box-sizing: border-box; min-height: 28px; cursor: pointer;
-    font: 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
-    color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 4px 10px;
-    position: fixed; top: 10px; right: 18px; background: ${ground}; z-index: 2147483647;`);
+    font: 500 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
+    color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 4px 11px;
+    background: ${ground};`);
   // The button calls the toggle with the tokens it was built with, so it can
   // enter again with real colours if a restore ever leaves it on screen.
   const exitPalette = tokens;
@@ -229,25 +232,33 @@ window.__searchReader = function (palette) {
       window.webkit.messageHandlers.searchReader.postMessage('off');
     } catch (_) {}
   });
-  container.appendChild(exit);
+  const bar = document.createElement('div');
+  bar.id = '__search_reader_bar';
+  const barInner = document.createElement('div');
+  barInner.id = '__search_reader_bar_inner';
   const font = document.createElement('div');
   font.id = '__search_reader_font';
-  const sizeLabel = document.createElement('span');
-  sizeLabel.id = '__search_reader_size_label';
-  sizeLabel.setAttribute('aria-live', 'polite');
-  sizeLabel.textContent = '18px';
-  font.appendChild(sizeLabel);
-  for (const [label, delta, name] of [['A−', -4, 'Smaller reading text'], ['A+', 4, 'Larger reading text']]) {
+  const makeFontBtn = (label, delta, name) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = label;
     button.title = name;
     button.setAttribute('aria-label', name);
-    const step = delta;
-    button.addEventListener('click', () => window.__searchReaderFont(step));
-    font.appendChild(button);
-  }
-  container.appendChild(font);
+    button.addEventListener('click', () => window.__searchReaderFont(delta));
+    return button;
+  };
+  const sizeLabel = document.createElement('span');
+  sizeLabel.id = '__search_reader_size_label';
+  sizeLabel.setAttribute('aria-live', 'polite');
+  sizeLabel.textContent = '18px';
+  const [lessSpec, moreSpec] = [['A−', -4, 'Smaller reading text'], ['A+', 4, 'Larger reading text']];
+  font.appendChild(makeFontBtn(...lessSpec));
+  font.appendChild(sizeLabel);
+  font.appendChild(makeFontBtn(...moreSpec));
+  barInner.appendChild(font);
+  barInner.appendChild(exit);
+  bar.appendChild(barInner);
+  container.appendChild(bar);
   const title = document.createElement('h1');
   title.textContent = heading.trim();
   container.appendChild(title);

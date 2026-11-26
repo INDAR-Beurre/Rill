@@ -469,16 +469,34 @@ fn rule(card: &gtk::Box) {
 }
 
 fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
-    let security = text(card, &model.security.text(), "settingdesc");
-    // Round-68 review: the only warning on a plain-http page read like body
-    // copy. Weight and the alarm colour make the state legible before the
-    // sentence is read, while the text itself stays the same.
-    if matches!(model.security, Security::Plain | Security::Problem(_)) {
+    let status_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    crate::ui::class(&status_box, "sitecard-status");
+    let warning = matches!(model.security, Security::Plain | Security::Problem(_));
+    if warning {
+        crate::ui::class(&status_box, "warning");
+    } else if matches!(model.security, Security::Secure) {
+        crate::ui::class(&status_box, "secure");
+    }
+    if let Some(app) = crate::app::current() {
+        let palette = *app.palette.borrow();
+        let (icon_kind, icon_color) = match model.security {
+            Security::Secure => (crate::icons::Icon::Lock, palette.accent()),
+            Security::Plain | Security::Problem(_) => (crate::icons::Icon::ShieldAlert, palette.danger),
+            _ => (crate::icons::Icon::Globe, palette.muted),
+        };
+        let glyph = crate::icons::area(icon_kind, 18, icon_color);
+        glyph.set_valign(gtk::Align::Start);
+        glyph.set_margin_top(2);
+        status_box.pack_start(&glyph, false, false, 0);
+    }
+    let security = gtk::Label::new(Some(&model.security.text()));
+    crate::ui::class(&security, "settingdesc");
+    security.set_xalign(0.0);
+    security.set_line_wrap(true);
+    security.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+    security.set_max_width_chars(38);
+    if warning {
         crate::ui::class(&security, "security-warning");
-        // The stylesheet class is the source of truth for the look, but a
-        // warning that renders in body grey is no warning. Pango attributes
-        // travel with the label, so the alarm colour survives theme swaps and
-        // styling changes that would otherwise wash the sentence out.
         if let Some(app) = crate::app::current() {
             let danger = app.palette.borrow().danger;
             let attrs = gtk::pango::AttrList::new();
@@ -490,6 +508,44 @@ fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
             attrs.insert(gtk::pango::AttrInt::new_weight(gtk::pango::Weight::Bold));
             security.set_attributes(Some(&attrs));
         }
+    }
+    status_box.pack_start(&security, true, true, 0);
+    card.add(&status_box);
+
+    if !model.host.is_empty() {
+        let global_on = crate::app::current()
+            .map(|app| app.prefs.borrow().shield)
+            .unwrap_or(true);
+        let site_off = crate::shield::allowed(&model.host);
+        let label = if !global_on {
+            "Shield off globally"
+        } else if site_off {
+            "Shield paused on this site"
+        } else {
+            "Shield blocking trackers"
+        };
+        let toggle = button(
+            if site_off { "Resume" } else { "Pause here" },
+            if site_off {
+                "Turn ad and tracker blocking back on for this site"
+            } else {
+                "Pause ad and tracker blocking for this site"
+            },
+        );
+        toggle.set_sensitive(global_on && !model.private);
+        let tip_key = if site_off {
+            "Turn ad and tracker blocking back on for this site"
+        } else {
+            "Pause ad and tracker blocking for this site"
+        };
+        toggle.connect_clicked(move |_| {
+            if let Some(app) = crate::app::current() {
+                FOCUS_HINT.with(|hint| *hint.borrow_mut() = Some(tip_key.into()));
+                app.toggle_blocker();
+                open(&app);
+            }
+        });
+        row(card, label, vec![toggle]);
     }
 
     let zoom_out = button("-", "Zoom out");

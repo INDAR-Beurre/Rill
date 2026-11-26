@@ -76,17 +76,17 @@ impl Palette {
         };
         let pick = |light, night| hex(if dark { night } else { light });
         Palette {
-            ground: pick(0xF7F7F5, 0x1A1A1A),
-            ink: pick(0x272724, 0xEDEDED),
-            muted: pick(0x595A52, 0xB5B5B5),
-            faint: pick(0x67685E, 0xA5A5A5),
-            hairline: pick(0xC6C6C0, 0x4A4A4A),
-            wash: pick(0xF0F0ED, 0x3B3B3B),
-            hover: pick(0xF3F3F0, 0x303030),
-            side_hover: pick(0xF1F1EE, 0x333333),
-            side_tile: pick(0xFAFAF8, 0x292929),
-            side_pin_live: pick(0xDEDED8, 0x3D3D3D),
-            card: pick(0xFFFFFF, 0x202020),
+            ground: pick(0xF7F7F5, 0x1A1816),
+            ink: pick(0x272724, 0xEFECE6),
+            muted: pick(0x595A52, 0xBAB4AA),
+            faint: pick(0x67685E, 0xA8A298),
+            hairline: pick(0xC6C6C0, 0x4E4A44),
+            wash: pick(0xF0F0ED, 0x3B3733),
+            hover: pick(0xF3F3F0, 0x312E2A),
+            side_hover: pick(0xF1F1EE, 0x34312D),
+            side_tile: pick(0xFAFAF8, 0x2B2825),
+            side_pin_live: pick(0xDEDED8, 0x3F3B36),
+            card: pick(0xFFFFFF, 0x211F1C),
             danger: pick(0xAF392C, 0xE07463),
         }
     }
@@ -104,11 +104,11 @@ impl Palette {
     }
 
     pub fn surface(&self) -> Rgb {
-        hex(if self.is_dark() { 0x262626 } else { 0xFFFFFF })
+        hex(if self.is_dark() { 0x272522 } else { 0xFFFFFF })
     }
 
     pub fn tint(&self) -> Rgb {
-        hex(if self.is_dark() { 0x303030 } else { 0xF4DDCF })
+        hex(if self.is_dark() { 0x362A24 } else { 0xF4DDCF })
     }
 
     pub fn is_dark(&self) -> bool {

@@ -215,6 +215,7 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
     card.set_margin_bottom(bottom);
 
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    crate::ui::class(&header, "peek-header");
     header.set_margin_start(12);
     header.set_margin_end(8);
     header.set_margin_top(6);
@@ -226,6 +227,7 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
     crate::ui::pack(&header, &host, true);
     let keep = gtk::Button::with_label("Keep");
     crate::ui::class(&keep, "act");
+    crate::ui::class(&keep, "primary");
     crate::ui::pack(&header, &keep, false);
     let close = gtk::Button::with_label("Close");
     crate::ui::class(&close, "act");

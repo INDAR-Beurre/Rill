@@ -37,6 +37,8 @@ pub enum Icon {
     Mask,
     Warning,
     Offline,
+    ShieldAlert,
+    Refused,
 }
 
 /// Read the widget's live CSS foreground color, falling back to `fallback` if transparent.
@@ -335,6 +337,28 @@ fn draw(cr: &cairo::Context, kind: Icon, w: f64) {
             let _ = cr.fill();
             cr.move_to(s * 0.12, s * 0.88);
             cr.line_to(s * 0.88, s * 0.12);
+            let _ = cr.stroke();
+        }
+        Icon::ShieldAlert => {
+            cr.move_to(c, s * 0.14);
+            cr.line_to(s * 0.79, s * 0.26);
+            cr.line_to(s * 0.75, s * 0.57);
+            cr.curve_to(s * 0.71, s * 0.72, s * 0.60, s * 0.81, c, s * 0.87);
+            cr.curve_to(s * 0.40, s * 0.81, s * 0.29, s * 0.72, s * 0.25, s * 0.57);
+            cr.line_to(s * 0.21, s * 0.26);
+            cr.close_path();
+            let _ = cr.stroke();
+            cr.move_to(c, s * 0.34);
+            cr.line_to(c, s * 0.56);
+            let _ = cr.stroke();
+            cr.arc(c, s * 0.67, s * 0.03, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+        Icon::Refused => {
+            cr.arc(c, c, s * 0.34, 0.0, std::f64::consts::TAU);
+            let _ = cr.stroke();
+            cr.move_to(s * 0.26, s * 0.74);
+            cr.line_to(s * 0.74, s * 0.26);
             let _ = cr.stroke();
         }
         Icon::Orbit => {

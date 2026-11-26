@@ -188,7 +188,8 @@ pub fn open(app: &App) {
         app.ui.overlay.remove(&old);
     }
     for child in app.ui.overlay.children() {
-        if child.widget_name() == "site-card" {
+        let name = child.widget_name();
+        if name == "site-card" || name == "site-card-scrim" {
             crate::motion::cancel(&child);
             app.ui.overlay.remove(&child);
         }
@@ -206,6 +207,10 @@ pub fn open(app: &App) {
         extensions::here(&url),
     );
     let title = if model.host.is_empty() { "This page".to_string() } else { model.host.clone() };
+    let scrim = crate::ui::scrim(&app.palette.borrow());
+    scrim.set_widget_name("site-card-scrim");
+    app.ui.overlay.add_overlay(&scrim);
+    scrim.show_all();
     let card = permissions::card(app, &title);
     card.set_widget_name("site-card");
     card.set_size_request(380, -1);
@@ -386,6 +391,11 @@ pub fn dismiss(app: &App) {
     let card_for_done = card.clone();
     crate::motion::fade_out_then(&card, crate::motion::dur::EXIT, move || {
         overlay.remove(&card_for_done);
+        for child in overlay.children() {
+            if child.widget_name() == "site-card-scrim" {
+                overlay.remove(&child);
+            }
+        }
     });
 }
 

@@ -3549,7 +3549,15 @@ impl App {
                     offers.truncate(8);
                 }
             } else if is_search && !offers.iter().any(|o| o.url == target) {
-                offers.insert(0, Offer {
+                // Exact open tabs and bookmarks are what the row below the
+                // address is for. A generic engine search belongs after them;
+                // putting it first made typing the name of an open tab look
+                // like the browser had forgotten the tab.
+                let exact = offers
+                    .iter()
+                    .position(|o| o.title.to_lowercase() == words.to_lowercase());
+                let insert_at = exact.map(|index| index + 1).unwrap_or(0);
+                offers.insert(insert_at, Offer {
                     title: format!("Search for \"{words}\""),
                     url: target,
                     kind: "Search".into(),
@@ -4651,12 +4659,11 @@ impl App {
             return;
         }
         let (title, action) = error_copy(reason);
-        let security = reason.contains("certificate") || reason.contains("secure connection");
-        let glyph = if reason.contains("offline") || reason.contains("resolve") {
-            crate::icons::Icon::Offline
-        } else {
-            crate::icons::Icon::Warning
-        };
+        let security = reason.contains("certificate")
+            || reason.contains("secure connection")
+            || reason.contains("tls")
+            || reason.contains("ssl");
+        let glyph = error_icon(reason);
         // The state mark is swapped as a whole: `icons::area` itself is the
         // DrawingArea that the error box holds, so replace that child.
         if let Some(child) = self.ui.error_glyph.child() {
@@ -5720,8 +5727,37 @@ fn error_copy(reason: &str) -> (&'static str, &'static str) {
         ("This address doesn't resolve", "Try again")
     } else if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
         ("This site can't be verified", "Try again")
+    } else if lower.contains("refused") {
+        ("The site refused the connection", "Try again")
+    } else if lower.contains("too long") || lower.contains("timed out") {
+        ("The site took too long to answer", "Try again")
     } else {
         ("This page didn't open", "Try again")
+    }
+}
+
+/// A failure's mark names the class of failure. Sharing one warning triangle
+/// across TLS, DNS, refusal, timeout and 404 makes them all read as the same
+/// event, which is not what the sentence underneath says.
+fn error_icon(reason: &str) -> crate::icons::Icon {
+    let lower = reason.to_lowercase();
+    if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
+        crate::icons::Icon::Shield
+    } else if lower.contains("offline")
+        || lower.contains("dns")
+        || lower.contains("host")
+        || lower.contains("name")
+        || lower.contains("could not be found")
+    {
+        crate::icons::Icon::Offline
+    } else if lower.contains("refused") {
+        crate::icons::Icon::Stop
+    } else if lower.contains("too long") || lower.contains("timed out") {
+        crate::icons::Icon::Clock
+    } else if error_is_client(reason) {
+        crate::icons::Icon::Search
+    } else {
+        crate::icons::Icon::Warning
     }
 }
 

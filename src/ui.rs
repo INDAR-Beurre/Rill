@@ -97,7 +97,7 @@ pub fn pack<B: IsA<gtk::Box>, C: IsA<gtk::Widget>>(container: &B, child: &C, exp
 
 
 /// Width of the column strip Ctrl S leaves behind. Clicking it unfolds the column.
-pub const STRIP_WIDTH: i32 = 10;
+pub const STRIP_WIDTH: i32 = 18;
 
 /// Minimum width of an unfolded tab column so users can drag it narrower without
 /// being locked to the saved width.
@@ -178,6 +178,11 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     strip.set_no_show_all(true);
     strip.set_visible(plan.strip);
     label_a11y(&strip, "Show tab column", gtk::atk::Role::PushButton);
+    let strip_glyph = icons::area(Icon::Sidebar, 12, palette.muted);
+    strip_glyph.set_halign(gtk::Align::Center);
+    strip_glyph.set_valign(gtk::Align::Start);
+    strip_glyph.set_margin_top(5);
+    strip.add(&strip_glyph);
     pack(&side, &strip, true);
     let body = widget_box(gtk::Orientation::Vertical, 0);
     // Opted out of show_all, so the window's show_all cannot unfold a column

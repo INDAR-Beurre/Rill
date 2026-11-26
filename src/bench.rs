@@ -314,16 +314,25 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         "panelscroll" => {
             let amount: f64 = argument.parse().unwrap_or(0.0);
             let panels = app.panels.borrow();
-            // Settings nests its rows in a second scroller inside `body`.
-            // Scrolling only the outer card left the scrolled evidence shot
-            // byte-identical to the unscrolled one, so pick the deepest
-            // scrollable child that is actually visible.
+            fn scrollables(widget: &gtk::Widget, out: &mut Vec<gtk::ScrolledWindow>) {
+                if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>() {
+                    out.push(scroll);
+                }
+                if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+                    container.foreach(|child| scrollables(child.upcast_ref::<gtk::Widget>(), out));
+                }
+            }
             let scroll = if panels.open.as_ref() == Some(&crate::panels::PanelKind::Settings) {
-                panels
-                    .settings_holder
-                    .children()
-                    .first()
-                    .and_then(|holder| holder.clone().downcast::<gtk::ScrolledWindow>().ok())
+                let mut candidates = Vec::new();
+                for child in panels.settings_holder.children() {
+                    scrollables(child.upcast_ref::<gtk::Widget>(), &mut candidates);
+                }
+                candidates
+                    .into_iter()
+                    .find(|scroll| {
+                        let adjustment = scroll.vadjustment();
+                        adjustment.upper() - adjustment.page_size() > 1.0
+                    })
                     .unwrap_or_else(|| panels.scroll.clone())
             } else {
                 panels.scroll.clone()
@@ -335,8 +344,31 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         "panelgeometry" => {
             settle(app);
             let panels = app.panels.borrow();
-            let adjustment = panels.scroll.vadjustment();
-            ok(&format!(",\"card\":[{},{}],\"body\":[{},{}],\"scroll\":[{},{}],\"value\":{},\"upper\":{},\"page\":{}", panels.card.allocated_width(), panels.card.allocated_height(), panels.body.allocated_width(), panels.body.allocated_height(), panels.scroll.allocated_width(), panels.scroll.allocated_height(), adjustment.value(), adjustment.upper(), adjustment.page_size()))
+            fn scrollables(widget: &gtk::Widget, out: &mut Vec<gtk::ScrolledWindow>) {
+                if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>() {
+                    out.push(scroll);
+                }
+                if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+                    container.foreach(|child| scrollables(child.upcast_ref::<gtk::Widget>(), out));
+                }
+            }
+            let scroll = if panels.open.as_ref() == Some(&crate::panels::PanelKind::Settings) {
+                let mut candidates = Vec::new();
+                for child in panels.settings_holder.children() {
+                    scrollables(child.upcast_ref::<gtk::Widget>(), &mut candidates);
+                }
+                candidates
+                    .into_iter()
+                    .find(|scroll| {
+                        let adjustment = scroll.vadjustment();
+                        adjustment.upper() - adjustment.page_size() > 1.0
+                    })
+                    .unwrap_or_else(|| panels.scroll.clone())
+            } else {
+                panels.scroll.clone()
+            };
+            let adjustment = scroll.vadjustment();
+            ok(&format!(",\"card\":[{},{}],\"body\":[{},{}],\"scroll\":[{},{}],\"value\":{},\"upper\":{},\"page\":{}", panels.card.allocated_width(), panels.card.allocated_height(), panels.body.allocated_width(), panels.body.allocated_height(), scroll.allocated_width(), scroll.allocated_height(), adjustment.value(), adjustment.upper(), adjustment.page_size()))
         }
         "panelkey" => {
             let intent = match argument.trim() {

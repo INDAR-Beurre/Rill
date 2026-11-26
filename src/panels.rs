@@ -444,7 +444,9 @@ impl Panels {
                 .children()
                 .first()
                 .cloned()
-                .and_then(|list| list.downcast::<gtk::Box>().ok());
+                .and_then(|holder| holder.downcast::<gtk::ScrolledWindow>().ok())
+                .and_then(|scroll| scroll.child())
+                .and_then(|child| child.downcast::<gtk::Box>().ok());
             if let Some(list) = list {
                 let entry = list.children().first().cloned().and_then(|child| child.downcast::<gtk::Entry>().ok());
                 if let Some(entry) = entry {
@@ -1125,6 +1127,19 @@ impl Panels {
         // One scroller owns every panel. Returning the content here avoids
         // nesting a second GtkViewport, which breaks measurement and clipping.
         content.clone()
+    }
+
+    /// The Settings body is pinned outside the common scroller so typing in
+    /// its filter does not rebuild the form. It still needs its own scroller;
+    /// without one, `panelscroll` can only move the empty common viewport.
+    fn settings_scroll(&self, content: &gtk::Box) -> gtk::ScrolledWindow {
+        let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroll.set_overlay_scrolling(false);
+        scroll.set_max_content_height(MAX_HEIGHT);
+        scroll.set_vexpand(true);
+        scroll.add(content);
+        scroll
     }
 
     fn filter_field(&self, placeholder: &str, on_type: impl Fn(&str) + 'static) -> gtk::Entry {
@@ -1943,7 +1958,7 @@ impl Panels {
         if !query.is_empty() {
             filter_settings_list(&list, &query);
         }
-        self.settings_holder.add(&self.body_scroll(&list));
+        self.settings_holder.add(&self.settings_scroll(&list));
         self.settings_holder.show_all();
         Some(field)
     }

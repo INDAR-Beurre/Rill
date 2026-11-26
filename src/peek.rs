@@ -81,6 +81,7 @@ struct Peek {
     tab: TabId,
     private: bool,
     card: gtk::Box,
+    scrim: gtk::DrawingArea,
     view: WebView,
     /// The peek's own refusal handlers, disconnected when Keep makes it a tab.
     handlers: Vec<SignalHandlerId>,
@@ -244,8 +245,16 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
         }
     });
 
+    // A peek is a preview over the page, not another floating page. A dimmed
+    // backdrop separates the card from the article and gives Close a target.
+    let scrim = crate::ui::scrim(&app.palette.borrow());
+    scrim.set_widget_name("peek-scrim");
+    app.ui.overlay.add_overlay(&scrim);
+    scrim.set_hexpand(true);
+    scrim.set_vexpand(true);
     app.ui.overlay.add_overlay(&card);
     card.show_all();
+    scrim.show_all();
     // The peek card arrives on the shared entrance role (180ms) and travels
     // the shared 8px, the same as every other card, instead of its own
     // 18px and 190ms.
@@ -253,7 +262,7 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
     keep.grab_focus();
     view.load_uri(url);
     PEEK.with(|p| {
-        *p.borrow_mut() = Some(Peek { tab, private, card, view, handlers });
+        *p.borrow_mut() = Some(Peek { tab, private, card, scrim, view, handlers });
     });
 }
 
@@ -307,7 +316,7 @@ fn dismiss(app: &App) {
     crate::motion::cancel(&peek.card);
     crate::permissions::focus_page(app);
     let overlay = app.ui.overlay.clone();
-    let Peek { card, view, .. } = peek;
+    let Peek { card, scrim, view, .. } = peek;
     // Retire the page now, not after the fade. A dismissed peek must not keep
     // loading, running script or holding its WebView for the EXIT fade. The
     // card keeps its current size, so the header and frame fade out without
@@ -323,9 +332,15 @@ fn dismiss(app: &App) {
     // teardown does not keep the card or the overlay alive.
     let card_weak = card.downgrade();
     let overlay_weak = overlay.downgrade();
+    let scrim_weak = scrim.downgrade();
     crate::motion::fade_out_then(&card, crate::motion::dur::EXIT, move || {
-        if let (Some(overlay), Some(card)) = (overlay_weak.upgrade(), card_weak.upgrade()) {
+        if let (Some(overlay), Some(card), Some(scrim)) = (
+            overlay_weak.upgrade(),
+            card_weak.upgrade(),
+            scrim_weak.upgrade(),
+        ) {
             overlay.remove(&card);
+            overlay.remove(&scrim);
         }
     });
 }
@@ -336,7 +351,7 @@ fn dismiss(app: &App) {
 /// callbacks. The page is not loaded again.
 fn keep_peek(app: &AppRef) {
     let Some(peek) = take() else { return };
-    let Peek { private, card, view, handlers, .. } = peek;
+    let Peek { private, card, scrim, view, handlers, .. } = peek;
     crate::motion::cancel(&card);
     let url = view.uri().map(|u| u.to_string()).unwrap_or_default();
     card.remove(&view);
@@ -344,6 +359,7 @@ fn keep_peek(app: &AppRef) {
     view.set_margin_end(0);
     view.set_margin_bottom(0);
     app.ui.overlay.remove(&card);
+    app.ui.overlay.remove(&scrim);
     for id in handlers {
         view.disconnect(id);
     }

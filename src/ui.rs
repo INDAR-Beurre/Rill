@@ -183,6 +183,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     strip_glyph.set_valign(gtk::Align::Start);
     strip_glyph.set_margin_top(5);
     strip.add(&strip_glyph);
+    strip_glyph.show();
+    strip.show();
     pack(&side, &strip, true);
     let body = widget_box(gtk::Orientation::Vertical, 0);
     // Opted out of show_all, so the window's show_all cannot unfold a column
@@ -214,39 +216,18 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     class(&brand, "brand-word");
     brand.set_xalign(0.0);
     pack(&band, &brand, true);
+    // Window controls belong to the window, not to the optional browser
+    // toolbar. They stay visible in the 34px column band when the toolbar is
+    // hidden, so a browser with no chrome still has normal window affordances.
+    let lights = widget_box(gtk::Orientation::Horizontal, 2);
+    lights.set_valign(gtk::Align::Center);
+    lights.set_margin_end(10);
+    let (light_red, light_amber, light_green) = window_controls(palette);
+    pack(&lights, &light_amber, false);
+    pack(&lights, &light_green, false);
+    pack(&lights, &light_red, false);
+    pack(&band, &lights, false);
     pack(&body, &top, false);
-
-    let create = widget_box(gtk::Orientation::Horizontal, 6);
-    // The button is a surface, so it starts on the 12px surface edge, like
-    // the pin tiles and the row fills. At 16px it sat between the two guides.
-    create.set_margin_start(12);
-    create.set_margin_end(12);
-    create.set_margin_bottom(12);
-    let newtab = gtk::Button::new();
-    class(&newtab, "create-tab");
-    newtab.set_hexpand(true);
-    let create_content = widget_box(gtk::Orientation::Horizontal, 9);
-    let create_icon = icons::area(Icon::Plus, 17, palette.accent_ink());
-    create_icon.set_valign(gtk::Align::Center);
-    pack(&create_content, &create_icon, false);
-    let create_label = gtk::Label::new(Some("New tab"));
-    create_label.set_xalign(0.0);
-    pack(&create_content, &create_label, true);
-    let create_hint = gtk::Label::new(Some("Ctrl T"));
-    class(&create_hint, "create-hint");
-    create_hint.set_no_show_all(true);
-    create_hint.hide();
-    pack(&create_content, &create_hint, false);
-    newtab.add(&create_content);
-    label_a11y(&newtab, "New tab (Ctrl T)", gtk::atk::Role::PushButton);
-    let private_tab = icons::button(Icon::Mask, 17, palette.muted, "private-tab");
-    private_tab.set_can_focus(true);
-    label_a11y(&private_tab, "New private tab (Ctrl Shift N)", gtk::atk::Role::PushButton);
-    private_tab.set_no_show_all(true);
-    private_tab.hide();
-    pack(&create, &newtab, true);
-    pack(&create, &private_tab, false);
-    pack(&body, &create, false);
 
     // Pinned pages: squares that keep their place.
     // One gutter for the whole column. Surfaces (pin tiles, row fills) start
@@ -270,7 +251,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pins.set_column_spacing(6);
     pins.set_row_spacing(4);
     pins.set_column_homogeneous(true);
-    pins.set_halign(gtk::Align::Fill);
+    pins.set_halign(gtk::Align::Start);
     pins.set_hexpand(true);
     pack(&pins_holder, &pins, false);
     pack(&body, &pins_holder, false);
@@ -312,6 +293,32 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     rows.set_size_request(0, -1);
     rows_scroll.add(&rows);
     pack(&body, &rows_scroll, true);
+
+    // New tab is a quiet command in the same column rhythm as the tab rows.
+    // It lives outside the rebuilt row list so render_rows can still compare
+    // the list exactly against the browser's tabs.
+    let create = widget_box(gtk::Orientation::Horizontal, 0);
+    let newtab = gtk::Button::new();
+    class(&newtab, "newtab-row");
+    newtab.set_hexpand(true);
+    let create_content = widget_box(gtk::Orientation::Horizontal, 9);
+    let create_icon = icons::area(Icon::Plus, 15, palette.muted);
+    create_icon.set_valign(gtk::Align::Center);
+    pack(&create_content, &create_icon, false);
+    let create_label = gtk::Label::new(Some("New tab"));
+    class(&create_label, "newtab-label");
+    create_label.set_xalign(0.0);
+    pack(&create_content, &create_label, true);
+    newtab.add(&create_content);
+    label_a11y(&newtab, "New tab (Ctrl T)", gtk::atk::Role::PushButton);
+    let private_tab = icons::button(Icon::Mask, 17, palette.muted, "private-tab");
+    private_tab.set_can_focus(true);
+    label_a11y(&private_tab, "New private tab (Ctrl Shift N)", gtk::atk::Role::PushButton);
+    private_tab.set_no_show_all(true);
+    private_tab.hide();
+    pack(&create, &newtab, true);
+    pack(&create, &private_tab, false);
+    pack(&body, &create, false);
 
     let footer = widget_box(gtk::Orientation::Horizontal, 4);
     class(&footer, "sidebar-footer");
@@ -458,14 +465,6 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     more.set_can_focus(true);
     label_a11y(&more, "Browser menu", gtk::atk::Role::PushButton);
     pack(&tools, &more, false);
-    let lights = widget_box(gtk::Orientation::Horizontal, 2);
-    lights.set_valign(gtk::Align::Center);
-    lights.set_margin_start(12);
-    let (light_red, light_amber, light_green) = window_controls(palette);
-    pack(&lights, &light_amber, false);
-    pack(&lights, &light_green, false);
-    pack(&lights, &light_red, false);
-    pack(&tools, &lights, false);
     pack(&card, &toolbar, false);
     pack(&card, &bmarkbar, false);
     let stack = gtk::Stack::new();

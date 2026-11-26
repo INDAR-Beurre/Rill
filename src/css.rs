@@ -135,10 +135,9 @@ button.mark {{ background-color: transparent; border: none; padding: 4px; color:
 button.mark:hover {{ background-color: {hover}; color: {ink}; }}
 button.mark:focus {{ outline: 2px solid {accent}; outline-offset: 1px; }}
 button.mark:disabled {{ opacity: 0.35; }}
-button.create-tab {{ background-color: {card}; border: 1px solid {divider}; color: {ink}; border-radius: 7px; padding: 8px 11px; min-height: 20px; }}
-button.create-tab label {{ color: {ink}; font-size: {small}px; font-weight: 500; }}
-button.create-tab:hover {{ background-color: {hover}; }}
-button.create-tab .create-hint {{ font-family: {font}; font-size: {caption}px; font-weight: normal; color: {muted}; }}
+button.newtab-row {{ background-color: transparent; border: none; color: {muted}; border-radius: 7px; padding: 8px 12px; min-height: 20px; }}
+button.newtab-row label.newtab-label {{ color: {muted}; font-size: {small}px; font-weight: 500; }}
+button.newtab-row:hover {{ background-color: {hover}; color: {ink}; }}
 button.private-tab {{ min-width: 30px; border: 1px solid {divider}; border-radius: 7px; }}
 button.sidebar-action {{ color: {muted}; padding: 8px 10px; min-height: 20px; }}
 button.sidebar-action label {{ font-size: {small}px; color: {muted}; }}
@@ -162,7 +161,7 @@ window.unfocused .control {{ opacity: 0.6; }}
 
 .row {{ border-radius: 6px; border: 1px solid transparent; background-color: transparent; min-height: {row_height}px; color: {muted}; }}
 .row:hover {{ background-color: {sidehover}; }}
-.row.live {{ background-color: {surface}; border: 1px solid {divider}; box-shadow: inset 3px 0 0 {accent}; color: {ink}; }}
+.row.live {{ background-color: {surface}; border: 1px solid transparent; box-shadow: none; color: {ink}; }}
 .row.live:hover {{ background-color: {card}; }}
 .row:active {{ background-color: {wash}; }}
 .rowtitle {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {rowfg}; }}

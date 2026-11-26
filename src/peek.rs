@@ -133,6 +133,7 @@ pub fn relayout(app: &App) {
 fn remove(app: &App, peek: Peek) -> String {
     crate::motion::cancel(&peek.card);
     app.ui.overlay.remove(&peek.card);
+    app.ui.overlay.remove(&peek.scrim);
     let uri = peek.view.uri().map(|u| u.to_string()).unwrap_or_default();
     // SAFETY: the view has just left its container and nothing else holds it
     // beyond this scope. close_tab destroys its views the same way.

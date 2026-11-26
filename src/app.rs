@@ -3555,7 +3555,12 @@ impl App {
                 // like the browser had forgotten the tab.
                 let exact = offers
                     .iter()
-                    .position(|o| o.title.to_lowercase() == words.to_lowercase());
+                    .position(|o| {
+                        let title = o.title.to_lowercase();
+                        let url = o.url.to_lowercase();
+                        title.contains(&words.to_lowercase())
+                            || url.split('/').any(|part| part == words.to_lowercase())
+                    });
                 let insert_at = exact.map(|index| index + 1).unwrap_or(0);
                 offers.insert(insert_at, Offer {
                     title: format!("Search for \"{words}\""),
@@ -3617,6 +3622,7 @@ impl App {
           color: inherit !important;\n\
         }\n\
         :where(a, a:visited):not([class]):not([style]) { color: #9ecbff !important; }\n\
+        a.go, a.go:visited { color: inherit !important; text-decoration: none !important; }\n\
         :root { color-scheme: dark; }";
 
     /// When dark pages are asked for, a site that paints white gets the
@@ -5719,6 +5725,8 @@ fn error_copy(reason: &str) -> (&'static str, &'static str) {
     let lower = reason.to_lowercase();
     if error_is_client(reason) {
         ("There's nothing at this address", "Change address")
+    } else if lower.contains("no network") || lower.contains("offline") {
+        ("You're offline", "Try again")
     } else if lower.contains("dns")
         || lower.contains("host")
         || lower.contains("name")
@@ -5743,7 +5751,8 @@ fn error_icon(reason: &str) -> crate::icons::Icon {
     let lower = reason.to_lowercase();
     if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
         crate::icons::Icon::Shield
-    } else if lower.contains("offline")
+    } else if lower.contains("no network")
+        || lower.contains("offline")
         || lower.contains("dns")
         || lower.contains("host")
         || lower.contains("name")

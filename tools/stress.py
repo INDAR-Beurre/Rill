@@ -1393,13 +1393,12 @@ class Run:
             for width, height in sizes * (2 if self.args.quick else 4):
                 bench.must(f"resize {width}x{height}")
                 time.sleep(0.05)
+            bench.must(f"resize {final_width}x{final_height}")
             time.sleep(0.5)
             probe = bench.probe()
             # The desktop adds its own frame, so the inner size is a few pixels
             # shy of the request. What matters is that the size was taken.
-            width, height = probe.get("width", 0), probe.get("height", 0)
-            # The native start page needs 940px of height, so a shorter
-            # request is clamped; taking the width proves the resize landed.
+            width, height = probe.get("shellWidth", 0), probe.get("shellHeight", 0)
             self.check("the window survives resizing",
                        abs(width - final_width) <= 40 and abs(height - final_height) <= 40,
                        f"{width}x{height}, asked for {final_width}x{final_height}")
@@ -1422,7 +1421,7 @@ class Run:
                 if [vw, vh] == viewport["size"] or time.time() > deadline:
                     break
                 time.sleep(0.1)
-            width, height = probe.get("width", 0), probe.get("height", 0)
+            width, height = probe.get("shellWidth", 0), probe.get("shellHeight", 0)
             self.check("the page fills the resized window",
                        vw > 0 and vh > 0 and [vw, vh] == viewport["size"]
                        and abs(viewport["at"][0] + vw - width) <= 1

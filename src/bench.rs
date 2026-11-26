@@ -314,29 +314,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         "panelscroll" => {
             let amount: f64 = argument.parse().unwrap_or(0.0);
             let panels = app.panels.borrow();
-            fn scrollables(widget: &gtk::Widget, out: &mut Vec<gtk::ScrolledWindow>) {
-                if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>() {
-                    out.push(scroll);
-                }
-                if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
-                    container.foreach(|child| scrollables(child.upcast_ref::<gtk::Widget>(), out));
-                }
-            }
-            let scroll = if panels.open.as_ref() == Some(&crate::panels::PanelKind::Settings) {
-                let mut candidates = Vec::new();
-                for child in panels.settings_holder.children() {
-                    scrollables(child.upcast_ref::<gtk::Widget>(), &mut candidates);
-                }
-                candidates
-                    .into_iter()
-                    .find(|scroll| {
-                        let adjustment = scroll.vadjustment();
-                        adjustment.upper() - adjustment.page_size() > 1.0
-                    })
-                    .unwrap_or_else(|| panels.scroll.clone())
-            } else {
-                panels.scroll.clone()
-            };
+            let scroll = panels.scroll_for_open();
             let adjustment = scroll.vadjustment();
             adjustment.set_value((adjustment.value() + amount).clamp(adjustment.lower(), adjustment.upper() - adjustment.page_size()));
             ok(&format!(",\"value\":{},\"upper\":{},\"page\":{}", adjustment.value(), adjustment.upper(), adjustment.page_size()))
@@ -344,29 +322,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         "panelgeometry" => {
             settle(app);
             let panels = app.panels.borrow();
-            fn scrollables(widget: &gtk::Widget, out: &mut Vec<gtk::ScrolledWindow>) {
-                if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>() {
-                    out.push(scroll);
-                }
-                if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
-                    container.foreach(|child| scrollables(child.upcast_ref::<gtk::Widget>(), out));
-                }
-            }
-            let scroll = if panels.open.as_ref() == Some(&crate::panels::PanelKind::Settings) {
-                let mut candidates = Vec::new();
-                for child in panels.settings_holder.children() {
-                    scrollables(child.upcast_ref::<gtk::Widget>(), &mut candidates);
-                }
-                candidates
-                    .into_iter()
-                    .find(|scroll| {
-                        let adjustment = scroll.vadjustment();
-                        adjustment.upper() - adjustment.page_size() > 1.0
-                    })
-                    .unwrap_or_else(|| panels.scroll.clone())
-            } else {
-                panels.scroll.clone()
-            };
+            let scroll = panels.scroll_for_open();
             let adjustment = scroll.vadjustment();
             ok(&format!(",\"card\":[{},{}],\"body\":[{},{}],\"scroll\":[{},{}],\"value\":{},\"upper\":{},\"page\":{}", panels.card.allocated_width(), panels.card.allocated_height(), panels.body.allocated_width(), panels.body.allocated_height(), scroll.allocated_width(), scroll.allocated_height(), adjustment.value(), adjustment.upper(), adjustment.page_size()))
         }
@@ -1053,7 +1009,7 @@ fn probe(app: &AppRef) -> String {
         .map(|label| label.to_string())
         .unwrap_or_default();
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"orphanViews\":{},\"reading\":{},\"width\":{},\"height\":{},\"viewWidth\":{},\"viewHeight\":{},\"gdkWidth\":{},\"gdkHeight\":{},\"minimumWidth\":{},\"naturalWidth\":{},\"screen\":{{\"width\":{},\"height\":{}}},\"error\":{},\"errorAction\":\"{}\"}}",
+        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"orphanViews\":{},\"reading\":{},\"width\":{},\"height\":{},\"shellWidth\":{},\"shellHeight\":{},\"ground\":\"{}\",\"card\":\"{}\",\"viewWidth\":{},\"viewHeight\":{},\"gdkWidth\":{},\"gdkHeight\":{},\"minimumWidth\":{},\"naturalWidth\":{},\"screen\":{{\"width\":{},\"height\":{}}},\"error\":{},\"errorAction\":\"{}\"}}",
         active,
         json_escape(&url),
         json_escape(&title),
@@ -1077,6 +1033,16 @@ fn probe(app: &AppRef) -> String {
         app.reading.get(),
         app.ui.window.allocated_width(),
         app.ui.window.allocated_height(),
+        app.ui.shell.allocated_width(),
+        app.ui.shell.allocated_height(),
+        {
+            let palette = app.palette.borrow();
+            format!("rgb({},{},{})", palette.ground.0, palette.ground.1, palette.ground.2)
+        },
+        {
+            let palette = app.palette.borrow();
+            format!("rgb({},{},{})", palette.card.0, palette.card.1, palette.card.2)
+        },
         app.view(active).map(|v| v.allocated_width()).unwrap_or(0),
         app.view(active).map(|v| v.allocated_height()).unwrap_or(0),
         app.ui.window.window().map(|w| w.geometry().2).unwrap_or(0),

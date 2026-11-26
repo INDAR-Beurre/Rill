@@ -176,9 +176,9 @@ button.close.rowclose {{ opacity: 1; }}
 button.close:hover {{ background-color: {wash}; color: {ink}; }}
 .tile {{ border-radius: 5px; background-color: {tilebg}; }}
 .tileletter {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {tilefg}; }}
-.pin {{ border: 1px solid {divider}; border-radius: 7px; background-color: {tilebg}; }}
+.pin {{ border: 1px solid transparent; border-radius: 7px; background-color: {tilebg}; }}
 .pin:hover {{ background-color: {sidehover}; }}
-.pin.live {{ background-color: {pinlive}; box-shadow: inset 0 -2px 0 {accent}; }}
+.pin.live {{ background-color: {pinlive}; box-shadow: none; }}
 .pinletter {{ font-family: {font}; font-size: {small}px; font-weight: 600; letter-spacing: -0.02em; color: {pinfg}; }}
 .pin.live .pinletter {{ color: {pinlivefg}; font-weight: 600; }}
 row, flowbox, flowboxchild {{ background-color: transparent; padding: 0; }}
@@ -191,7 +191,7 @@ viewport {{ background-color: transparent; }}
 .blanktitle {{ font-family: {font}; font-size: {blank_title}px; font-weight: 600; color: {ink}; letter-spacing: -0.4px; }}
 .blankhint {{ font-family: {font}; font-size: {body}px; color: {blankhint}; }}
 .error-content {{ padding: 30px; }}
-.error-glyph {{ color: {muted}; }}
+.error-glyph {{ color: {dangerink}; }}
 .erraddress {{ font-family: {mono}; font-size: {small}px; color: {emptyfg}; margin-top: 8px; }}
 
 .start-page, .start-canvas {{ background-color: {card}; }}
@@ -319,7 +319,7 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .panel-note {{ padding: 14px; border-left: 2px solid {accent}; background-color: {ground}; }}
 .panel .panel-about {{ font-family: {font}; font-size: {caption}px; color: {faint}; padding-top: 14px; border-top: 1px solid {divider}; }}
 .panel .panel-shortcut-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
-.panel .panel-shortcut-key {{ border: none; box-shadow: none; background-color: transparent; color: {ink}; padding: 1px 5px; border-radius: 4px; font-family: {mono}; font-size: {caption}px; text-decoration: none; }}
+.panel .panel-shortcut-key {{ border: 1px solid {divider}; box-shadow: none; background-color: {card}; color: {ink}; padding: 2px 5px; border-radius: 4px; font-family: {mono}; font-size: {caption}px; text-decoration: none; }}
 .panel-empty-tip {{ padding-top: 12px; }}
 button.act {{ background-color: {card}; border: 1px solid {fieldborder}; border-radius: 6px; padding: 8px 13px; min-height: 18px; }}
 button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}

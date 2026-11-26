@@ -174,24 +174,26 @@ pub struct Panels {
 /// must leave that entry visible and keep a section header with any row that
 /// matches, or the result reads as an orphaned subtitle.
 fn filter_settings_list(list: &gtk::Box, query: &str) {
-    let mut sections = list.children().into_iter();
-    sections.next(); // the search field, never filtered
-    for section in sections {
-        section.show_all();
+    for section in list.children() {
+        section.show();
         let children = child_widgets(&section);
-        let found = children
-            .iter()
-            .any(|child| widget_text(child).to_lowercase().contains(query));
+        // Headers and descriptions only belong to a section whose actual
+        // rows match. Counting description text produced an orphaned
+        // heading with no control beneath it.
+        let found = children.iter().any(|child| {
+            let style = child.style_context();
+            !style.has_class("group")
+                && !style.has_class("panel-section-description")
+                && widget_text(child).to_lowercase().contains(query)
+        });
         if !found {
             section.hide();
             continue;
         }
-        let mut iter = children.into_iter();
-        if let Some(header) = iter.next() {
-            header.show();
-        }
-        for child in iter {
-            let visible = widget_text(&child).to_lowercase().contains(query);
+        for child in children {
+            let style = child.style_context();
+            let chrome = style.has_class("group") || style.has_class("panel-section-description");
+            let visible = chrome || widget_text(&child).to_lowercase().contains(query);
             child.set_visible(visible);
         }
     }
@@ -428,36 +430,37 @@ impl Panels {
         if kind == PanelKind::Settings {
             let query = text.to_lowercase();
             *self.filter.borrow_mut() = query.clone();
-            let list = self
-                .settings_holder
-                .children()
-                .first()
-                .cloned()
-                .and_then(|holder| holder.downcast::<gtk::ScrolledWindow>().ok())
+            let children = self.settings_holder.children();
+            let entry = children
+                .iter()
+                .find_map(|child| child.clone().downcast::<gtk::Entry>().ok());
+            let list = children
+                .iter()
+                .find_map(|child| child.clone().downcast::<gtk::ScrolledWindow>().ok())
                 .and_then(|scroll| scroll.child())
                 .and_then(|viewport| viewport.downcast::<gtk::Viewport>().ok())
                 .and_then(|viewport| viewport.child())
                 .and_then(|child| child.downcast::<gtk::Box>().ok());
-            if let Some(list) = list {
-                let entry = list.children().first().cloned().and_then(|child| child.downcast::<gtk::Entry>().ok());
-                if let Some(entry) = entry {
-                    if entry.text() != text {
-                        entry.set_text(text);
-                    }
-                    entry.set_position(text.chars().count() as i32);
-                    entry.grab_focus();
+            if let Some(entry) = entry {
+                if entry.text() != text {
+                    entry.set_text(text);
                 }
+                entry.set_position(text.chars().count() as i32);
+                entry.grab_focus();
+            }
+            if let Some(list) = list {
+                // show_all restores rows hidden by the previous query,
+                // then the new query is applied once. The field lives
+                // outside this list and is never affected by either.
+                list.show_all();
                 if query.is_empty() {
                     for section in list.children() {
-                        section.show_all();
                         for child in child_widgets(&section) {
-                            child.show_all();
+                            child.show();
                         }
+                        section.show();
                     }
                 } else {
-                    // `show_all()` above restores rows hidden by an earlier
-                    // query before the new one is applied.
-                    list.show_all();
                     filter_settings_list(&list, &query);
                 }
             }
@@ -1068,6 +1071,21 @@ impl Panels {
         }
     }
 
+    /// The scroller actually in use for the open panel. Settings moved out of
+    /// the common scroller so its search field stays pinned; bench commands
+    /// must follow it there instead of inspecting the empty common scroller.
+    pub fn scroll_for_open(&self) -> gtk::ScrolledWindow {
+        if self.open.as_ref() == Some(&PanelKind::Settings) {
+            self.settings_holder
+                .children()
+                .into_iter()
+                .find_map(|child| child.downcast::<gtk::ScrolledWindow>().ok())
+                .unwrap_or_else(|| self.scroll.clone())
+        } else {
+            self.scroll.clone()
+        }
+    }
+
     fn body_scroll(&self, content: &gtk::Box) -> gtk::Box {
         // One scroller owns every panel. Returning the content here avoids
         // nesting a second GtkViewport, which breaks measurement and clipping.
@@ -1081,9 +1099,9 @@ impl Panels {
         let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_overlay_scrolling(false);
-        scroll.set_min_content_height(360);
-        scroll.set_max_content_height(MAX_HEIGHT);
-        scroll.set_vexpand(true);
+        scroll.set_min_content_height(240);
+        scroll.set_max_content_height(240);
+        scroll.set_vexpand(false);
         scroll.add(content);
         scroll
     }
@@ -1658,7 +1676,9 @@ impl Panels {
         });
         field.set_text(&query);
         field.set_position(query.chars().count() as i32);
-        list.add(&field);
+        // The filter is chrome, not a setting: keeping it outside the
+        // scroller stops the bottom-of-panel proof from clipping it in half.
+        self.settings_holder.add(&field);
 
         let appearance = self.section(app, crate::icons::Icon::Spark, "Appearance", "Light, dark, or matched to your desktop.");
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -1901,11 +1921,11 @@ impl Panels {
         // A search narrows the form to matching sections and rows. Sections
         // stay visible when a row inside them matches, so the result still
         // reads as Settings rather than a bare list of controls.
+        self.settings_holder.add(&self.settings_scroll(&list));
+        self.settings_holder.show_all();
         if !query.is_empty() {
             filter_settings_list(&list, &query);
         }
-        self.settings_holder.add(&self.settings_scroll(&list));
-        self.settings_holder.show_all();
         Some(field)
     }
 

@@ -114,7 +114,11 @@ def png_pixels(path, points):
 def theme_matches_capture(client, path):
     nodes = client.must("uitree")["nodes"]
     page = next(node for node in nodes if "start-page" in node["classes"])
-    probes = {(page["at"][0] + 8, page["at"][1] + 8): page["background"]}
+    probe = client.probe()
+    # GTK reports a transparent resolved background for GtkScrolledWindow even
+    # when its CSS paints a solid card. The palette itself is the source of
+    # truth for the start page, and the captured pixel must match it.
+    probes = {(page["at"][0] + 8, page["at"][1] + 110): probe["card"]}
     artwork = next((node for node in nodes if "start-orbit" in node["classes"]), None)
     if artwork:
         point = (artwork["at"][0] + int(artwork["size"][0] * 0.58), artwork["at"][1] + int(artwork["size"][1] * 0.30))

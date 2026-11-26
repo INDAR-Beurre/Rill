@@ -178,10 +178,11 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     strip.set_no_show_all(true);
     strip.set_visible(plan.strip);
     label_a11y(&strip, "Show tab column", gtk::atk::Role::PushButton);
-    let strip_glyph = icons::area(Icon::Sidebar, 12, palette.muted);
+    strip.set_tooltip_text(Some("Show tab column"));
+    let strip_glyph = icons::area(Icon::Sidebar, 14, palette.muted);
     strip_glyph.set_halign(gtk::Align::Center);
     strip_glyph.set_valign(gtk::Align::Start);
-    strip_glyph.set_margin_top(5);
+    strip_glyph.set_margin_top(4);
     strip.add(&strip_glyph);
     strip_glyph.show();
     strip.show();
@@ -195,13 +196,15 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
 
     let top = gtk::EventBox::new();
     crate::ui::class(&top, "topband");
-    top.set_size_request(-1, 34);
+    top.set_size_request(-1, 44);
     top.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
     let band = widget_box(gtk::Orientation::Horizontal, 10);
     // Brand at the 24px text edge, the same edge as the section labels and
     // the row content below it. At 20px it was the only item off that line.
     band.set_margin_start(24);
     band.set_margin_end(18);
+    band.set_margin_top(5);
+    band.set_margin_bottom(5);
     top.add(&band);
     let brand_mark = gtk::EventBox::new();
     class(&brand_mark, "brand-mark");
@@ -238,6 +241,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let pins_holder = widget_box(gtk::Orientation::Vertical, 0);
     pins_holder.set_margin_start(12);
     pins_holder.set_margin_end(12);
+    pins_holder.set_margin_top(6);
     pins_holder.set_margin_bottom(18);
     // Sentence case, like the panel and settings headings. The 12px label
     // already sets the section apart without being written in capitals.
@@ -251,7 +255,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pins.set_column_spacing(6);
     pins.set_row_spacing(4);
     pins.set_column_homogeneous(true);
-    pins.set_halign(gtk::Align::Start);
+    pins.set_halign(gtk::Align::Fill);
     pins.set_hexpand(true);
     pack(&pins_holder, &pins, false);
     pack(&body, &pins_holder, false);
@@ -291,7 +295,12 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     rows_scroll.set_propagate_natural_width(false);
     rows_scroll.set_min_content_width(0);
     rows.set_size_request(0, -1);
-    rows_scroll.add(&rows);
+    // The New tab command belongs after the last row, not at the bottom of
+    // an empty column. A stack keeps it inside the scrolled area while the
+    // row list itself stays tab-only for render_rows.
+    let rows_stack = widget_box(gtk::Orientation::Vertical, 0);
+    pack(&rows_stack, &rows, false);
+    rows_scroll.add(&rows_stack);
     pack(&body, &rows_scroll, true);
 
     // New tab is a quiet command in the same column rhythm as the tab rows.
@@ -318,7 +327,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     private_tab.hide();
     pack(&create, &newtab, true);
     pack(&create, &private_tab, false);
-    pack(&body, &create, false);
+    pack(&rows_stack, &create, false);
 
     let footer = widget_box(gtk::Orientation::Horizontal, 4);
     class(&footer, "sidebar-footer");

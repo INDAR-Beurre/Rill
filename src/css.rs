@@ -15,7 +15,7 @@ pub mod quiet {
     pub const FAINT: (Rgb, Rgb) = (hex(0x62635A), hex(0xA5A5A5));
     pub const EMPTY_FG: (Rgb, Rgb) = MUTED;
     pub const BLANK_HINT: (Rgb, Rgb) = MUTED;
-    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x898989));
+    pub const FIELD_BORDER: (Rgb, Rgb) = (hex(0x818177), hex(0x707070));
     pub const DISABLED: (Rgb, Rgb) = (hex(0x74766A), hex(0x929292));
     pub const DANGER: (Rgb, Rgb) = (hex(0xAF392C), hex(0xF29C88));
     pub const SWITCH_OFF: (Rgb, Rgb) = (hex(0x818177), hex(0x6B6B6B));

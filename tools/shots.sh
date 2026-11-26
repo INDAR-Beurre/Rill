@@ -687,7 +687,9 @@ if not is_dark() and (out / "05-panel-history.png").exists():
     # The modal veil now covers the whole window, including the sidebar.
     # Both samples must be the same dimmed surface; a bright side would mean
     # only the page area was dimmed.
-    ok = bool(veil) and all(120 <= sum(c) / 3 <= 180 for c in veil)
+    # A quieter scrim is deliberately lighter than the old 148 grey; it must
+    # still be dimmed uniformly and well below the paper surface.
+    ok = bool(veil) and all(175 <= sum(c) / 3 <= 215 for c in veil) and abs(veil[0][0] - veil[1][0]) <= 12
     manifest.append({"name": "pixel light scrim", "ok": ok, "note": str(veil)})
     print(("  ok   " if ok else "  FAIL ") + "pixel light scrim — " + str(veil))
 

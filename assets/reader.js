@@ -8,6 +8,12 @@ window.__searchReaderFont = function (delta) {
   const next = Math.max(14, Math.min(22, current + delta));
   window.__searchReaderSize = next;
   document.documentElement.style.setProperty('--search-reader-size', next + 'px');
+  const label = document.getElementById('__search_reader_size_label');
+  if (label) label.textContent = next + 'px';
+  const less = document.querySelector('#__search_reader_font button[aria-label="Smaller reading text"]');
+  const more = document.querySelector('#__search_reader_font button[aria-label="Larger reading text"]');
+  if (less) less.disabled = next <= 14;
+  if (more) more.disabled = next >= 22;
   return String(next);
 };
 
@@ -130,7 +136,7 @@ window.__searchReader = function (palette) {
     html, body { ${pageCss} !important; }
     body { margin: 0 auto !important; padding: 0 !important; max-width: 720px !important; font: var(--search-reader-size, 18px)/1.62 Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif !important;
       -webkit-font-smoothing: antialiased; }
-    #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 48px 28px 120px; }
+    #__search_reader { box-sizing: border-box; max-width: 660px; margin: 0 auto; padding: 76px 28px 120px; }
     #__search_reader h1 { font-size: 1.79em; line-height: 1.18; letter-spacing: -0.012em; font-weight: 700; margin: 0 0 12px; }
     /* Secondary text is sized in em from the 18px body instead of fixed
        pixels, so it follows the reader's text size and page zoom along with
@@ -175,7 +181,8 @@ window.__searchReader = function (palette) {
     #__search_reader_exit:focus-visible { outline: 2px solid ${muted} !important; outline-offset: 2px !important; border-color: ${muted} !important; }
     /* The type controls sit on the opposite side from the exit pill and the
        find bar, so all three can be captured and used at once. */
-    #__search_reader_font { position: fixed; top: 14px; left: 18px; z-index: 2147483647; display: flex; gap: 6px; }
+    #__search_reader_font { position: fixed; top: 10px; left: 18px; z-index: 2147483647; display: flex; align-items: center; gap: 6px; }
+    #__search_reader_size_label { min-width: 34px; color: ${muted}; font: 12px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif; text-align: center; }
     #__search_reader_font button { all: unset; box-sizing: border-box; min-width: 32px; min-height: 28px; cursor: pointer; text-align: center;
       font: 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
       color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; background: ${ground}; }
@@ -208,7 +215,7 @@ window.__searchReader = function (palette) {
   exit.setAttribute('style', `all: unset; display: inline-block; box-sizing: border-box; min-height: 28px; cursor: pointer;
     font: 13px/18px Inter, "Adwaita Sans", "Noto Sans", Cantarell, sans-serif;
     color: ${muted}; border: 1px solid ${rule}; border-radius: 6px; padding: 4px 10px;
-    position: fixed; top: 14px; right: 18px; background: ${ground}; z-index: 2147483647;`);
+    position: fixed; top: 10px; right: 18px; background: ${ground}; z-index: 2147483647;`);
   // The button calls the toggle with the tokens it was built with, so it can
   // enter again with real colours if a restore ever leaves it on screen.
   const exitPalette = tokens;
@@ -225,7 +232,12 @@ window.__searchReader = function (palette) {
   container.appendChild(exit);
   const font = document.createElement('div');
   font.id = '__search_reader_font';
-  for (const [label, delta, name] of [['A-', -4, 'Smaller reading text'], ['A+', 4, 'Larger reading text']]) {
+  const sizeLabel = document.createElement('span');
+  sizeLabel.id = '__search_reader_size_label';
+  sizeLabel.setAttribute('aria-live', 'polite');
+  sizeLabel.textContent = '18px';
+  font.appendChild(sizeLabel);
+  for (const [label, delta, name] of [['A−', -4, 'Smaller reading text'], ['A+', 4, 'Larger reading text']]) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = label;

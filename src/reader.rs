@@ -170,7 +170,8 @@ mod tests {
         assert!(script.contains("|| 18"), "the default is not the middle step");
         assert!(script.contains("Math.max(14"), "the small step is missing");
         assert!(script.contains("Math.min(22"), "the large step is missing");
-        assert!(script.contains("['A-', -4"), "the controls do not step 14/18/22");
+        assert!(script.contains("['A−', -4"), "the controls do not step 14/18/22");
+        assert!(script.contains("__search_reader_size_label"), "no active size readout");
         assert!(script.contains("['A+', 4"), "the controls do not step 14/18/22");
     }
 

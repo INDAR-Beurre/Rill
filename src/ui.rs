@@ -1066,14 +1066,14 @@ pub fn scrim_colour(palette: &Palette) -> (f64, f64, f64, f64) {
         // only here: the widget draws it, and the capture in app.rs reads
         // scrim_colour, so the screen and the shots stay the same.
         let c = palette.ground;
-        (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0, 0.88)
+        (c.0 as f64 / 255.0, c.1 as f64 / 255.0, c.2 as f64 / 255.0, 0.62)
     } else {
         // A light scrim is a black veil, not white paint over the page.
         // Gemini R60 polish: at 0.28 a busy light page competed with the
         // omnibox and panels above it. At 0.42 the page drops back behind the
         // open layer and its text still shows. As with the dark value, it is
         // set only here, and the capture in app.rs reads scrim_colour.
-        (0.0, 0.0, 0.0, 0.42)
+        (0.0, 0.0, 0.0, 0.24)
     }
 }
 

@@ -1081,8 +1081,8 @@ impl Panels {
         let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_overlay_scrolling(false);
+        scroll.set_min_content_height(360);
         scroll.set_max_content_height(MAX_HEIGHT);
-        scroll.set_propagate_natural_height(true);
         scroll.set_vexpand(true);
         scroll.add(content);
         scroll

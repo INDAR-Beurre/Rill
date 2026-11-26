@@ -248,7 +248,11 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .omni entry:focus {{ outline: none; border: none; box-shadow: none; }}
 .omnitext {{ font-family: {font}; font-size: {entry_size}px; color: {ink}; }}
 .omni-search-icon {{ color: {accent}; }}
-.omnisite {{ font-family: {font}; font-size: {small}px; color: {accent}; padding: 4px 7px; background-color: {tint}; border-radius: 4px; }}
+.omnisite {{ font-family: {font}; font-size: {small}px; color: {accent}; }}
+.omnisite-pill {{ padding: 4px 8px; background-color: {tint}; border-radius: 5px; }}
+.omnisite-pill.insecure {{ background-color: {tint}; border: 1px solid {dangerink}; }}
+.omnisite-pill.insecure .omnisite {{ color: {dangerink}; font-weight: 600; }}
+.folded-controls {{ background-color: {surface}; border: 1px solid {divider}; border-radius: 7px; padding: 2px; box-shadow: 0 2px 8px {shadow}; }}
 .omni-escape {{ font-family: {mono}; font-size: {caption}px; color: {muted}; border: 1px solid {divider}; border-radius: 3px; padding: 3px 5px; }}
 .omni-footer {{ border-top: 1px solid {divider}; padding: 8px 14px; }}
 .omni-footer label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
@@ -304,6 +308,11 @@ button.start-protection:hover {{ background-color: {hover}; }}
 .panel button.panel-nav-item.on .panel-nav-icon {{ color: {accent}; }}
 .panel.panel-compact .panel-rail {{ border-right: none; border-bottom: 1px solid {divider}; border-radius: 11px 11px 0 0; }}
 .panel.panel-compact button.panel-nav-item {{ min-width: 0; padding: 7px 5px; border-radius: 4px; }}
+.panel.panel-compact button.panel-nav-item.on {{ box-shadow: inset 0 -2px 0 {accent}; }}
+.panel .purl.dl-failed {{ color: {dangerink}; font-weight: 600; }}
+progressbar.dl-progress {{ min-height: 4px; margin-top: 4px; }}
+progressbar.dl-progress trough {{ background-color: {wash}; border: none; border-radius: 2px; min-height: 4px; }}
+progressbar.dl-progress progress {{ background-color: {accent}; border: none; border-radius: 2px; min-height: 4px; }}
 .panel.panel-compact .panel-heading {{ font-size: {panel_heading_compact}px; letter-spacing: -0.4px; }}
 .panel .panel-section-heading {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {muted}; margin: 0; }}
 .panel-section-description {{ font-size: {small}px; color: {muted}; }}

@@ -39,10 +39,13 @@ pub struct Omnibox {
     pub holder: gtk::Fixed,
     layer: Layer,
     pub scrim: gtk::DrawingArea,
+    scrim_alpha: std::rc::Rc<std::cell::Cell<f64>>,
     pub block: gtk::Box,
     pub field: gtk::Box,
     pub entry: gtk::Entry,
     pub site: gtk::Label,
+    site_icon: gtk::Box,
+    site_pill: gtk::Box,
     pub site_box: gtk::EventBox,
     /// The footer's action label. Its verb follows the first row: an Open
     /// row switches tabs, so "Enter  open" would promise the wrong thing.
@@ -173,7 +176,7 @@ impl Omnibox {
     pub fn new(palette: &Palette) -> Omnibox {
         let layer = Layer::new();
 
-        let scrim = crate::ui::scrim(palette);
+        let (scrim, scrim_alpha) = crate::ui::scrim_with_alpha(palette);
         layer.add(&scrim);
 
         // The list scrolls inside a cap instead of being cropped by one: eight
@@ -200,21 +203,28 @@ impl Omnibox {
         magnifier.set_valign(gtk::Align::Center);
         crate::ui::pack(&field, &magnifier, false);
 
+        let site_pill = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        crate::ui::class(&site_pill, "omnisite-pill");
+        site_pill.set_valign(gtk::Align::Center);
+        let site_icon = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        site_icon.set_valign(gtk::Align::Center);
         let site = gtk::Label::new(None);
         crate::ui::class(&site, "omnisite");
-        site.set_margin_start(4);
         site.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        site.set_max_width_chars(14);
-        site.set_no_show_all(true);
-        // Clicking the site name opens its card, the same as Ctrl I.
+        site.set_max_width_chars(16);
+        crate::ui::pack(&site_pill, &site_icon, false);
+        crate::ui::pack(&site_pill, &site, false);
+        // Clicking the site chip opens its card, the same as Ctrl I.
         let site_box = gtk::EventBox::new();
         site_box.set_no_show_all(true);
         site_box.set_visible_window(false);
+        site_box.set_valign(gtk::Align::Center);
+        site_box.set_margin_start(4);
         crate::ui::class(&site_box, "omnisite-hit");
         if let Some(access) = site_box.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, "Site information");
         }
-        site_box.add(&site);
+        site_box.add(&site_pill);
         site_box.connect_button_press_event(|_, _| {
             if let Some(app) = crate::app::current() {
                 app.close_omni();
@@ -356,10 +366,13 @@ impl Omnibox {
             holder,
             layer,
             scrim,
+            scrim_alpha,
             block,
             field,
             entry,
             site,
+            site_icon,
+            site_pill,
             site_box,
             commit,
             list,
@@ -404,12 +417,36 @@ impl Omnibox {
         self.list.preferred_height_for_width(width).0.max(0)
     }
 
-    fn set_site_chip(&self, host: &str) {
+    fn set_site_chip(&self, url: &str, host: &str) {
         if host.is_empty() {
             self.site_box.set_no_show_all(true);
             self.site_box.hide();
             self.entry.set_margin_start(4);
         } else {
+            for child in self.site_icon.children() {
+                self.site_icon.remove(&child);
+            }
+            let lower = url.to_ascii_lowercase();
+            let insecure = lower.starts_with("http://");
+            let ctx = self.site_pill.style_context();
+            if insecure {
+                ctx.add_class("insecure");
+            } else {
+                ctx.remove_class("insecure");
+            }
+            if let Some(app) = crate::app::current() {
+                let palette = *app.palette.borrow();
+                let (kind, color) = if lower.starts_with("https://") {
+                    (crate::icons::Icon::Lock, palette.accent())
+                } else if insecure {
+                    (crate::icons::Icon::ShieldAlert, palette.danger)
+                } else {
+                    (crate::icons::Icon::Globe, palette.muted)
+                };
+                let glyph = crate::icons::area(kind, 13, color);
+                glyph.set_valign(gtk::Align::Center);
+                self.site_icon.add(&glyph);
+            }
             self.site_box.set_no_show_all(false);
             self.site.set_text(host);
             self.site_box.show_all();
@@ -424,6 +461,7 @@ impl Omnibox {
         crate::motion::cancel(&self.list_scroll);
         self.layer.root.set_opacity(1.0);
         self.scrim.set_opacity(1.0);
+        self.scrim_alpha.set(1.0);
         self.block.set_opacity(1.0);
         self.list_scroll.set_opacity(1.0);
         self.visible.set(true);
@@ -455,14 +493,12 @@ impl Omnibox {
         self.layer.show();
         // The chip only exists when there is something to say about the page:
         // an empty field with a label saying "Search" says it twice.
-        let host = crate::app::current()
-            .and_then(|app| app.state.borrow().active_tab().map(|tab| chip_host(&tab.url)))
-            .unwrap_or_default();
-        // The chip names where you are, whenever there is a where.
-        self.set_site_chip(&host);
         let current = crate::app::current()
             .and_then(|app| app.state.borrow().active_tab().map(|tab| tab.url.clone()))
             .unwrap_or_default();
+        let host = chip_host(&current);
+        // The chip names where you are and its transport state whenever there is a where.
+        self.set_site_chip(&current, &host);
         // Typing replaces the address, and the chip is already the site, so
         // the entry shows the part the chip cannot: "127.0.0.1" beside
         // "http://127.0.0.1:8099/office" says the same thing twice.
@@ -490,7 +526,7 @@ impl Omnibox {
         // The scrim, field and list all arrive on the shared entrance role,
         // so they land on the same frame instead of at 130, 150 and 160ms.
         if over {
-            crate::motion::fade_in(&self.scrim, crate::motion::dur::ENTER);
+            crate::motion::fade_alpha(&self.scrim, &self.scrim_alpha, crate::motion::dur::ENTER);
         }
         if width > 1 && height > 1 {
             let page = (width - column).max(0);
@@ -800,7 +836,7 @@ impl Omnibox {
             })
             .unwrap_or_default();
         let host = chip_host(&target);
-        self.set_site_chip(&host);
+        self.set_site_chip(&target, &host);
     }
 
     pub fn picked_is_open_tab(&self) -> bool {

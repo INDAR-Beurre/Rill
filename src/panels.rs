@@ -8,7 +8,7 @@ use gtk::prelude::*;
 const INSET: i32 = 28;
 const COMPACT_INSET: i32 = 18;
 const RAIL_WIDTH: i32 = 176;
-const MAX_HEIGHT: i32 = 640;
+const MAX_HEIGHT: i32 = 740;
 
 fn widget_insets(widget: &impl IsA<gtk::Widget>) -> (i32, i32, i32, i32) {
     let context = widget.style_context();
@@ -145,6 +145,7 @@ pub struct Panels {
     pub holder: gtk::Fixed,
     layer: crate::layer::Layer,
     pub scrim: gtk::DrawingArea,
+    scrim_alpha: std::rc::Rc<std::cell::Cell<f64>>,
     pub card: gtk::Box,
     pub title: gtk::Label,
     pub nav: gtk::Box,
@@ -252,7 +253,7 @@ impl Panels {
         let layer = crate::layer::Layer::new();
         let holder = layer.root.clone();
 
-        let scrim = crate::ui::scrim(palette);
+        let (scrim, scrim_alpha) = crate::ui::scrim_with_alpha(palette);
 
         let card = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         crate::ui::class(&card, "panel");
@@ -394,6 +395,7 @@ impl Panels {
             holder,
             layer,
             scrim,
+            scrim_alpha,
             card,
             title,
             nav,
@@ -495,6 +497,7 @@ impl Panels {
         crate::motion::cancel(&self.scroll);
         self.layer.root.set_opacity(1.0);
         self.scrim.set_opacity(1.0);
+        self.scrim_alpha.set(1.0);
         self.card.set_opacity(1.0);
         self.scroll.set_opacity(1.0);
 
@@ -562,15 +565,15 @@ impl Panels {
             self.scroll.vadjustment().set_value(0.0);
         }
         if !was_open {
-            // The scrim fades on the shared entrance role, under the card,
-            // so both land on the same frame.
-            crate::motion::fade_in(&self.scrim, crate::motion::dur::ENTER);
+            // The scrim fades via direct alpha draw (no full-screen offscreen
+            // surface copy) on the shared entrance role under the card.
+            crate::motion::fade_alpha(&self.scrim, &self.scrim_alpha, crate::motion::dur::ENTER);
             if width > 1 && height > 1 {
-                let card_height = self.card_height(card_width, height);
+                let tallest = MAX_HEIGHT.min((height - 80).max(1));
                 let x = column + ((page - card_width) / 2).max(12);
-                let y = ((height - card_height) / 2).max(band + 4);
-                // First open rises the shared 8px on the entrance role, and the
-                // 130ms close fade mirrors it.
+                let y = ((height - tallest) / 2).max(band + 12);
+                // First open rises the shared 8px into the exact same top anchor
+                // that layout_card uses, so shorter panels never jump vertically.
                 crate::motion::slide_in_fixed(
                     &self.layer.root,
                     &self.card,
@@ -1116,8 +1119,8 @@ impl Panels {
         let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_overlay_scrolling(false);
-        scroll.set_min_content_height(260);
-        scroll.set_max_content_height(380);
+        scroll.set_min_content_height(340);
+        scroll.set_max_content_height(480);
         scroll.set_vexpand(true);
         scroll.add(content);
         scroll
@@ -1208,6 +1211,7 @@ impl Panels {
         self.body.add(&filter);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
+        list.set_margin_end(10);
         let mut shown = 0;
         for bookmark in bookmarks.into_iter().filter(|bookmark| self.matches(&format!("{} {}", bookmark.title, bookmark.url))) {
             shown += 1;
@@ -1317,6 +1321,7 @@ impl Panels {
         self.body.add(&filter);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
+        list.set_margin_end(10);
         let now = now_secs();
         // The filter runs before the cap, not after: taking the newest 300 and
         // then searching them made every older page unfindable while the
@@ -1439,6 +1444,7 @@ impl Panels {
 
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
+        list.set_margin_end(10);
         let mut shown = 0;
         for download in downloads.into_iter().filter(|download| self.matches(&format!("{} {}", download.name, download.path))) {
             shown += 1;
@@ -1477,6 +1483,25 @@ impl Panels {
                     let _ = std::process::Command::new("xdg-open").arg(target).spawn();
                 }
             }, Some(second));
+            if let Some(texts) = row
+                .child()
+                .and_then(|c| c.downcast::<gtk::Box>().ok())
+                .and_then(|hbox| hbox.children().into_iter().next())
+                .and_then(|id| id.downcast::<gtk::Box>().ok())
+                .and_then(|id| id.children().into_iter().nth(1))
+                .and_then(|t| t.downcast::<gtk::Box>().ok())
+            {
+                if download.failed {
+                    if let Some(sub_label) = texts.children().into_iter().nth(1) {
+                        crate::ui::class(&sub_label, "dl-failed");
+                    }
+                } else if !download.done && download.total > 0 {
+                    let bar = gtk::ProgressBar::new();
+                    crate::ui::class(&bar, "dl-progress");
+                    bar.set_fraction((download.got as f64 / download.total as f64).clamp(0.0, 1.0));
+                    texts.add(&bar);
+                }
+            }
             list.add(&row);
         }
         if shown == 0 {
@@ -1505,6 +1530,7 @@ impl Panels {
         let installed = crate::extensions::registry().extensions;
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
+        list.set_margin_end(10);
         let installed_section = self.section(app, crate::icons::Icon::Spark, "Installed", "Enable, inspect, or remove your extensions.");
 
         if installed.is_empty() {
@@ -1542,12 +1568,46 @@ impl Panels {
                         app.open_panel(PanelKind::Extensions);
                     }
                 },
-                Some(("Remove", Box::new(move |app: &AppRef| {
-                    crate::extensions::remove(&id);
-                    app.rebuild_every_view();
-                    app.open_panel(PanelKind::Extensions);
+                Some(("Remove", Box::new({
+                    let id = id.clone();
+                    move |app: &AppRef| {
+                        crate::extensions::remove(&id);
+                        app.rebuild_every_view();
+                        app.open_panel(PanelKind::Extensions);
+                    }
                 }))),
             );
+            if let Some(actions) = row
+                .child()
+                .and_then(|c| c.downcast::<gtk::Box>().ok())
+                .and_then(|hbox| hbox.children().into_iter().nth(1))
+                .and_then(|a| a.downcast::<gtk::Box>().ok())
+            {
+                if let Some(first_btn) = actions.children().into_iter().next() {
+                    actions.remove(&first_btn);
+                }
+                let toggle = gtk::Switch::new();
+                toggle.set_active(on);
+                toggle.set_valign(gtk::Align::Center);
+                toggle.set_tooltip_text(Some(if on { "Disable extension" } else { "Enable extension" }));
+                if let Some(access) = toggle.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&access, &format!("Enable {}", entry.name));
+                }
+                let app_weak = app.weak();
+                let id_toggle = id.clone();
+                toggle.connect_active_notify(move |sw| {
+                    if let Some(app) = app_weak.upgrade() {
+                        let next = sw.is_active();
+                        if next != on {
+                            crate::extensions::set_enabled(&id_toggle, next);
+                            app.rebuild_every_view();
+                            app.open_panel(PanelKind::Extensions);
+                        }
+                    }
+                });
+                actions.pack_start(&toggle, false, false, 0);
+                actions.reorder_child(&toggle, 0);
+            }
             installed_section.add(&row);
             // An extension that ships an options page gets a way to open it.
             // It is a file on disk, so it opens as a page, which is what it is.
@@ -1683,6 +1743,7 @@ impl Panels {
         self.clear_body();
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
+        list.set_margin_end(10);
         let prefs = app.prefs.borrow().clone();
         let query = self.filter.borrow().clone();
         let app_weak = std::rc::Rc::<crate::app::App>::downgrade(app);
@@ -1952,6 +2013,7 @@ impl Panels {
         self.clear_body();
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
+        list.set_margin_end(10);
         // The sheet is `keys::SHEET`: the same table the bench presses and the
         // tests check, so what is drawn here cannot advertise a dead key.
         // Sentence case, like every other panel and Settings heading. The

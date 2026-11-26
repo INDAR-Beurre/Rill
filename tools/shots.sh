@@ -388,6 +388,14 @@ try:
                          + json.dumps(bench.probe().get("tabs"))[:300])
     shot("01-default", "one tab, the studio page")
 
+    # 1b. revealed toolbar state (Ctrl Shift S) so both quiet and revealed
+    # shell states are verified at wide and narrow widths.
+    bench.must("toolbar on")
+    time.sleep(0.3)
+    shot("01b-toolbar", "revealed browser toolbar")
+    bench.must("toolbar off")
+    time.sleep(0.2)
+
     # 2. five tabs, four of them pinned
     tabs = []
     for title, body in [("X Studio", ""), ("Notion Labs", ""), ("Figma Files", ""), ("Search Console", "")]:
@@ -419,7 +427,8 @@ try:
     bench.go(f"http://127.0.0.1:{port}/office")
     bench.wait_loaded(timeout=25)
     bench.must("key omni")
-    time.sleep(0.2)
+    time.sleep(0.25)
+    shot("04-omni-current", "the field opened on the current page with security chip and path")
     bench.must("omnitext ")
     bench.must("pump")
     time.sleep(0.4)

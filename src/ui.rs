@@ -45,6 +45,13 @@ pub struct Ui {
     pub light_red: gtk::EventBox,
     pub light_amber: gtk::EventBox,
     pub light_green: gtk::EventBox,
+    /// Quiet top-right window controls shown only when the sidebar is folded
+    /// and the optional toolbar is hidden, so minimise/maximise/close stay
+    /// reachable in every non-fullscreen shell state.
+    pub folded_controls: gtk::Box,
+    pub folded_red: gtk::EventBox,
+    pub folded_amber: gtk::EventBox,
+    pub folded_green: gtk::EventBox,
     pub back: gtk::Button,
     pub forward: gtk::Button,
     pub reload: gtk::Button,
@@ -619,6 +626,20 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pack(&frame, &paned, true);
     overlay.add(&frame);
 
+    let folded_controls = widget_box(gtk::Orientation::Horizontal, 2);
+    class(&folded_controls, "folded-controls");
+    folded_controls.set_halign(gtk::Align::End);
+    folded_controls.set_valign(gtk::Align::Start);
+    folded_controls.set_margin_top(8);
+    folded_controls.set_margin_end(12);
+    let (folded_red, folded_amber, folded_green) = window_controls(palette);
+    pack(&folded_controls, &folded_amber, false);
+    pack(&folded_controls, &folded_green, false);
+    pack(&folded_controls, &folded_red, false);
+    folded_controls.set_no_show_all(true);
+    folded_controls.hide();
+    overlay.add_overlay(&folded_controls);
+
     Ui {
         window,
         overlay,
@@ -649,6 +670,10 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         light_red,
         light_amber,
         light_green,
+        folded_controls,
+        folded_red,
+        folded_amber,
+        folded_green,
         back,
         forward,
         reload,
@@ -1092,19 +1117,28 @@ pub fn scrim_colour(palette: &Palette) -> (f64, f64, f64, f64) {
     }
 }
 
-pub fn scrim(palette: &Palette) -> gtk::DrawingArea {
+pub fn scrim_with_alpha(palette: &Palette) -> (gtk::DrawingArea, std::rc::Rc<std::cell::Cell<f64>>) {
     let area = gtk::DrawingArea::new();
     crate::ui::class(&area, "scrim");
     area.set_hexpand(true);
     area.set_vexpand(true);
     area.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+    let alpha = std::rc::Rc::new(std::cell::Cell::new(1.0_f64));
+    let alpha_draw = alpha.clone();
     let (r, g, b, a) = scrim_colour(palette);
     area.connect_draw(move |_, context| {
-        context.set_source_rgba(r, g, b, a);
-        let _ = context.paint();
+        let factor = alpha_draw.get().clamp(0.0, 1.0);
+        if factor > 0.001 {
+            context.set_source_rgba(r, g, b, a * factor);
+            let _ = context.paint();
+        }
         crate::gtkx::inh(false)
     });
-    area
+    (area, alpha)
+}
+
+pub fn scrim(palette: &Palette) -> gtk::DrawingArea {
+    scrim_with_alpha(palette).0
 }
 
 

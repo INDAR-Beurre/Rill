@@ -214,6 +214,31 @@ pub fn open(app: &App) {
     let card = permissions::card(app, &title);
     card.set_widget_name("site-card");
     card.set_size_request(380, -1);
+    if let Some(first) = card.children().into_iter().next() {
+        card.remove(&first);
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        head.pack_start(&first, true, true, 0);
+        let close = crate::icons::button(
+            crate::icons::Icon::Close,
+            14,
+            app.palette.borrow().muted,
+            "panelclose",
+        );
+        close.set_can_focus(true);
+        close.set_tooltip_text(Some("Close site information (Escape)"));
+        if let Some(access) = close.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Close site information");
+        }
+        let weak = app.weak();
+        close.connect_clicked(move |_| {
+            if let Some(app) = weak.upgrade() {
+                dismiss(&app);
+            }
+        });
+        head.pack_end(&close, false, false, 0);
+        card.pack_start(&head, false, false, 0);
+        card.reorder_child(&head, 0);
+    }
     if let Some(access) = card.accessible() {
         gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::Dialog);
         gtk::atk::prelude::AtkObjectExt::set_name(&access, "Site information");

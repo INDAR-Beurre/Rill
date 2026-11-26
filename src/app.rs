@@ -2911,6 +2911,21 @@ impl App {
 
     /// Chrome is normally hidden: the page is the browser. Ctrl+L still opens
     /// the command field, and the menu can reveal the controls again.
+    pub fn sync_folded_controls(&self) {
+        let prefs = self.prefs.borrow();
+        let show = (prefs.column_folded || !prefs.sidebar)
+            && !prefs.show_toolbar
+            && !self.fullscreen.get()
+            && self.ui.side.is_child_visible();
+        self.ui.folded_controls.set_no_show_all(true);
+        self.ui.folded_controls.set_visible(show);
+        if show {
+            for child in self.ui.folded_controls.children() {
+                child.show_all();
+            }
+        }
+    }
+
     pub fn sync_toolbar(&self) {
         let on = self.prefs.borrow().show_toolbar && !self.fullscreen.get();
         // `set_child_visible` hid the marks but left the 72px EventBox in
@@ -2918,6 +2933,12 @@ impl App {
         // widget itself and opt it out of the window's show_all().
         self.ui.toolbar.set_no_show_all(true);
         self.ui.toolbar.set_visible(on);
+        if on {
+            for child in self.ui.toolbar.children() {
+                child.show_all();
+            }
+        }
+        self.sync_folded_controls();
     }
 
     pub fn set_toolbar_visible(&self, on: bool) {
@@ -3040,6 +3061,7 @@ impl App {
         self.ui.side.set_child_visible(plan.side_shown);
         let min_width = if !folded && sidebar { crate::ui::MIN_COL.min(plan.width) } else { plan.width };
         self.ui.side.set_size_request(min_width, -1);
+        self.sync_folded_controls();
         self.ui.strip.set_visible(plan.strip);
         if plan.body {
             // GTK3's show_all returns at once on a widget marked no_show_all,
@@ -5079,6 +5101,33 @@ impl App {
         {
             let weak = self.weak();
             self.ui.light_green.connect_button_press_event(move |_, _| {
+                if let Some(app) = weak.upgrade() {
+                    app.toggle_maximised();
+                }
+                crate::gtkx::inh(true)
+            });
+        }
+        {
+            let weak = self.weak();
+            self.ui.folded_red.connect_button_press_event(move |_, _| {
+                if let Some(app) = weak.upgrade() {
+                    app.ui.window.close();
+                }
+                crate::gtkx::inh(true)
+            });
+        }
+        {
+            let weak = self.weak();
+            self.ui.folded_amber.connect_button_press_event(move |_, _| {
+                if let Some(app) = weak.upgrade() {
+                    app.ui.window.iconify();
+                }
+                crate::gtkx::inh(true)
+            });
+        }
+        {
+            let weak = self.weak();
+            self.ui.folded_green.connect_button_press_event(move |_, _| {
                 if let Some(app) = weak.upgrade() {
                     app.toggle_maximised();
                 }

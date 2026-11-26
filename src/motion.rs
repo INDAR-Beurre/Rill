@@ -282,6 +282,28 @@ pub fn fade_in(widget: &impl IsA<gtk::Widget>, duration_ms: u64) {
     fade_from(widget, 0.0, 1.0, duration_ms);
 }
 
+/// Fades a direct-draw alpha multiplier from `0.0` to `1.0` and redraws the
+/// widget without forcing GTK3 to allocate an offscreen opacity surface.
+pub fn fade_alpha(
+    widget: &impl IsA<gtk::Widget>,
+    alpha: &std::rc::Rc<std::cell::Cell<f64>>,
+    duration_ms: u64,
+) {
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    let alpha = alpha.clone();
+    animate(
+        widget,
+        duration_ms,
+        move |t| {
+            alpha.set(ease_out_cubic(t));
+            if let Some(w) = weak.upgrade() {
+                w.queue_draw();
+            }
+        },
+        || {},
+    );
+}
+
 /// Fades `widget` opacity from `from` to `to` using an ease-out cubic curve.
 pub fn fade_from(widget: &impl IsA<gtk::Widget>, from: f64, to: f64, duration_ms: u64) {
     let weak = widget.upcast_ref::<gtk::Widget>().downgrade();

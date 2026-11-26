@@ -5,17 +5,6 @@ use crate::palette::Palette;
 use crate::store::{ago, day_of, now_secs, Records};
 use gtk::prelude::*;
 
-/// True for a section heading such as "Tabs" or "Browsing": a label with the
-/// `group` style class. Every panel heading is built that way (Settings,
-/// History days, keywords, site permissions). `snap_to_row` uses this so a
-/// scrolling card never ends just below a heading with none of its rows.
-fn is_heading(widget: &gtk::Widget) -> bool {
-    let context = widget.style_context();
-    context.has_class("group")
-        || context.has_class("panel-section-header")
-        || context.has_class("panel-section-description")
-}
-
 const INSET: i32 = 28;
 const COMPACT_INSET: i32 = 18;
 const RAIL_WIDTH: i32 = 176;
@@ -446,6 +435,8 @@ impl Panels {
                 .cloned()
                 .and_then(|holder| holder.downcast::<gtk::ScrolledWindow>().ok())
                 .and_then(|scroll| scroll.child())
+                .and_then(|viewport| viewport.downcast::<gtk::Viewport>().ok())
+                .and_then(|viewport| viewport.child())
                 .and_then(|child| child.downcast::<gtk::Box>().ok());
             if let Some(list) = list {
                 let entry = list.children().first().cloned().and_then(|child| child.downcast::<gtk::Entry>().ok());
@@ -946,17 +937,10 @@ impl Panels {
         (self.rail.preferred_height_for_width(self.rail.preferred_width().0).0 + top + bottom).max(240)
     }
 
-    fn card_height(&self, card_width: i32, window_height: i32) -> i32 {
+    fn card_height(&self, _card_width: i32, window_height: i32) -> i32 {
         let available = (window_height - self.band.get() - 24).max(1);
         let minimum = self.minimum_height().min(available);
-        let height = self.wanted_height.get().min((window_height - 80).max(240)).max(minimum).min(available);
-        if height < self.wanted_height.get() {
-            self.snap_to_row((self.body_width(card_width) - 18).max(1), height)
-                .max(minimum)
-                .min(height)
-        } else {
-            height
-        }
+        self.wanted_height.get().min((window_height - 80).max(240)).max(minimum).min(available)
     }
 
     /// The body's visible widgets, with the permanent Settings holder expanded
@@ -1004,8 +988,9 @@ impl Panels {
             }
             let width = app.ui.overlay.allocated_width();
             let height = app.ui.overlay.allocated_height();
-            let card_width = panel_card_width((width - panels.column.get()).max(1));
-            panels.wanted_height.set(panels.fit_height(card_width));
+            panels
+                .wanted_height
+                .set(panels.fit_height(panel_card_width((width - panels.column.get()).max(1))));
             panels.layout_card(width, height);
             panels.scroll.check_resize();
         });
@@ -1027,12 +1012,10 @@ impl Panels {
             Self::adapt_content(self.body.upcast_ref(), (self.content_width(card_width) - 18).max(1));
             self.fitted_width.set(card_width);
             let capped = (self.measure_content(inner_scrolled) + above).clamp(minimum, MAX_HEIGHT);
-            // A list taller than the card used to stop at MAX_HEIGHT exactly,
-            // so the bottom edge cut through a row (History, Settings).
-            // card_height only snaps when the window shrinks the card further,
-            // so snap here too and end the card on a whole row.
-            let height = self.snap_to_row(inner_scrolled, capped).max(minimum).min(capped);
-            return height;
+            // A snapped card can be shorter than the scrollbar's preferred
+            // height, which clips a partially visible row. Keep the full cap:
+            // the scrollbar already ends the viewport on whole rows.
+            return capped;
         }
         self.fitted_width.set(card_width);
         let height = wanted.clamp(minimum, MAX_HEIGHT);
@@ -1056,43 +1039,7 @@ impl Panels {
         total
     }
 
-    /// Shortens a scrolling card so its viewport ends on the edge of a row.
-    /// The edge is never just below a group heading: the cut goes above the
-    /// heading instead, so a section title is shown with at least one row.
-    ///
-    /// The viewport is the card minus everything outside the scroller (the
-    /// title row and the panel tabs). Walk the body's children from the top,
-    /// and step into a vertical list box one row at a time. Keep the last edge
-    /// that still fits. If no edge reaches past half the viewport (one very
-    /// tall child), keep the height as it is, because cutting more would hide
-    /// more than it shows.
-    fn snap_to_row(&self, width: i32, card_height: i32) -> i32 {
-        let chrome = self.chrome_height(self.fitted_width.get().max(1));
-        // chrome_height counts the body's own top and bottom margins, because
-        // the full-content measure needs them. They are not fixed chrome,
-        // though: they sit inside the scroller and scroll with the rows. When
-        // they were taken out of the viewport, the snapped card ended
-        // body_bottom pixels lower than the row edge, so the next row showed
-        // its top (History, Settings, Shortcuts, Extensions). So measure the
-        // real scroller viewport here, and place row edges after body_top.
-        let (_, _, body_top, body_bottom) = widget_insets(&self.body);
-        let viewport = card_height - (chrome - body_top - body_bottom);
-        if viewport <= 0 {
-            return card_height;
-        }
-        let mut edges = Vec::new();
-        let mut position = body_top;
-        for child in self.body_children().into_iter().filter(|child| child.is_visible()) {
-            Self::row_edges(&child, width, position, &mut edges);
-            position += child.preferred_height_for_width(width).1;
-        }
-        let edge = edges.into_iter().filter(|edge| *edge <= viewport).max().unwrap_or(0);
-        if edge * 2 < viewport {
-            return card_height;
-        }
-        (card_height - (viewport - edge)).max(200)
-    }
-
+    #[allow(dead_code)]
     fn row_edges(widget: &gtk::Widget, width: i32, origin: i32, edges: &mut Vec<i32>) {
         let total = widget.preferred_height_for_width(width).1;
         let context = widget.style_context();
@@ -1115,10 +1062,8 @@ impl Panels {
                 Self::row_edges(child, inner, position, edges);
                 position += child.preferred_height_for_width(inner).1 + list.spacing();
             }
-            if children.last().is_some_and(|child| !is_heading(child)) {
-                edges.push(origin + total);
-            }
-        } else if !is_heading(widget) {
+            edges.push(origin + total);
+        } else {
             edges.push(origin + total);
         }
     }
@@ -1137,6 +1082,7 @@ impl Panels {
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_overlay_scrolling(false);
         scroll.set_max_content_height(MAX_HEIGHT);
+        scroll.set_propagate_natural_height(true);
         scroll.set_vexpand(true);
         scroll.add(content);
         scroll

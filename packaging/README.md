@@ -5,17 +5,17 @@ helpers, GStreamer (including `libgstautodetect.so` and `libgstaudiofx.so`),
 fonts, licenses, and the required desktop resources. It is not a launcher for a
 browser already on your system, and it does not use Chromium.
 
-The current Rill build is local and unreleased — no new Rill AppImage has been
-built or published yet. Historic `1.0.1` and `1.0.2` AppImages
+Rill 1.1.0 publishes `Rill-1.1.0-x86_64.AppImage` with its `.sha256` sidecar. Historic `1.0.1` and `1.0.2` AppImages
 (`build/Search-1.0.2-x86_64.AppImage`) and the earlier F39 local candidate
 (`build/Search-redesign-x86_64.AppImage`) remain frozen historical artifacts
 and must not be overwritten.
 
-## Historical `1.0.2` AppImage reference
+## Running the AppImage
 
 ```sh
-chmod +x Search-1.0.2-x86_64.AppImage
-./Search-1.0.2-x86_64.AppImage
+sha256sum -c Rill-1.1.0-x86_64.AppImage.sha256
+chmod +x Rill-1.1.0-x86_64.AppImage
+./Rill-1.1.0-x86_64.AppImage
 ```
 
 Open a web address directly (in the current build, use `--url`):
@@ -68,7 +68,7 @@ tools/appimage.sh --preflight
 Build the local redesign candidate:
 
 ```sh
-APPIMAGE_OUT="$PWD/build/Search-redesign-x86_64.AppImage" tools/appimage.sh
+APPIMAGE_OUT="$PWD/build/Rill-1.1.0-x86_64.AppImage" tools/appimage.sh
 ```
 
 `tools/appimage.sh` defaults `APPIMAGE_OUT` to

@@ -15,3 +15,23 @@ where
         })
     });
 }
+
+/// Evaluates JavaScript inside a named isolated WebKit script world so page
+/// scripts in the main world cannot read, spoof, or tamper with browser state.
+pub fn run_in_world<F>(view: &WebView, world: &str, code: &str, done: F)
+where
+    F: FnOnce(Result<String, String>) + 'static,
+{
+    view.evaluate_javascript(
+        code,
+        Some(world),
+        None,
+        None::<&gtk::gio::Cancellable>,
+        move |result| {
+            done(match result {
+                Ok(value) => Ok(value.to_str().to_string()),
+                Err(error) => Err(error.to_string()),
+            })
+        },
+    );
+}

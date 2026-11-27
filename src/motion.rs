@@ -169,6 +169,45 @@ impl Drop for Retire {
 /// The token is removed so a callback that is already running sees no match
 /// and breaks. The frame callback itself is removed at once, so a cancelled
 /// animation does not wake the frame clock again.
+/// Returns `true` while an active frame-clock animation owns `widget`.
+pub fn is_animating(widget: &impl IsA<gtk::Widget>) -> bool {
+    let key = widget_key(widget);
+    ACTIVE_TOKENS.with(|tokens| tokens.borrow().contains_key(&key))
+}
+
+/// Initial anchor advance credited to the very first frame-clock tick (one 60Hz frame).
+const FIRST_TICK_STEP_US: i64 = 16_667;
+
+/// Maximum frame-clock advance credited to the first real inter-frame tick
+/// (`tick_index == 1`, right after the initial paint). Native 60Hz ticks
+/// (~16.7ms) advance at exact wall-clock speed; a single heavy first-paint
+/// layout/rasterization stall cannot consume the entire entrance duration in
+/// one tick, while every subsequent tick (`tick_index >= 2`) advances at exact
+/// wall-clock delta so sustained slow frames never stretch into slow motion.
+const FIRST_PAINT_CLAMP_US: i64 = 33_333;
+
+/// Advances accumulated animation time `elapsed_us` by `delta_us` on tick
+/// `tick_index` (`0` = first anchor tick, `1` = first inter-frame tick after
+/// initial paint, `2+` = steady ticks). Returns `(next_elapsed_us, t)`.
+fn advance_elapsed(elapsed_us: f64, delta_us: i64, duration_us: f64, tick_index: u32) -> (f64, f64) {
+    if duration_us <= 0.0 {
+        return (0.0, 1.0);
+    }
+    let non_neg = delta_us.max(0);
+    let step = if tick_index == 1 {
+        non_neg.min(FIRST_PAINT_CLAMP_US) as f64
+    } else {
+        non_neg as f64
+    };
+    let next = (elapsed_us + step).min(duration_us);
+    (next, (next / duration_us).clamp(0.0, 1.0))
+}
+
+fn telemetry_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SEARCH_MOTION_TELEMETRY").is_some())
+}
+
 pub fn cancel(widget: &impl IsA<gtk::Widget>) {
     let key = widget_key(widget);
     ACTIVE_TOKENS.with(|tokens| {
@@ -209,12 +248,28 @@ pub fn animate(
     // first tick jump straight to t=1.0 in a single frame. Anchoring at
     // `now - 16_667` on the first tick avoids both a held t=0 frame and a
     // stale-clock jump, so every entrance interpolates smoothly across frames.
-    let start_us: Cell<Option<i64>> = Cell::new(None);
-    let ticked = Cell::new(false);
+    let last_us: Cell<Option<i64>> = Cell::new(None);
+    let elapsed_us: Cell<f64> = Cell::new(0.0);
+    let tick_count: Cell<u32> = Cell::new(0);
     let step_cell = RefCell::new(step);
     let done_cell = Cell::new(Some(on_done));
     let duration_us = duration_ms as f64 * 1000.0;
     let retire = Retire { key, token };
+    let tele_on = telemetry_enabled();
+    let started_at = if tele_on { Some(std::time::Instant::now()) } else { None };
+    let first_tick_at: Cell<Option<std::time::Instant>> = Cell::new(None);
+    let first_clock_us: Cell<Option<i64>> = Cell::new(None);
+    let deltas_ms: RefCell<Vec<f64>> = RefCell::new(Vec::new());
+    let widget_label = if tele_on {
+        let name = widget.widget_name();
+        if name.is_empty() {
+            widget.type_().name().to_string()
+        } else {
+            format!("{}:{name}", widget.type_().name())
+        }
+    } else {
+        String::new()
+    };
 
     let id = widget.add_tick_callback(move |w, clock| {
         // Keeps the guard inside the closure, so the guard drops when the closure does.
@@ -239,28 +294,71 @@ pub fn animate(
 
         // Checked only after the first tick: a widget shown in the same pass
         // that starts its animation may not report visible until then.
-        if ticked.get() && !w.is_visible() {
+        let idx = tick_count.get();
+        if idx > 0 && !w.is_visible() {
             clear_if_current(key, token);
             return glib::ControlFlow::Break;
         }
-        ticked.set(true);
+        tick_count.set(idx.saturating_add(1));
 
         let now = clock.frame_time();
-        let start = match start_us.get() {
-            Some(s) => s,
+        let delta_us = match last_us.replace(Some(now)) {
+            Some(prev) => {
+                let raw = now - prev;
+                if tele_on {
+                    deltas_ms.borrow_mut().push((raw as f64) / 1000.0);
+                }
+                raw
+            }
             None => {
-                let s = now.saturating_sub(16_667);
-                start_us.set(Some(s));
-                s
+                if tele_on {
+                    first_tick_at.set(Some(std::time::Instant::now()));
+                    first_clock_us.set(Some(now));
+                }
+                FIRST_TICK_STEP_US
             }
         };
-
-        let elapsed_us = (now - start).max(0) as f64;
-        let t = (elapsed_us / duration_us).clamp(0.0, 1.0);
+        let (next_elapsed, t) = advance_elapsed(elapsed_us.get(), delta_us, duration_us, idx);
+        elapsed_us.set(next_elapsed);
 
         step_cell.borrow_mut()(t);
 
         if t >= 1.0 {
+            if tele_on {
+                use std::io::Write as _;
+                let wall_total_ms = started_at
+                    .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                let first_latency_ms = match (started_at, first_tick_at.get()) {
+                    (Some(s), Some(f)) => f.saturating_duration_since(s).as_secs_f64() * 1000.0,
+                    _ => 0.0,
+                };
+                let interp_wall_ms = first_tick_at
+                    .get()
+                    .map(|f| f.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                let clock_span_ms = first_clock_us
+                    .get()
+                    .map(|f| ((now - f).max(0) as f64) / 1000.0)
+                    .unwrap_or(0.0);
+                let (refresh_interval_us, _) = clock.refresh_info(now);
+                let refresh_hz = if refresh_interval_us > 0 {
+                    1_000_000.0 / (refresh_interval_us as f64)
+                } else {
+                    0.0
+                };
+                let deltas_str = deltas_ms
+                    .borrow()
+                    .iter()
+                    .map(|d| format!("{d:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{{\"motion_telemetry\":true,\"widget\":\"{widget_label}\",\"duration_ms\":{duration_ms},\"ticks\":{},\"wall_total_ms\":{wall_total_ms:.2},\"first_tick_latency_ms\":{first_latency_ms:.2},\"interp_wall_ms\":{interp_wall_ms:.2},\"clock_span_ms\":{clock_span_ms:.2},\"refresh_hz\":{refresh_hz:.2},\"deltas_ms\":[{deltas_str}]}}",
+                    tick_count.get()
+                );
+            }
             clear_if_current(key, token);
             if let Some(done) = done_cell.take() {
                 done();
@@ -296,6 +394,29 @@ pub fn fade_alpha(
         duration_ms,
         move |t| {
             alpha.set(ease_out_cubic(t));
+            if let Some(w) = weak.upgrade() {
+                w.queue_draw();
+            }
+        },
+        || {},
+    );
+}
+
+/// Fades a direct-draw alpha multiplier from its current value to `0.0` using
+/// the shared exit curve (`ease_exit`).
+pub fn fade_alpha_out(
+    widget: &impl IsA<gtk::Widget>,
+    alpha: &std::rc::Rc<std::cell::Cell<f64>>,
+    duration_ms: u64,
+) {
+    let start = alpha.get().clamp(0.0, 1.0);
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    let alpha = alpha.clone();
+    animate(
+        widget,
+        duration_ms,
+        move |t| {
+            alpha.set(lerp(start, 0.0, ease_exit(t)));
             if let Some(w) = weak.upgrade() {
                 w.queue_draw();
             }
@@ -341,14 +462,15 @@ pub fn fade_out_then(
 }
 
 /// Slides `widget` inside `fixed` from `to_y + offset_y` to `to_y` while fading
-/// opacity from `0.0` to `1.0` with a quintic ease-out curve.
-pub fn slide_in_fixed(
+/// opacity from `0.0` to `1.0`, then runs `on_done`.
+pub fn slide_in_fixed_then(
     fixed: &gtk::Fixed,
     widget: &impl IsA<gtk::Widget>,
     x: i32,
     to_y: i32,
     offset_y: i32,
     duration_ms: u64,
+    on_done: impl FnOnce() + 'static,
 ) {
     let fixed_weak = fixed.downgrade();
     let widget_weak = widget.upcast_ref::<gtk::Widget>().downgrade();
@@ -365,8 +487,7 @@ pub fn slide_in_fixed(
         duration_ms,
         move |t| {
             let Some(w) = widget_weak.upgrade() else { return };
-            let eased = ease_out_quint(t);
-            let y = lerp(from_y, target_y, eased).round() as i32;
+            let y = lerp(from_y, target_y, ease_out_quint(t)).round() as i32;
             if y != last_y.get() {
                 if let Some(f) = fixed_weak.upgrade() {
                     if w.parent().as_ref() == Some(f.upcast_ref::<gtk::Widget>()) {
@@ -375,10 +496,23 @@ pub fn slide_in_fixed(
                     }
                 }
             }
-            w.set_opacity(eased);
+            w.set_opacity(ease_out_cubic(t));
         },
-        || {},
+        on_done,
     );
+}
+
+/// Slides `widget` inside `fixed` from `to_y + offset_y` to `to_y` while fading
+/// opacity from `0.0` to `1.0`.
+pub fn slide_in_fixed(
+    fixed: &gtk::Fixed,
+    widget: &impl IsA<gtk::Widget>,
+    x: i32,
+    to_y: i32,
+    offset_y: i32,
+    duration_ms: u64,
+) {
+    slide_in_fixed_then(fixed, widget, x, to_y, offset_y, duration_ms, || {});
 }
 
 /// Slides `widget` inside `fixed` from `from_y` to `from_y + offset_y` while
@@ -489,6 +623,7 @@ pub fn float_toast_in(
 
 /// Smoothly animates a `gtk::Paned` divider position from `from` to `to` using
 /// a quintic ease-out curve, then invokes `on_done`.
+#[allow(dead_code)]
 pub fn slide_paned(
     paned: &gtk::Paned,
     from: i32,
@@ -681,5 +816,111 @@ mod tests {
         assert!(approx_eq(lerp(10.0, 20.0, 1.0), 20.0));
         assert!(approx_eq(lerp(20.0, 10.0, 0.25), 17.5));
         assert!(approx_eq(lerp(-5.0, 5.0, 0.5), 0.0));
+    }
+
+    #[test]
+    fn first_paint_stall_does_not_collapse_entrance_into_one_tick() {
+        let dur = dur::ENTER as f64 * 1000.0;
+        let mut elapsed = 0.0;
+        let mut ticks = 0u32;
+        // Simulate tick 0 (anchor 16.7ms), tick 1 (180ms first-paint stall),
+        // then steady 60Hz ticks. The entrance must still produce multiple
+        // smooth intermediate frames instead of jumping to t=1.0.
+        let deltas = [
+            FIRST_TICK_STEP_US,
+            180_000,
+            16_667, 16_667, 16_667, 16_667, 16_667, 16_667, 16_667, 16_667, 16_667,
+        ];
+        for (idx, delta) in deltas.into_iter().enumerate() {
+            let (next, t) = advance_elapsed(elapsed, delta, dur, idx as u32);
+            elapsed = next;
+            ticks += 1;
+            if t >= 1.0 {
+                break;
+            }
+        }
+        assert!(ticks >= 8, "stalled entrance collapsed into {ticks} ticks");
+        assert!(approx_eq(elapsed, dur));
+    }
+
+    #[test]
+    fn steady_60hz_ticks_finish_on_the_real_duration() {
+        let dur = dur::ENTER as f64 * 1000.0;
+        let mut elapsed = 0.0;
+        let mut ticks = 0u32;
+        while elapsed < dur {
+            let (next, _) = advance_elapsed(elapsed, 16_667, dur, ticks);
+            elapsed = next;
+            ticks += 1;
+        }
+        // 180ms / 16.667ms = 10.8 -> 11 ticks at 60Hz.
+        assert_eq!(ticks, 11);
+    }
+
+    #[test]
+    fn sustained_slow_80ms_intervals_keep_wall_time_bounded() {
+        // Sustained 80ms software frames must NOT stretch a 180ms ENTER to
+        // 400ms+. Tick 1 clamps once for first-paint protection; ticks 2+
+        // advance by full wall-clock delta, keeping total wall time <= 240ms.
+        let dur = dur::ENTER as f64 * 1000.0;
+        let mut elapsed = 0.0;
+        let mut wall_us = 0i64;
+        let mut ticks = 0u32;
+        loop {
+            let delta = if ticks == 0 { FIRST_TICK_STEP_US } else { 80_000 };
+            if ticks > 0 {
+                wall_us += delta;
+            }
+            let (next, t) = advance_elapsed(elapsed, delta, dur, ticks);
+            elapsed = next;
+            ticks += 1;
+            if t >= 1.0 || ticks > 20 {
+                break;
+            }
+        }
+        assert_eq!(ticks, 4, "expected 4 ticks at sustained 80ms intervals, got {ticks}");
+        assert!(
+            wall_us <= 240_000,
+            "sustained 80ms frames stretched wall time to {}ms (must stay <= 240ms)",
+            wall_us / 1000
+        );
+        assert!(approx_eq(elapsed, dur));
+    }
+
+    #[test]
+    fn negative_and_zero_deltas_stay_monotonic_and_safe() {
+        let dur = dur::ENTER as f64 * 1000.0;
+        let (e0, t0) = advance_elapsed(0.0, FIRST_TICK_STEP_US, dur, 0);
+        let (e1, t1) = advance_elapsed(e0, -50_000, dur, 1);
+        assert!(approx_eq(e1, e0) && approx_eq(t1, t0), "negative delta moved backwards");
+        let (e2, t2) = advance_elapsed(e1, 0, dur, 2);
+        assert!(approx_eq(e2, e1) && approx_eq(t2, t1), "zero delta changed progress");
+        let (e3, t3) = advance_elapsed(e2, -1, dur, 3);
+        assert!(approx_eq(e3, e2) && approx_eq(t3, t2));
+        // Zero duration finishes immediately regardless of delta.
+        let (ez, tz) = advance_elapsed(0.0, -100, 0.0, 0);
+        assert!(approx_eq(ez, 0.0) && approx_eq(tz, 1.0));
+    }
+
+    #[test]
+    fn reversal_replaces_in_flight_animation_and_keeps_registry_clean() {
+        let key = 0x5ea4_0005;
+        let enter_token = next_token(key);
+        assert!(is_current(key, enter_token));
+        // Mid-flight reversal starts an exit animation on the same widget key.
+        let exit_token = next_token(key);
+        assert!(!is_current(key, enter_token), "reversed enter must be stale");
+        assert!(is_current(key, exit_token), "exit must own the key");
+        // Stale enter cleanup cannot disturb the active exit.
+        clear_if_current(key, enter_token);
+        assert!(is_current(key, exit_token));
+        // Re-opening cancels the exit and hands ownership to a third token.
+        let reopen_token = next_token(key);
+        assert!(!is_current(key, exit_token));
+        assert!(is_current(key, reopen_token));
+        drop(Retire { key, token: exit_token });
+        assert!(is_current(key, reopen_token));
+        clear_if_current(key, reopen_token);
+        assert!(!has_token(key));
     }
 }

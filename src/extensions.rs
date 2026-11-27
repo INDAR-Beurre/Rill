@@ -709,6 +709,9 @@ fn id_for(manifest: &Manifest, origin: &Path) -> String {
 const UNAVAILABLE: &[(&str, &str)] = &[
     ("tabs", "reading your open tabs"),
     ("webRequest", "rewriting requests itself"),
+    ("webRequestBlocking", "intercepting and blocking requests"),
+    ("declarativeNetRequest", "enforcing declarative network rules"),
+    ("declarativeNetRequestWithHostAccess", "enforcing declarative network rules"),
     ("cookies", "reading your cookies"),
     ("history", "reading your history"),
     ("downloads", "managing downloads"),
@@ -716,6 +719,14 @@ const UNAVAILABLE: &[(&str, &str)] = &[
     ("webNavigation", "watching navigation"),
     ("proxy", "choosing proxies"),
     ("management", "managing other extensions"),
+    ("nativeMessaging", "talking to a native companion app"),
+    ("scripting", "injecting scripts on demand"),
+    ("contextMenus", "adding browser menu items"),
+    ("alarms", "scheduling background timers"),
+    ("privacy", "changing browser privacy settings"),
+    ("identity", "signing into web accounts"),
+    ("browsingData", "clearing browser data"),
+    ("sessions", "reading closed tabs and sessions"),
 ];
 
 /// Whether a content script touches `browser.` or `chrome.` as a name of its
@@ -1249,7 +1260,7 @@ fn here_at(base: &Path, url: &str) -> Vec<String> {
         let acts = manifest
             .content_scripts
             .iter()
-            .any(|script| matches(&script.matches, url));
+            .any(|script| matches(&script.matches, url) && !matches(&script.exclude_matches, url));
         if acts {
             names.push(entry.name);
         }
@@ -2003,6 +2014,59 @@ mod tests {
         assert!(here_at(temp.path(), "https://notexample.com/").is_empty());
         assert!(here_at(temp.path(), "https://example.com.evil.net/").is_empty());
         assert!(here_at(temp.path(), "about:blank").is_empty());
+    }
+
+    #[test]
+    fn here_at_respects_exclude_matches() {
+        let temp = Temp::new("here-exclude");
+        let mut excl = manifest("Scoped");
+        excl["content_scripts"] = serde_json::json!([
+            {
+                "matches": ["https://*/*"],
+                "exclude_matches": ["https://excluded.test/*", "https://*.bank.test/*"],
+                "js": ["content.js"]
+            }
+        ]);
+        let mut multi = manifest("MultiBlock");
+        multi["content_scripts"] = serde_json::json!([
+            {
+                "matches": ["https://*/*"],
+                "exclude_matches": ["https://excluded.test/*"],
+                "js": ["a.js"]
+            },
+            {
+                "matches": ["https://excluded.test/special/*"],
+                "js": ["b.js"]
+            }
+        ]);
+        let f1 = write_folder(temp.path(), "scoped", excl, &[("content.js", "")]);
+        let f2 = write_folder(temp.path(), "multi", multi, &[("a.js", ""), ("b.js", "")]);
+        install_at(temp.path(), &f1).expect("install scoped");
+        install_at(temp.path(), &f2).expect("install multi");
+
+        let mut allowed = here_at(temp.path(), "https://allowed.test/page");
+        allowed.sort();
+        assert_eq!(allowed, vec!["MultiBlock".to_string(), "Scoped".to_string()]);
+
+        assert!(
+            here_at(temp.path(), "https://excluded.test/page").is_empty(),
+            "excluded URL must not report either extension as active"
+        );
+        assert_eq!(
+            here_at(temp.path(), "https://excluded.test/special/ok"),
+            vec!["MultiBlock".to_string()],
+            "second non-excluded content_scripts block still applies"
+        );
+        assert_eq!(
+            here_at(temp.path(), "https://login.bank.test/"),
+            vec!["MultiBlock".to_string()],
+            "wildcard subdomain exclude_matches must hide Scoped"
+        );
+        assert_eq!(
+            here_at(temp.path(), "https://bank.test/"),
+            vec!["MultiBlock".to_string()],
+            "wildcard subdomain exclude_matches must also exclude apex domain"
+        );
     }
 
     #[test]

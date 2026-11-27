@@ -1,12 +1,13 @@
-// Suggestions from the search engine, under the address field's own rows.
-// Off unless turned on: what you type is sent to the engine as you type.
+// Suggestions from the search engine, in the address field and start page.
+// Enabled by default with clear Settings disclosure and opt-out: search words
+// you type are sent to the chosen engine as you type.
 // Never from a private tab, never for a Ctrl K switcher, never for a keyword
 // shortcut, and never for text that looks like an address, a file, an email
 // or a key. See the reference EngineSuggest.swift for the original rules.
 
 use crate::store::Prefs;
 use gtk::gio;
-use gtk::prelude::EntryExt;
+use gtk::prelude::{EntryExt, StackExt};
 use gtk::gio::prelude::CancellableExt;
 use soup::prelude::SessionExt;
 use std::cell::RefCell;
@@ -16,39 +17,97 @@ use std::time::Duration;
 /// How long typing has to pause before a question goes out.
 const PAUSE: Duration = Duration::from_millis(120);
 /// An answer later than this is no use to someone typing.
-const PATIENCE: Duration = Duration::from_millis(800);
+const PATIENCE: Duration = Duration::from_millis(1000);
 /// At most this many rows from the engine.
 const MOST: usize = 6;
 /// Longer than this, it is a paragraph or a paste, not a search.
 const LONGEST: usize = 80;
+/// Standard WebKitGTK desktop browser User-Agent (matching src/web.rs) so
+/// suggestion endpoints like Startpage and Ecosia treat live browser queries
+/// consistently instead of rejecting an empty libsoup header.
+const BROWSER_UA: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
 
 thread_local! {
     // One session for every question: no cookie jar and no cache are added,
     // so none is kept. Redirects are refused per message.
-    static SESSION: soup::Session = soup::Session::new();
+    static SESSION: soup::Session = {
+        let session = soup::Session::new();
+        session.set_user_agent(BROWSER_UA);
+        session
+    };
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
 #[derive(Default)]
 struct State {
-    // Bumped on every new question, so a late answer for older text is dropped.
+    // Bumped on every new question or engine switch, so late answers for older
+    // queries or previous search engines are dropped.
     round: u64,
     cancel: Option<gio::Cancellable>,
-    // The trimmed text the words are for, and whether a question is out or answered.
+    // The engine and trimmed text the words are for, and whether a question is
+    // out or answered.
+    engine: String,
     asked: String,
     in_flight: bool,
     answered: bool,
     words: Vec<String>,
 }
 
+impl State {
+    fn begin(&mut self, engine: &str, asked: &str) -> Option<u64> {
+        if self.engine == engine && self.asked == asked && (self.in_flight || self.answered) {
+            return None;
+        }
+        self.round += 1;
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.engine = engine.to_string();
+        self.asked = asked.to_string();
+        self.in_flight = true;
+        self.answered = false;
+        self.words.clear();
+        Some(self.round)
+    }
+
+    fn accept_landing(&mut self, round: u64, engine: &str, asked: &str, words: Vec<String>) -> bool {
+        if self.round != round || self.engine != engine || self.asked != asked {
+            return false;
+        }
+        self.words = words;
+        self.in_flight = false;
+        self.answered = true;
+        self.cancel = None;
+        true
+    }
+
+    fn rows_for(&self, engine: &str, asked: &str) -> Vec<String> {
+        if self.answered && self.engine == engine && self.asked == asked {
+            self.words.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn clear(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        let round = self.round + 1;
+        *self = State { round, ..State::default() };
+    }
+}
+
 /// The engine's OpenSearch endpoint, with %s where the words go.
 pub fn endpoint(engine: &str) -> Option<&'static str> {
     match engine {
+        "Startpage" => Some("https://www.startpage.com/osuggestions?q=%s"),
+        "Ecosia" => Some("https://ac.ecosia.org/autocomplete?q=%s&type=list"),
         "DuckDuckGo" => Some("https://duckduckgo.com/ac/?q=%s&type=list"),
         "Google" => Some("https://suggestqueries.google.com/complete/search?client=firefox&q=%s"),
         "Bing" => Some("https://www.bing.com/osjson.aspx?query=%s"),
         "Brave" => Some("https://search.brave.com/api/suggest?q=%s"),
-        "Startpage" => Some("https://www.startpage.com/osuggestions?q=%s"),
         _ => None,
     }
 }
@@ -204,37 +263,18 @@ pub fn parse(bytes: &[u8], asked: &str) -> Vec<String> {
     out
 }
 
-/// The words the last answer gave for exactly this text, if one came back.
-pub fn rows_for(asked: &str) -> Vec<String> {
-    STATE.with(|s| {
-        let s = s.borrow();
-        if s.answered && s.asked == asked {
-            s.words.clone()
-        } else {
-            Vec::new()
-        }
-    })
+/// The words the last answer gave for exactly this engine and text, if one came back.
+pub fn rows_for(engine: &str, asked: &str) -> Vec<String> {
+    STATE.with(|s| s.borrow().rows_for(engine, asked))
 }
 
-/// Asks for `asked` (trimmed) after the pause. Asking again for the same text
-/// while it is in flight or answered does nothing; new text cancels the question before.
-pub fn ask(asked: &str, url: String) {
-    let round = STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        if s.asked == asked && (s.in_flight || s.answered) {
-            return None;
-        }
-        s.round += 1;
-        if let Some(cancel) = s.cancel.take() {
-            cancel.cancel();
-        }
-        s.asked = asked.to_string();
-        s.in_flight = true;
-        s.answered = false;
-        s.words.clear();
-        Some(s.round)
-    });
+/// Asks for `asked` (trimmed) using `engine` after the pause. Asking again for
+/// the same engine and text while it is in flight or answered does nothing; new
+/// text or a new engine cancels the question before.
+pub fn ask(engine: &str, asked: &str, url: String) {
+    let round = STATE.with(|s| s.borrow_mut().begin(engine, asked));
     let Some(round) = round else { return };
+    let engine = engine.to_string();
     let asked = asked.to_string();
     glib::timeout_add_local_once(PAUSE, move || {
         if !is_current(round) {
@@ -244,46 +284,45 @@ pub fn ask(asked: &str, url: String) {
         STATE.with(|s| s.borrow_mut().cancel = Some(cancel.clone()));
         fetch(&url, cancel, move |bytes| {
             let words = bytes.map(|b| parse(&b, &asked)).unwrap_or_default();
-            landed(round, &asked, words)
+            landed(round, &engine, &asked, words)
         });
     });
 }
 
-/// Nothing is wanted any more: the field emptied, went away, or holds text not to be sent.
+/// Nothing is wanted any more: the field emptied, went away, engine changed,
+/// or holds text not to be sent.
 pub fn stop() {
-    STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        if let Some(cancel) = s.cancel.take() {
-            cancel.cancel();
-        }
-        let round = s.round + 1;
-        *s = State { round, ..State::default() };
-    });
+    STATE.with(|s| s.borrow_mut().clear());
 }
 
 fn is_current(round: u64) -> bool {
     STATE.with(|s| s.borrow().round == round)
 }
 
-fn landed(round: u64, asked: &str, words: Vec<String>) {
-    let current = STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        if s.round != round {
-            return false;
-        }
-        s.words = words;
-        s.in_flight = false;
-        s.answered = true;
-        s.cancel = None;
-        true
-    });
+fn landed(round: u64, engine: &str, asked: &str, words: Vec<String>) {
+    let current = STATE.with(|s| s.borrow_mut().accept_landing(round, engine, asked, words));
     if !current {
         return;
     }
     if let Some(app) = crate::app::current() {
-        let text = app.omni.entry.text();
-        if app.omni.visible.get() && text.trim() == asked {
-            app.refresh_offers(&text);
+        let prefs = app.prefs.borrow().clone();
+        if !prefs.engine_suggestions || prefs.search_engine != engine {
+            return;
+        }
+        let private = app.state.borrow().active_tab().is_none_or(|tab| tab.private);
+        if private {
+            return;
+        }
+        let omni_text = app.omni.entry.text();
+        if app.omni.visible.get() && !crate::app::tab_switcher_on() && omni_text.trim() == asked {
+            app.refresh_offers(&omni_text);
+            return;
+        }
+        let on_blank = app.ui.stack.visible_child_name().as_deref() == Some("blank");
+        let panel_open = app.panels.borrow().open.is_some();
+        let start_text = app.ui.start.search.text();
+        if on_blank && !app.omni.visible.get() && !panel_open && start_text.trim() == asked {
+            app.ui.start.refresh_suggestions_async();
         }
     }
 }
@@ -380,10 +419,59 @@ mod tests {
     fn parse_refuses_what_is_not_the_shape() {
         assert!(parse(b"not json", "x").is_empty());
         assert!(parse(br#"["x", "nope"]"#, "x").is_empty());
+        assert!(parse(b"<html><head><title>Access Denied - Startpage</title></head></html>", "linux").is_empty());
+    }
+
+    #[test]
+    fn parses_startpage_and_ecosia_opensearch_shapes() {
+        let startpage = br#"["linux",["linux","linux kernel","linux distribution","linux lite"]]"#;
+        assert_eq!(
+            parse(startpage, "linux"),
+            vec!["linux kernel", "linux distribution", "linux lite"]
+        );
+        let ecosia = br#"["linux",["linux mint","linux","linux ubuntu","linux download"]]"#;
+        assert_eq!(
+            parse(ecosia, "linux"),
+            vec!["linux mint", "linux ubuntu", "linux download"]
+        );
+    }
+
+    #[test]
+    fn stale_query_and_stale_engine_responses_are_suppressed() {
+        let mut state = State::default();
+        let r1 = state.begin("Startpage", "lin").expect("r1 starts");
+        let r2 = state.begin("Startpage", "linux").expect("r2 supersedes r1");
+        assert_ne!(r1, r2);
+        // Late response for superseded query "lin" must be dropped.
+        assert!(!state.accept_landing(r1, "Startpage", "lin", vec!["linear".into()]));
+        assert!(state.rows_for("Startpage", "lin").is_empty());
+
+        // Switching engine for the exact same query supersedes the in-flight request.
+        let r3 = state.begin("Ecosia", "linux").expect("engine change starts new round");
+        assert!(!state.accept_landing(r2, "Startpage", "linux", vec!["startpage row".into()]));
+        assert!(state.rows_for("Startpage", "linux").is_empty());
+        assert!(state.rows_for("Ecosia", "linux").is_empty());
+
+        assert!(state.accept_landing(r3, "Ecosia", "linux", vec!["linux mint".into()]));
+        assert_eq!(state.rows_for("Ecosia", "linux"), vec!["linux mint"]);
+        assert!(state.rows_for("Startpage", "linux").is_empty());
+
+        // stop() clears cached rows and rejects any late landing from r3.
+        state.clear();
+        assert!(state.rows_for("Ecosia", "linux").is_empty());
+        assert!(!state.accept_landing(r3, "Ecosia", "linux", vec!["late".into()]));
     }
 
     #[test]
     fn url_for_is_https_only_and_escapes_the_words() {
+        assert_eq!(
+            url_for("Startpage", "a b&c").as_deref(),
+            Some("https://www.startpage.com/osuggestions?q=a+b%26c")
+        );
+        assert_eq!(
+            url_for("Ecosia", "a b&c").as_deref(),
+            Some("https://ac.ecosia.org/autocomplete?q=a+b%26c&type=list")
+        );
         assert_eq!(
             url_for("DuckDuckGo", "a b&c").as_deref(),
             Some("https://duckduckgo.com/ac/?q=a+b%26c&type=list")
@@ -399,16 +487,19 @@ mod tests {
     }
 
     // The privacy gates themselves: what decides whether anything leaves the
-    // machine at all. Off by default, and never from a private tab, the Ctrl K
-    // switcher or a keyword shortcut, even with the switch on.
+    // machine at all. Enabled by default for new profiles, respects explicit
+    // opt-out, and never sends from a private tab, Ctrl K switcher, keyword
+    // shortcut, or URL/email/path/secret.
     #[test]
     fn nothing_is_asked_when_off_private_switching_or_a_keyword() {
         let mut prefs = Prefs::default();
-        assert!(!prefs.engine_suggestions, "suggestions must start off");
-        assert_eq!(url_if_asked("coffee", &prefs, false, false), None, "off means nothing is sent");
+        assert!(prefs.engine_suggestions, "suggestions default on for new profiles");
+        assert_eq!(prefs.search_engine, "Startpage");
+        assert_eq!(
+            url_if_asked("coffee", &prefs, false, false).as_deref(),
+            Some("https://www.startpage.com/osuggestions?q=coffee")
+        );
 
-        prefs.engine_suggestions = true;
-        assert!(url_if_asked("coffee", &prefs, false, false).is_some_and(|u| u.starts_with("https://")));
         assert_eq!(url_if_asked("coffee", &prefs, true, false), None, "a private tab never asks");
         assert_eq!(url_if_asked("coffee", &prefs, false, true), None, "the Ctrl K switcher never asks");
         assert_eq!(url_if_asked("coffee", &prefs, true, true), None);
@@ -419,23 +510,32 @@ mod tests {
         assert_eq!(url_if_asked("yt cats", &prefs, false, false), None, "a keyword shortcut never asks");
         assert_eq!(url_if_asked("example.com", &prefs, false, false), None, "an address never asks");
         assert_eq!(url_if_asked("   ", &prefs, false, false), None);
+
+        prefs.engine_suggestions = false;
+        assert_eq!(url_if_asked("coffee", &prefs, false, false), None, "opt-out means nothing is sent");
     }
 
-    // Makes one real request to DuckDuckGo to confirm the answer's shape.
-    // Run with: cargo test --release live_duckduckgo -- --ignored --nocapture
+    // Makes real requests to Startpage, Ecosia, and DuckDuckGo to confirm answer shapes.
+    // Run with: cargo test --release live_ -- --ignored --nocapture
     #[test]
     #[ignore]
-    fn live_duckduckgo_answers_in_the_documented_shape() {
-        let url = url_for("DuckDuckGo", "coffee").expect("an https question");
-        let msg = soup::Message::new("GET", &url).expect("a message");
-        msg.set_flags(soup::MessageFlags::NO_REDIRECT);
+    fn live_startpage_and_ecosia_answer_in_the_documented_shape() {
         let session = soup::Session::new();
-        let bytes = session
-            .send_and_read(&msg, None::<&gio::Cancellable>)
-            .expect("an answer from DuckDuckGo");
-        assert_eq!(msg.status_code(), 200);
-        let words = parse(&bytes, "coffee");
-        eprintln!("DuckDuckGo said: {words:?}");
-        assert!(!words.is_empty());
+        session.set_user_agent(BROWSER_UA);
+        for engine in ["Startpage", "Ecosia", "DuckDuckGo"] {
+            let url = url_for(engine, "linux").expect("an https question");
+            let msg = soup::Message::new("GET", &url).expect("a message");
+            msg.set_flags(soup::MessageFlags::NO_REDIRECT);
+            if let Some(headers) = msg.request_headers() {
+                headers.append("Accept", "application/json, text/javascript;q=0.9");
+            }
+            let bytes = session
+                .send_and_read(&msg, None::<&gio::Cancellable>)
+                .expect("an answer from engine");
+            assert_eq!(msg.status_code(), 200, "engine={engine}");
+            let words = parse(&bytes, "linux");
+            eprintln!("{engine} said: {words:?}");
+            assert!(!words.is_empty(), "engine={engine} returned empty suggestions");
+        }
     }
 }

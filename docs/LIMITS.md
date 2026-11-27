@@ -1,68 +1,89 @@
 # What this browser does not do, and the numbers behind it
 
-Honest limits, with the measurement that shows each one. The memory figures
-below come from the quick run of 23 November (round 76), saved as
-`council/round-76/stress-report-slide-quick.json`. That run passed all 140
-checks. One idle tab used 218.6 MB total PSS against the rebaselined WebKitGTK
-floor of 230 MB. The original ~100 MB request was an anonymous-memory figure
-mistaken for a total; it is still unmet and is not hidden here. The third column
-names the result each row reads. The ranges in the prose are the claim; a
-table row is one sample.
+Honest limits, with the measurement that shows each one. The current archived
+full-suite figures below come from the Design F39 full run (26 November),
+archived at `docs/benchmarks/stress-report-f39.json` (and synced to
+`build/stress-report.json`; historical F38 and F37 remain preserved at
+`docs/benchmarks/stress-report-f38.json` and `docs/benchmarks/stress-report-f37.json`).
+That run passed all 151 checks (151/151). One idle tab used 182.9 MB total PSS
+warm (185.3 MB cold), 94.5 MB own (anonymous) PSS, and 441.9 MB RSS across 3
+processes against the rebaselined WebKitGTK floor of 230 MB. The original
+~100 MB total-PSS request was an anonymous-memory figure mistaken for a total;
+it remains **unmet** and is not hidden here. The third
+column names the result each row reads. The ranges in the prose are the claim;
+a table row is one sample.
 
 A run that fails a check still measured what it measured. A memory failure in
 particular is the number this page exists to report, so failed runs are
 quoted, with the failure stated next to the figure. Older figures are marked
 with the run they came from instead of being mixed into the current tables.
 
-Every run overwrites `build/stress-report.json`, so figures here cite the
-archived copy under `council/round-N/`, which does not change.
-`python3 tools/report_figures.py --check` compares this page with whichever
-report is on disk right now. If they disagree, check which run is on disk
-before you change a number. Figures taken by hand are marked as such.
+Every run overwrites `build/stress-report.json`, so figures here also archive
+their baseline snapshot (currently `docs/benchmarks/stress-report-f39.json`,
+with historical `docs/benchmarks/stress-report-f38.json`,
+`docs/benchmarks/stress-report-f37.json`, and earlier snapshots under
+`council/round-N/`), which do not change.
+`python3 tools/report_figures.py --check` compares the top table and
+`docs/DIFFERENCES.md` with whichever report is on disk right now, and compares
+cited tables against their archived JSON file. If they disagree, check which
+run is on disk before you change a number. Figures taken by hand are marked as
+such.
 
 ## Memory
 
-One idle tab, three processes: the browser window, a page, a network. The
-one-tab figures come from the quick run saved as
-`council/round-76/stress-report-slide-quick.json`. It passed all 140 checks,
-including the 230 MB WebKitGTK floor. The original ~100 MB request remains
-unmet by about 117 MB. The `20 tabs` and `per tab` rows are older. They come
-from the full run of 21 November and have not been measured again.
+One idle tab needs three core processes (the browser window, a WebKit
+page process, and a WebKit network process). In the archived Design F39 full
+run (`docs/benchmarks/stress-report-f39.json`, 151/151 passed),
+one idle tab measured **3 processes** — and replacing Settings' `GtkSwitch` and
+`GtkComboBoxText` with native Cairo `pill-switch` and `engine-picker` controls
+kept the process tree at **3 processes** even while Settings is open and after
+closing Settings (zero `glycin-image-rs`, zero `glycin-svg`, zero `bwrap` in
+both source and AppImage audits). The run met the 230 MB WebKitGTK floor at
+**182.9 MB** warm total PSS; the original ~100 MB total-PSS
+request remains **unmet** by about 83 MB.
 
 | what | measured | result in the report |
 |---|---|---|
-| one idle tab | 218.6 MB total PSS, 96.0 MB own (warm reading; right after load it is 221.4 MB total, and RSS is 319.4 MB) | `idle one tab` (passes), `one idle tab stays under the 230MB WebKitGTK floor` (passes) |
-| 20 tabs (21 Nov run) | 711 MB total PSS, 571 MB own | `20 tabs open` |
-| per tab (21 Nov run) | +24.2 MB resident | `20 tabs open` |
-| the difference | the shared GTK and WebKit libraries, counted once per process | |
+| one idle tab | 182.9 MB total PSS, 94.5 MB own (warm reading; 185.3 MB cold PSS, 441.9 MB RSS, 3 processes) | `idle one tab` (passes), `one idle tab stays under the 230MB WebKitGTK floor` (passes) |
+| 20 tabs | 598.0 MB total PSS, 468.1 MB own (2616.8 MB RSS, 23 processes) | `20 tabs open` |
+| per tab | +20.4 MB total PSS | `20 tabs open` |
+| the difference | shared GTK and WebKit libraries plus file-backed mappings, counted proportionally in PSS and once per process in RSS | |
 
-The same one-tab reading, process by process (`per_process` in the report):
+The same F39 one-tab reading, process by process (`per_process` in
+`docs/benchmarks/stress-report-f39.json`):
 
 | process | total PSS | own (anon) | shared files | RSS |
 |---|---|---|---|---|
-| `search` (window and UI) | 101.9 MB | 44.1 MB | 54.1 MB | 140.2 MB |
-| WebKit page process | 78.1 MB | 30.6 MB | 41.8 MB | 112.8 MB |
-| WebKit network process | 38.5 MB | 21.3 MB | 17.3 MB | 66.5 MB |
+| `search` (window and UI) | 81.4 MB | 42.9 MB | 31.5 MB | 240.0 MB |
+| `WebKitWebProcess` (page) | 71.2 MB | 30.5 MB | 37.2 MB | 127.7 MB |
+| `WebKitNetworkProcess` (network) | 30.2 MB | 21.1 MB | 9.1 MB | 74.2 MB |
 
-The UI process alone comes to just over the original 100 MB request (101.9 MB), and about half of its
-PSS (52.8 of 101.9 MB) is file-backed mappings. This report does not break
-those mappings down by file, so how much of that is shared library code is not
-measured here. File-backed PSS across the three processes comes to 113.2 MB
-(54.1 + 41.8 + 17.3), which is more than the original request on its own. On this
-evidence, cache and engine settings alone are unlikely to bring the total near
-100 MB, but no setting has been measured against it yet. The
-low-memory profile in `src/web.rs` (page cache off, document-viewer cache
-model, no spellcheck) has not yet been measured against this baseline, so no
-saving is claimed for it here.
+File-backed PSS across the three processes comes to 77.8 MB
+(31.5 + 37.2 + 9.1),
+plus 94.5 MB anonymous PSS and 10.5 MB shared
+memory (`Pss_Shmem`). On this evidence, cache and engine settings alone are
+unlikely to bring total PSS near 100 MB. The low-memory profile in `src/web.rs`
+(page cache off, document-viewer cache model, no spellcheck) has not been
+re-measured against the F39 baseline, so no saving is claimed for it here.
 
-Before the run above, the window icon was decoded through gdk-pixbuf. On this
-system that loader is glycin, which started a sandboxed image process
-(`glycin-image-rs` plus two `bwrap`) and kept it running for the whole session.
-The icon is now decoded with cairo's PNG reader. That took the browser from 6
-processes to 3, and one idle tab from 225.9 MB to 218.5 MB total PSS
+Historically (round 49), switching the window icon from gdk-pixbuf to Cairo's
+PNG reader removed a `glycin-image-rs` + 2 `bwrap` helper trio and took one
+idle tab from 6 processes / 225.9 MB down to 3 processes / 218.5 MB total PSS
 (`council/round-49/stress-report-quick-perproc.json` before,
-`stress-report-quick-cairoicon.json` after). It also brought `idle one tab`
-back under its limit of five processes, so that check passes again.
+`stress-report-quick-cairoicon.json` after). In Design F37, loading
+`edit-find-symbolic` through GTK/gdk-pixbuf in panel filter fields reintroduced
+`glycin-svg` + 2 `bwrap` (6 processes, 188.1 MB PSS). In Design F38, replacing
+the named GTK filter icon with Cairo `Icon::Search` eliminated `glycin-svg` at
+idle and after History/Bookmarks (3 processes, 146.1 MB PSS), while Settings'
+`GtkComboBoxText`/`GtkSwitch` still spawned `glycin-image-rs` + 2 `bwrap` (6
+processes after Settings). In Design F39, replacing `GtkSwitch` and
+`GtkComboBoxText` with native Cairo `pill-switch` (`GtkToggleButton`) and
+`engine-picker` (`GtkMenuButton` + `GtkPopover`) eliminated that remaining
+helper spawn too: the integrated F39 process audit (`baseline/f39-process-audit.json`)
+stays at **3 processes** (`search`, `WebKitWebProcess`, `WebKitNetworkProcess`,
+zero `glycin`, zero `bwrap`) across idle, History, Bookmarks, Settings open,
+and after Settings closed on both the source binary (`174.0–174.7 MB` PSS) and
+the packaged AppImage (`206.1–206.7 MB` PSS).
 
 Both numbers move. Across the runs of `tools/stress.py` on this machine the
 browser's own memory for one idle tab has lain between 49.4 and 118.7 MB. The
@@ -74,35 +95,44 @@ range and the row above as that run's point in it.
 A 384 MB memory limit now applies to the network process and to every page
 process, through `web::page_memory_pressure()`. It starts freeing caches at a
 third of the limit and frees what it can at half, checking every 5 seconds.
-It did not lower the memory-spray peak: the round-76 quick run reached 1159.3 MB
-(`council/round-76/stress-report-slide-quick.json`), against 1141 MB in an
-earlier run before the limit existed. The likely cause is live JavaScript objects,
-which has not been measured.
+It did not lower the memory-spray peak: the archived F39 full run reached
+1295.6 MB total PSS / 2200.8 MB RSS / 1143.6 MB own
+(`docs/benchmarks/stress-report-f39.json`; archived F38 reached 1173.3 MB PSS,
+archived F37 reached 1293.7 MB PSS, and earlier round-76 quick run reached
+1159.3 MB, against 1141 MB before the limit existed). The likely cause is live
+JavaScript objects, which has not been measured.
 
-The original request was about 100 MB total PSS. This sample does not meet it.
+The original request was about 100 MB total PSS. Neither historical baselines
+nor F37 (188.1 MB), F38 (146.1 MB), nor F39 (182.9 MB warm total PSS) meet it.
 Rounds 62-75 measured 216-219 MB warm for one idle tab with three processes, so
-`tools/stress.py` now records `target_pss_mb: 230` and `target_met: true` as the
-WebKitGTK floor, while this page keeps the original request visible. This is a
-re-baselining decision, not a claim that the original number was reached. Anonymous PSS is a diagnostic figure, not a substitute
-for total memory.
+`tools/stress.py` records `target_pss_mb: 230` and `target_met: true` as the
+rebaselined WebKitGTK floor, while this page keeps the original ~100 MB request
+explicitly unmet.
+This is a re-baselining decision, not a claim that the original number was
+reached. Anonymous PSS (`anon_mb`) is a diagnostic figure, not a substitute for
+total PSS (`pss_mb`) or RSS (`rss_mb`).
 
 The own-memory measure is `Pss_Anon` summed over the browser's dedicated
 process group: anonymous memory, each shared page divided by the number of
 processes mapping it. Group membership includes WebKit helpers that are
 reparented during startup and would be missed by a parent/child walk. It is
-not the whole cost: the same run reads 218.6 MB of total proportional set size,
-of which 9.5 MB is shared memory (`Pss_Shmem`), and 319.4 MB of RSS. All are printed
-in the report beside it.
+not the whole cost: the archived F39 run reads 182.9 MB of total proportional
+set size (`pss_mb`), of which 10.5 MB is shared memory (`Pss_Shmem`), 94.5 MB
+is anonymous own memory (`anon_mb`), 97.5 MB is private dirty, and 441.9 MB
+is summed RSS (`rss_mb`). All are printed in the report beside it.
 
-The `20 tabs` row is the check's own name: the suite opens twenty more tabs, so
-the window held 22 when it measured, which is what the check's detail line
-says. The per-tab figure is the difference divided by the twenty it opened.
+The `20 tabs` row is the check's own name: the suite opens twenty more tabs
+from the one-tab state, so the window held 21 tabs when F39 measured, which is
+what the check's detail line says. The per-tab figure is the difference divided
+by the twenty it opened.
 
-The resident figure is mostly the engine, not this browser: shared GTK and
-WebKit libraries are counted once per process, and the suite counts the whole
-tree. What the suite enforces is one idle tab under 120 MB of the browser's own
-memory, under 260 MB resident, and no more than five processes, which the range
-above clears.
+The total PSS and RSS figures are dominated by the engine and GTK/WebKit shared
+mappings, and the suite counts the whole process tree. What `tools/stress.py`
+currently enforces is one idle tab under 120 MB of own anonymous memory
+(`anon_mb`), under 230 MB total PSS (`one idle tab stays under the 230MB
+WebKitGTK floor`), under 260 MB total PSS and at most 7 processes in `idle one
+tab` (F39 measured 3 processes at idle, after History/Bookmarks, and while/after
+opening Settings).
 
 Two of WebKit's knobs are set by default before the engine starts, because
 four runs of one idle tab each showed they cost nothing to keep: disabling the
@@ -127,8 +157,10 @@ starts, so it applies at the next launch.
 Tabs let go of their page after ten minutes without being looked at (Settings,
 on by default). A tab that is playing sound is never put to sleep, so music,
 podcasts and calls in a background tab keep going. A sleeping tab gave back
-about 35 MB of its own memory in the round-76 quick run (124.9 -> 90.2 MB,
-`council/round-76/stress-report-slide-quick.json`).
+36.4 MB of its own memory and 40.6 MB of total PSS in the archived F39 full run
+(120.9 -> 84.5 MB own, 209.8 -> 169.2 MB total PSS, 545.9 -> 421.3 MB RSS,
+`docs/benchmarks/stress-report-f39.json`). Global 10-minute sleep with audio
+exemption is implemented; per-site keep-awake overrides are not implemented.
 
 ## Engine
 
@@ -144,13 +176,15 @@ as not running rather than silently doing nothing. No extension can read your
 tabs, your cookies or your history. `tools/extensions.py` is the test of that
 claim, not a description of it.
 
-Add-ons can be fetched from addons.mozilla.org, which the Extensions panel
-opens in a tab. A downloaded `.xpi` goes through the same installer and the
-same ceiling as a file chosen by hand. The store is not a promise that an
-add-on will work here: one that does its work in a background page, as most
-large add-ons do, installs and is listed as not running, for the reason above.
-A Firefox add-on is known by its own id, so downloading it twice or updating it
-replaces the installed copy.
+Add-ons can be searched or fetched from `addons.mozilla.org` via the Add-ons &
+Extensions panel (user-initiated HTTPS only, with strict redirect and byte-cap
+guards). A downloaded `.xpi` goes through the same permission-confirmed
+installer and the same engine ceiling as a local file. Catalog badges estimate
+capability and are not certified support: an add-on that relies on background
+pages, storage, `webRequestBlocking`, or `nativeMessaging` (including password
+managers such as Bitwarden, 1Password, and KeePassXC-Browser) does not work
+here. See [docs/EXTENSIONS.md](EXTENSIONS.md) for the 110 real-package F44
+verification results (`docs/benchmarks/real-extensions-f44-summary.json`).
 
 The ad and tracker blocker is not that extension and does not need it. It is
 EasyList and EasyPrivacy compiled into three WebKit content blocker lists by
@@ -159,9 +193,9 @@ with strict network option filtering so rules carrying unsupported options are
 dropped rather than widened; `hide-0.json` as one global hide-element rule
 carrying 2,626 selectors (26 written by hand and 2,600 taken from the lists,
 which is `MAX_COSMETIC`); and `hide-sites.json` with 1,774 domain-scoped
-cosmetic rules (`if-domain`). That is 15,775 WebKit rules across the three
-lists (17,550 reported by `src/shield.rs`, which counts both `"url-filter"` and
-`"selector"` keys). Those caps are what the lists were cut to, not counts of
+cosmetic rules (`if-domain`). That is 15,775 WebKit rule objects across the three
+lists, matching both `tools/check_shield.py` and `src/shield.rs`'s JSON array
+counter (fixed in Design F38 from the earlier 17,550 key-substring double-count). Those caps are what the lists were cut to, not counts of
 everything they hold. It blocks what a content blocker can block. It has no
 element picker, no per-site dynamic filtering beyond the one switch this
 browser offers, and no scriptlet injection, because none of those are
@@ -207,14 +241,16 @@ gst-plugins-good. On the machine this was measured on, the system build crashed
 on every GitHub load, while the AppImage stayed up on GitHub for 30 seconds
 with no page-process crash.
 
-Search-engine suggestions are off by default. When on, the text typed in the
-address field goes to the chosen engine (DuckDuckGo, Google, Bing, Brave or
-Startpage, https only) after a 120 ms pause, and an answer later than 0.8 s is
-dropped. Nothing is sent from a private tab, the Ctrl K switcher or a keyword
-shortcut, or for text that looks like an address, path, email, key or card
-number, or that is over 80 characters. Known false negative: a single token of
-12 or more characters that mixes letters and digits is never sent, so no
-suggestion comes back for it. The rules are heuristics in `src/suggest.rs`.
+Search-engine suggestions are enabled by default for new profiles (with opt-out
+in Settings; existing saved preferences are respected). When on, plain search
+queries typed in the address field or start page go to the chosen engine
+(Startpage default, Ecosia, DuckDuckGo, Google, Bing or Brave, https only) after
+a 120 ms pause, and an answer later than 1.0 s is dropped. Nothing is sent from
+a private tab, the Ctrl K switcher or a keyword shortcut, or for text that looks
+like an address, path, email, key or card number, or that is over 80 characters.
+Known false negative: a single token of 8 or more characters that mixes letters
+and digits is never sent, so no suggestion comes back for it. The rules are
+heuristics in `src/suggest.rs`.
 
 Importing from another browser reads bookmarks and history from six browsers:
 Firefox, Chromium, Chrome, Brave, Edge and Vivaldi (every profile). History is
@@ -241,55 +277,57 @@ which only shows that the tab column and bookmark row hide and come back.
 memory-spray, resize and idle states. It prints how many checks it made and how
 many passed.
 
-The worst-case table below comes from the full run of 21 November, which made
-117 checks and passed all of them. It has not been replaced with the round-49
-or round-50 quick runs, because a quick run does less work: it opens panels 24
-times instead of 80 and sprays and switches less, so its figures (panel mean
-17 ms in `council/round-50/stress-report-quick.json`) are a smaller sample,
-not a better result. A comment above the table names the saved copy of that
-full run, `council/round-48/stress-report-before.json`, and
-`python3 tools/report_figures.py --check` checks the table's rows against that
-saved copy, not against whichever report is on disk. A quick run on disk no longer
-makes these rows show up as mismatches. If the cited file is missing or can't
-be parsed, the check stops with an error.
+The worst-case table below comes from the archived Design F39 full run
+(`docs/benchmarks/stress-report-f39.json`), which ran all 151 checks (including
+300 tab switches, 80 panel toggles, 20-tab open/close, memory spray, live
+WebKit private-persistence/curtain/isolated-reader regressions, delayed
+private-hide race check, sleep, and
+a 60-second idle drift sample) and passed 151 of 151. A comment above the table
+names that archived full run, and `python3 tools/report_figures.py --check`
+verifies the table's rows against that saved JSON file (so a later `--quick`
+run on disk does not overwrite the full-run reference). Historical Design F38
+(`docs/benchmarks/stress-report-f38.json`, 150/150), Design F37
+(`docs/benchmarks/stress-report-f37.json`, 142/142), and 1.0.2 full-run figures
+(`council/round-48/stress-report-before.json`, 117/117) remain preserved.
 
 It drives the browser's own actions, not the compositor's input: real mouse and
 keyboard events at the window level, full screen, notifications and media
-playback are checked by hand.
+playback are checked by hand (with live Wayland GPU + X11 window-level 19-case
+motion and live folded controls additionally captured in F39).
 
 ## The worst cases measured
 
-<!-- report: council/round-48/stress-report-before.json -->
+<!-- report: docs/benchmarks/stress-report-f39.json -->
 
 | case | measured | result in the report |
 |---|---|---|
-| a page that allocates without limit | 1239 MB resident at its peak, 1907 MB RSS, 1073 MB own | `a memory spray is survived` |
-| once it settles | 433 MB resident | `the engine survives a spray and keeps working` |
-| tab switch | mean 1 ms, p95 2 ms, worst 3.5 ms over 300 switches| `tab switches stay quick` |
-| a panel opening | mean 28 ms, worst 403 ms over 80| `panels open and close` |
-| checks | 117 of 117 | `passed` / `failed` |
-| nothing grows while nothing happens | 0.0 MB of its own over an idle minute | the detail line of `nothing grows while nothing happens` |
+| a page that allocates without limit | 1296 MB total PSS at its peak, 2201 MB RSS, 1144 MB own | `a memory spray is survived` |
+| once it settles | 416 MB total PSS | `the engine survives a spray and keeps working` |
+| tab switch | mean 4.6 ms, p95 13.5 ms, worst 15.7 ms over 300 switches | `tab switches stay quick` |
+| a panel opening | mean 27 ms, p95 62 ms, worst 81 ms over 80 | `panels open and close` |
+| checks | 151 of 151 | `passed` / `failed` |
+| nothing grows while nothing happens | -0.2 MB of its own over an idle minute (-0.1 MB total PSS) | the detail line of `nothing grows while nothing happens` |
 
 Every row but the last is a figure `python3 tools/report_figures.py` prints for
-the run quoted above, under the label in the third column. The drift is read
-from the detail line the run writes
-(`208.6MB -> 208.5MB (-0.1MB), own 87.6MB -> 87.6MB (+0.0MB)`), which that
-command does not print, so the row says where it comes from instead of implying
-it. What the check asserts is that neither total nor own memory grew by more
-than 10 MB while nothing was happening; an earlier run of it read -4.0 MB,
-because the engine will give memory back while a page sits still.
+the archived F39 run quoted above, under the label in the third column. The
+drift is read from the detail line the run writes
+(`175.0MB -> 174.9MB (-0.1MB), own 87.9MB -> 87.7MB (-0.2MB)`). What the check
+asserts is that neither total PSS nor own anonymous memory grew by more than
+10 MB while nothing was happening; an earlier run read -4.0 MB because the
+engine returns memory while a page sits still.
 
-The switch row is the one place the host shows through. Other runs on the same
-machine measured worst cases of 67 ms and 140 ms for a similar mean, and a run
-made while the machine was swapping measured 259.5 ms. The suite asserts a
+The switch row is the one place the host shows through. Earlier runs on the
+same machine measured worst cases of 67 ms and 140 ms for a similar mean, and a
+run made while the machine was swapping measured 259.5 ms. The suite asserts a
 mean under 60 ms and a worst under 500 ms, and records p95 so the tail is
 visible instead of being averaged away. A worst case is a property of the host
 as much as of the browser, which is why the mean is the assertion.
 
-Closing tabs gives memory back, but not all at once: the last passing run went
-from 582.8 MB to 220.1 MB after the tabs were closed, against a 223.8 MB baseline
-before they were opened (`tabs give their memory back`). Closing every tab down
-to one brought the browser down to 147.8 MB total PSS and 60.3 MB own memory
+Closing tabs gives memory back, but not all at once: the archived F39 full run
+went from 598.0 MB down to 186.0 MB total PSS after closing 20 tabs, against a
+189.5 MB baseline before they were opened (`tabs give their memory back`).
+Closing every tab down to one brought the browser down to 106.8 MB total PSS,
+59.0 MB own anonymous memory, and 302.7 MB RSS across 2 processes
 (`memory comes back down`).
 The browser itself does not grow when a page sprays memory; that tab does, and
 closing it is the way back. The older figures on this page for a 5,000-element

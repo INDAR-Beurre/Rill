@@ -28,33 +28,74 @@ pub fn socket_path() -> PathBuf {
 // hung browser from outside, and measuring it from outside cannot say which
 // side stopped. This tick runs on the loop itself: the longest gap between two
 // ticks is the longest time the loop was unavailable.
-static LAST_TICK: Mutex<Option<Instant>> = Mutex::new(None);
-static WORST_GAP_MS: Mutex<u64> = Mutex::new(0);
-static GAPS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const GAP_THRESHOLD_MS: u64 = 120;
+const MAX_RECORDED_GAPS: usize = 40;
+
+#[derive(Default)]
+struct DriftTracker {
+    last_tick: Option<Instant>,
+    worst_gap_ms: u64,
+    gaps: Vec<u64>,
+    ticks: u64,
+}
+
+impl DriftTracker {
+    fn start(&mut self, now: Instant) {
+        self.last_tick = Some(now);
+    }
+
+    fn reset(&mut self, now: Instant) {
+        self.worst_gap_ms = 0;
+        self.gaps.clear();
+        // Start observing immediately at reset so an action dispatched right
+        // after reset cannot hide its stall while waiting for a future tick.
+        self.last_tick = Some(now);
+    }
+
+    fn tick(&mut self, now: Instant) {
+        self.ticks = self.ticks.saturating_add(1);
+        if let Some(previous) = self.last_tick {
+            let gap = now.saturating_duration_since(previous).as_millis() as u64;
+            self.worst_gap_ms = self.worst_gap_ms.max(gap);
+            if gap > GAP_THRESHOLD_MS && self.gaps.len() < MAX_RECORDED_GAPS {
+                self.gaps.push(gap);
+            }
+        }
+        self.last_tick = Some(now);
+    }
+
+    fn snapshot(&self, now: Instant) -> (u64, u64, Vec<u64>) {
+        // Also measure the in-flight interval since the last tick/reset so a
+        // drift read dispatched before the 50ms timer callback cannot miss a
+        // synchronous stall that just finished.
+        let pending = self
+            .last_tick
+            .map(|previous| now.saturating_duration_since(previous).as_millis() as u64)
+            .unwrap_or(0);
+        let worst = self.worst_gap_ms.max(pending);
+        let mut gaps = self.gaps.clone();
+        if pending > GAP_THRESHOLD_MS && gaps.len() < MAX_RECORDED_GAPS {
+            gaps.push(pending);
+        }
+        (worst, self.ticks, gaps)
+    }
+}
+
+static DRIFT: Mutex<DriftTracker> = Mutex::new(DriftTracker {
+    last_tick: None,
+    worst_gap_ms: 0,
+    gaps: Vec::new(),
+    ticks: 0,
+});
 
 pub fn watch_loop() {
-    if let Ok(mut last) = LAST_TICK.lock() {
-        *last = Some(Instant::now());
+    if let Ok(mut drift) = DRIFT.lock() {
+        drift.start(Instant::now());
     }
     glib::timeout_add_local(Duration::from_millis(50), move || {
-        TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = Instant::now();
-        if let Ok(mut last) = LAST_TICK.lock() {
-            if let Some(previous) = *last {
-                let gap = now.duration_since(previous).as_millis() as u64;
-                if gap > 120 {
-                    if let Ok(mut worst) = WORST_GAP_MS.lock() {
-                        *worst = (*worst).max(gap);
-                    }
-                    if let Ok(mut gaps) = GAPS.lock() {
-                        if gaps.len() < 40 {
-                            gaps.push(gap);
-                        }
-                    }
-                }
-            }
-            *last = Some(now);
+        if let Ok(mut drift) = DRIFT.lock() {
+            drift.tick(now);
         }
         glib::ControlFlow::Continue
     });
@@ -230,13 +271,33 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         }
         "chrome" => chrome(app),
         "menuentries" => {
+            let pop = app.menu_popover.borrow().clone().filter(|p| p.is_visible());
+            if let Some(pop) = pop {
+                let mut items = Vec::new();
+                collect_popover_menu_items(pop.upcast_ref(), &mut items);
+                return serde_json::json!({"ok": true, "items": items}).to_string();
+            }
             let Some(menu) = browser_menu() else { return fail("no browser menu is open") };
             let items: Vec<_> = menu.children().into_iter().filter_map(|child| {
+                if child.is::<gtk::SeparatorMenuItem>() {
+                    return None;
+                }
                 child.downcast::<gtk::MenuItem>().ok().map(|item| serde_json::json!({"label":item.label().as_deref(), "sensitive":item.is_sensitive()}))
             }).collect();
             serde_json::json!({"ok":true,"items":items}).to_string()
         }
         "menupick" => {
+            let pop = app.menu_popover.borrow().clone().filter(|p| p.is_visible());
+            if let Some(pop) = pop {
+                if let Some(btn) = find_popover_menu_button(pop.upcast_ref(), argument) {
+                    if !btn.is_sensitive() {
+                        return fail("menu item is disabled");
+                    }
+                    btn.emit_clicked();
+                    return ok("");
+                }
+                return fail("no matching menu item");
+            }
             let Some(menu) = browser_menu() else { return fail("no browser menu is open") };
             let item = menu.children().into_iter().filter_map(|child| child.downcast::<gtk::MenuItem>().ok())
                 .find(|item| item.label().as_deref() == Some(argument));
@@ -271,27 +332,155 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             ok("")
         }
         "uiclick" => {
-            let button = match argument {
-                "newtab" => &app.ui.newtab,
-                "private" => &app.ui.private_tab,
-                "library" => &app.ui.library,
-                "history" => &app.ui.history,
-                "downloads" => &app.ui.downloads,
-                "settings" => &app.ui.menu,
-                "address" => &app.ui.address,
-                "site" => &app.ui.site_info,
-                "fold" => &app.ui.fold,
-                "bookmark" => &app.ui.bookmark,
-                "reader" => &app.ui.reader,
-                "back" => &app.ui.back,
-                "forward" => &app.ui.forward,
-                "reload" => &app.ui.reload,
-                "more" => &app.ui.more,
+            match argument {
+                "newtab" => {
+                    let target = if !app.ui.topbar.is_visible() && app.ui.side_newtab.is_visible() {
+                        &app.ui.side_newtab
+                    } else {
+                        &app.ui.newtab
+                    };
+                    if !target.is_sensitive() { return fail("control is disabled"); }
+                    target.emit_clicked();
+                }
+                "sidenewtab" => {
+                    if !app.ui.side_newtab.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.side_newtab.emit_clicked();
+                }
+                "address" => {
+                    if !app.ui.address.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.address.emit_clicked();
+                }
+                "site" => {
+                    if !app.ui.site_info.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.site_info.emit_clicked();
+                }
+                "bookmark" => {
+                    if !app.ui.bookmark.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.bookmark.emit_clicked();
+                }
+                "reader" => {
+                    if !app.ui.reader.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.reader.emit_clicked();
+                }
+                "back" => {
+                    if !app.ui.back.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.back.emit_clicked();
+                }
+                "forward" => {
+                    if !app.ui.forward.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.forward.emit_clicked();
+                }
+                "reload" => {
+                    if !app.ui.reload.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.reload.emit_clicked();
+                }
+                "home" => {
+                    if !app.ui.home.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.home.emit_clicked();
+                }
+                "more" => {
+                    if !app.ui.more.is_sensitive() { return fail("control is disabled"); }
+                    app.ui.more.emit_clicked();
+                }
+                // Legacy/shortcut aliases routed through real browser intents
+                // now that redundant sidebar footer icons are removed.
+                "private" => crate::keys::apply(app, Intent::NewPrivateTab),
+                "library" => crate::keys::apply(app, Intent::Bookmarks),
+                "history" => crate::keys::apply(app, Intent::History),
+                "downloads" => crate::keys::apply(app, Intent::Downloads),
+                "settings" => crate::keys::apply(app, Intent::Settings),
+                "fold" => crate::keys::apply(app, Intent::FoldColumn),
                 _ => return fail("unknown chrome control"),
             };
-            if !button.is_sensitive() { return fail("control is disabled"); }
-            button.emit_clicked();
             ok("")
+        }
+        "reordertab" => {
+            let parts: Vec<u64> = argument.split_whitespace().filter_map(|p| p.parse().ok()).collect();
+            if parts.len() != 2 {
+                return fail("reordertab needs <source_id> <target_id>");
+            }
+            let moved = app.reorder_tab(parts[0], parts[1]);
+            ok(&format!(",\"moved\":{moved}"))
+        }
+        "spaces" => {
+            let state = app.state.borrow();
+            let list: Vec<_> = state
+                .spaces
+                .spaces
+                .iter()
+                .map(|s| {
+                    let tab_count = state.tabs.iter().filter(|t| t.space_id == s.id).count();
+                    let pinned_count = state.tabs.iter().filter(|t| t.space_id == s.id && t.pinned).count();
+                    serde_json::json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "default": s.is_default(),
+                        "active": s.id == state.spaces.active_space,
+                        "tabCount": tab_count,
+                        "pinnedCount": pinned_count,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "ok": true,
+                "activeSpace": state.spaces.active_space,
+                "spaces": list,
+            })
+            .to_string()
+        }
+        "spacecreate" => match app.create_space(argument) {
+            Ok(space) => serde_json::json!({"ok": true, "id": space.id, "name": space.name}).to_string(),
+            Err(err) => fail(err),
+        },
+        "spacerename" => {
+            let mut parts = argument.trim().splitn(2, char::is_whitespace);
+            let Some(id) = parts.next().filter(|s| !s.is_empty()) else {
+                return fail("spacerename needs <id> <name>");
+            };
+            let new_name = parts.next().unwrap_or("");
+            match app.rename_space(id, new_name) {
+                Ok(name) => serde_json::json!({"ok": true, "id": id, "name": name}).to_string(),
+                Err(err) => fail(err),
+            }
+        }
+        "spacedelete" => match app.delete_space(argument.trim()) {
+            Ok(moved) => serde_json::json!({"ok": true, "moved": moved}).to_string(),
+            Err(err) => fail(err),
+        },
+        "spaceswitch" => {
+            let switched = app.switch_space(argument.trim());
+            serde_json::json!({"ok": true, "switched": switched, "activeSpace": app.state.borrow().spaces.active_space}).to_string()
+        }
+        "tabspace" => {
+            let mut parts = argument.split_whitespace();
+            let Some(tid) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
+                return fail("tabspace needs <tab_id> <space_id>");
+            };
+            let Some(sid) = parts.next() else {
+                return fail("tabspace needs <tab_id> <space_id>");
+            };
+            let moved = app.move_tab_to_space(tid, sid);
+            serde_json::json!({"ok": true, "moved": moved}).to_string()
+        }
+        "sidebar" => match argument.trim() {
+            "on" => {
+                app.set_sidebar_visible(true);
+                ok("")
+            }
+            "off" => {
+                app.set_sidebar_visible(false);
+                ok("")
+            }
+            _ => fail("sidebar needs on or off"),
+        },
+        "showall" => {
+            app.ui.window.show_all();
+            settle(app);
+            ok(&format!(
+                ",\"topbarShown\":{},\"sidebarShown\":{}",
+                app.ui.topbar.is_visible() && app.ui.topbar.is_mapped(),
+                app.ui.side.is_visible() && app.ui.side.is_child_visible() && app.ui.side.is_mapped()
+            ))
         }
         "paneltext" => paneltext(app),
         "paneltree" => paneltree(app),
@@ -313,10 +502,52 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
         }
         "panelscroll" => {
             let amount: f64 = argument.parse().unwrap_or(0.0);
+            let context = glib::MainContext::default();
+            let mut prev_upper = -1.0_f64;
+            let mut stable = 0;
+            for _ in 0..40 {
+                {
+                    let panels = app.panels.borrow();
+                    panels.card.check_resize();
+                    let scroll = panels.scroll_for_open();
+                    if let Some(child) = scroll.child() {
+                        child.queue_resize();
+                    }
+                    scroll.check_resize();
+                }
+                let mut dispatched = 0;
+                while dispatched < 256 && context.iteration(false) {
+                    dispatched += 1;
+                }
+                let (pending, upper, page) = {
+                    let panels = app.panels.borrow();
+                    let adj = panels.scroll_for_open().vadjustment();
+                    (panels.is_refit_pending(), adj.upper(), adj.page_size())
+                };
+                if !pending && page > 1.0 && (upper - prev_upper).abs() < 0.5 {
+                    stable += 1;
+                    if stable >= 2 {
+                        break;
+                    }
+                } else {
+                    stable = 0;
+                    prev_upper = upper;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            {
+                let panels = app.panels.borrow();
+                let scroll = panels.scroll_for_open();
+                let adjustment = scroll.vadjustment();
+                let max_val = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+                adjustment.set_value((adjustment.value() + amount).clamp(adjustment.lower(), max_val));
+            }
+            let mut dispatched = 0;
+            while dispatched < 64 && context.iteration(false) {
+                dispatched += 1;
+            }
             let panels = app.panels.borrow();
-            let scroll = panels.scroll_for_open();
-            let adjustment = scroll.vadjustment();
-            adjustment.set_value((adjustment.value() + amount).clamp(adjustment.lower(), adjustment.upper() - adjustment.page_size()));
+            let adjustment = panels.scroll_for_open().vadjustment();
             ok(&format!(",\"value\":{},\"upper\":{},\"page\":{}", adjustment.value(), adjustment.upper(), adjustment.page_size()))
         }
         "panelgeometry" => {
@@ -366,6 +597,64 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             }
             settle(app);
             ok(&format!(",\"toolbarShown\":{}", app.ui.toolbar.is_visible()))
+        }
+        "toolbaritem" => {
+            let parts: Vec<&str> = argument.split_whitespace().collect();
+            if parts.len() != 2 {
+                return fail("toolbaritem needs <back|forward|nav|reload|home|reader|bookmark> <on|off>");
+            }
+            let on = match parts[1] {
+                "on" => true,
+                "off" => false,
+                _ => return fail("toolbaritem needs on or off"),
+            };
+            match parts[0] {
+                "back" => app.set_back_button_visible(on),
+                "forward" => app.set_forward_button_visible(on),
+                "nav" => app.set_nav_buttons_visible(on),
+                "reload" => app.set_reload_button_visible(on),
+                "home" => app.set_home_button_visible(on),
+                "reader" => app.set_reader_button_visible(on),
+                "bookmark" => app.set_bookmark_button_visible(on),
+                _ => return fail("unknown toolbar item"),
+            }
+            settle(app);
+            ok("")
+        }
+        "resetlayout" => {
+            app.reset_toolbar_layout();
+            settle(app);
+            ok("")
+        }
+        "startmode" => {
+            let mode = match argument.trim() {
+                "icons-and-names" => crate::store::StartBookmarksMode::IconsAndNames,
+                "icons-only" => crate::store::StartBookmarksMode::IconsOnly,
+                "icons-names-url" => crate::store::StartBookmarksMode::IconsNamesUrl,
+                _ => return fail("startmode needs icons-and-names, icons-only or icons-names-url"),
+            };
+            app.set_start_bookmarks_mode(mode);
+            settle(app);
+            ok("")
+        }
+        "windowcontrols" => {
+            let mode = match argument.trim() {
+                "system" => crate::store::WindowControlsMode::System,
+                "browser" => crate::store::WindowControlsMode::Browser,
+                "hidden" => crate::store::WindowControlsMode::Hidden,
+                _ => return fail("windowcontrols needs system, browser or hidden"),
+            };
+            app.set_window_controls_mode(mode);
+            settle(app);
+            ok(&format!(",\"decorated\":{}", app.ui.window.is_decorated()))
+        }
+        "decorlayout" => {
+            if let Some(settings) = gtk::Settings::default() {
+                settings.set_gtk_decoration_layout(Some(argument));
+            }
+            app.sync_window_controls();
+            settle(app);
+            ok("")
         }
         "fullscreen" => {
             // Proves page_fullscreen without a screenshot. The bench capture
@@ -498,13 +787,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             Err(reason) => fail(reason),
         },
         "escape" => {
-            // Everything a person can take down with Escape comes down here,
-            // the Peek card and the site card included. Without them a test
-            // that opens one card and then another kept the first on screen,
-            // and the screenshots after it showed the wrong thing: round 43's
-            // Peek shot still had the site card behind it, and Settings sat
-            // under the Peek card. (`key escape` is not a shortcut name and
-            // fails with "unknown key: escape"; this verb is the way in.)
+            app.close_main_menu();
             app.close_omni();
             if app.find.borrow().visible {
                 app.toggle_find();
@@ -534,26 +817,31 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                     .dynamic_cast_ref::<gtk::Container>()
                     .map(|container| container.border_width())
                     .unwrap_or(0);
-                let inner: Vec<String> = child
+                let mut inner_widgets: Vec<gtk::Widget> = child
                     .dynamic_cast_ref::<gtk::Container>()
-                    .map(|container| {
-                        container
-                            .children()
-                            .iter()
-                            .take(4)
-                            .map(|kid| {
-                                let (kx, ky) = kid.translate_coordinates(&child, 0, 0).unwrap_or((-1, -1));
-                                format!(
-                                    "{{\"type\":\"{}\",\"name\":\"{}\",\"at\":[{kx},{ky}],\"size\":[{},{}]}}",
-                                    kid.type_().name(),
-                                    json_escape(&kid.widget_name()),
-                                    kid.allocated_width(),
-                                    kid.allocated_height()
-                                )
-                            })
-                            .collect()
-                    })
+                    .map(|container| container.children().into_iter().take(4).collect())
                     .unwrap_or_default();
+                if child.widget_name() == "peek-card" {
+                    if let Some(view) = descendant_peek_view(&child) {
+                        let widget = view.upcast::<gtk::Widget>();
+                        if !inner_widgets.contains(&widget) {
+                            inner_widgets.push(widget);
+                        }
+                    }
+                }
+                let inner: Vec<String> = inner_widgets
+                    .iter()
+                    .map(|kid| {
+                        let (kx, ky) = kid.translate_coordinates(&child, 0, 0).unwrap_or((-1, -1));
+                        format!(
+                            "{{\"type\":\"{}\",\"name\":\"{}\",\"at\":[{kx},{ky}],\"size\":[{},{}]}}",
+                            kid.type_().name(),
+                            json_escape(&kid.widget_name()),
+                            kid.allocated_width(),
+                            kid.allocated_height()
+                        )
+                    })
+                    .collect();
                 out.push(format!(
                     "{{\"type\":\"{}\",\"name\":\"{}\",\"at\":[{x},{y}],\"size\":[{},{}],\"border\":{border},\"margins\":[{},{},{},{}],\"children\":[{}]}}",
                     child.type_().name(),
@@ -607,6 +895,86 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
             app.omni.entry.set_position(-1);
             app.refresh_offers(argument);
             ok("")
+        }
+        "startsearch" => {
+            if app.ui.stack.visible_child_name().as_deref() != Some("blank") {
+                return fail("startsearch needs a new tab");
+            }
+            app.ui.start.search.grab_focus();
+            app.ui.start.search.set_text(argument);
+            app.ui.start.search.set_position(-1);
+            ok("")
+        }
+        "bmarksearch" => {
+            if !app.ui.bmarkbar.is_visible() {
+                app.prefs.borrow_mut().show_bookmarks_bar = true;
+                app.render_bmarks();
+            }
+            app.ui.bmark_search.grab_focus();
+            app.ui.bmark_search.set_text(argument);
+            app.ui.bmark_search.set_position(-1);
+            app.refresh_bmark_autocomplete();
+            ok("")
+        }
+        "autocomplete" => {
+            let (visible, picked, entry_text, items): (bool, i32, String, Vec<serde_json::Value>) = match argument {
+                "omni" => (
+                    app.omni.visible.get() && app.omni.list_scroll.is_visible(),
+                    app.omni.picked.get(),
+                    app.omni.entry.text().to_string(),
+                    app.omni.offers.borrow().iter().map(|o| {
+                        let (host, path) = crate::omnibox::host_and_path(&o.url);
+                        serde_json::json!({
+                            "title": o.title,
+                            "url": o.url,
+                            "host": host,
+                            "path": path,
+                            "kind": o.kind,
+                            "hasFavicon": app.favicon_for_url(&o.url).is_some(),
+                        })
+                    }).collect(),
+                ),
+                "start" => (
+                    app.ui.start.suggest_box.is_visible(),
+                    app.ui.start.picked.get(),
+                    app.ui.start.search.text().to_string(),
+                    app.ui.start.offers.borrow().iter().map(|o| {
+                        let (host, path) = crate::omnibox::host_and_path(&o.url);
+                        serde_json::json!({
+                            "title": o.title,
+                            "url": o.url,
+                            "host": host,
+                            "path": path,
+                            "kind": o.kind,
+                            "hasFavicon": app.favicon_for_url(&o.url).is_some(),
+                        })
+                    }).collect(),
+                ),
+                "bmark" => (
+                    app.ui.bmark_layer.root.is_visible(),
+                    app.bmark_picked.get(),
+                    app.ui.bmark_search.text().to_string(),
+                    app.bmark_offers.borrow().iter().map(|b| {
+                        let (host, path) = crate::omnibox::host_and_path(&b.url);
+                        serde_json::json!({
+                            "title": b.title,
+                            "url": b.url,
+                            "host": host,
+                            "path": path,
+                            "kind": "Bookmark",
+                            "hasFavicon": app.favicon_for_url(&b.url).is_some(),
+                        })
+                    }).collect(),
+                ),
+                _ => return fail("autocomplete needs omni, start or bmark"),
+            };
+            serde_json::json!({
+                "ok": true,
+                "visible": visible,
+                "picked": picked,
+                "text": entry_text,
+                "items": items,
+            }).to_string()
         }
         "find" => {
             if !app.find.borrow().visible {
@@ -825,32 +1193,49 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 .map(|settings| settings.is_gtk_enable_animations())
                 .unwrap_or(true);
             ok(&format!(
-                ",\"animations\":{},\"gtkAnimations\":{},\"enterMs\":{}",
+                ",\"animations\":{},\"gtkAnimations\":{},\"microMs\":{},\"enterMs\":{},\"exitMs\":{},\"layoutMs\":{},\"travelPx\":{}",
                 crate::motion::enabled(),
                 gtk,
-                crate::motion::dur::ENTER
+                crate::motion::dur::MICRO,
+                crate::motion::dur::ENTER,
+                crate::motion::dur::EXIT,
+                crate::motion::dur::LAYOUT,
+                crate::motion::dur::TRAVEL
             ))
         }
+        "scrimclick" => {
+            let target = argument.trim();
+            let widget = app
+                .ui
+                .overlay
+                .children()
+                .into_iter()
+                .find(|child| child.widget_name() == target);
+            let Some(widget) = widget else {
+                return fail(&format!("no overlay scrim named {target}"));
+            };
+            let event = gtk::gdk::Event::new(gtk::gdk::EventType::ButtonPress);
+            let handled = widget.emit_by_name::<bool>("button-press-event", &[&event]);
+            ok(&format!(",\"handled\":{handled}"))
+        }
         "drift" => {
-            let worst = WORST_GAP_MS.lock().map(|value| *value).unwrap_or(0);
-            let gaps = GAPS.lock().map(|gaps| gaps.clone()).unwrap_or_default();
+            let (worst, ticks, gaps) = DRIFT
+                .lock()
+                .map(|drift| drift.snapshot(Instant::now()))
+                .unwrap_or((0, 0, Vec::new()));
             let list: Vec<String> = gaps.iter().map(|gap| gap.to_string()).collect();
-            let ticks = TICKS.load(std::sync::atomic::Ordering::Relaxed);
             ok(&format!(",\"worst\":{worst},\"ticks\":{ticks},\"gaps\":[{}]", list.join(",")))
         }
         "reset" => {
-            if let Ok(mut worst) = WORST_GAP_MS.lock() {
-                *worst = 0;
-            }
-            if let Ok(mut gaps) = GAPS.lock() {
-                gaps.clear();
-            }
-            // A reset starts a fresh observation window. Without clearing the
-            // previous tick the first tick measures idle time before reset.
-            if let Ok(mut last) = LAST_TICK.lock() {
-                *last = None;
+            if let Ok(mut drift) = DRIFT.lock() {
+                drift.reset(Instant::now());
             }
             ok("")
+        }
+        "errorfocus" => {
+            let error_visible = app.ui.stack.visible_child_name().as_deref() == Some("error");
+            let back_focused = app.ui.error_back.has_focus();
+            ok(&format!(",\"back_focused\":{back_focused},\"error_visible\":{error_visible}"))
         }
         "quit" => {
             app.ui.window.close();
@@ -864,19 +1249,19 @@ fn chrome(app: &AppRef) -> String {
     settle(app);
     let controls: Vec<_> = [
         ("newtab", app.ui.newtab.upcast_ref::<gtk::Widget>()),
-        ("private", app.ui.private_tab.upcast_ref::<gtk::Widget>()),
+        ("sidenewtab", app.ui.side_newtab.upcast_ref::<gtk::Widget>()),
+        ("sidefold", app.ui.side_fold.upcast_ref::<gtk::Widget>()),
+        ("topspace", app.ui.top_space_btn.upcast_ref::<gtk::Widget>()),
+        ("sidespace", app.ui.side_space_btn.upcast_ref::<gtk::Widget>()),
         ("address", app.ui.address.upcast_ref::<gtk::Widget>()),
         ("site", app.ui.site_info.upcast_ref::<gtk::Widget>()),
-        ("fold", app.ui.fold.upcast_ref::<gtk::Widget>()),
         ("back", app.ui.back.upcast_ref::<gtk::Widget>()),
         ("forward", app.ui.forward.upcast_ref::<gtk::Widget>()),
         ("reload", app.ui.reload.upcast_ref::<gtk::Widget>()),
+        ("home", app.ui.home.upcast_ref::<gtk::Widget>()),
         ("bookmark", app.ui.bookmark.upcast_ref::<gtk::Widget>()),
         ("reader", app.ui.reader.upcast_ref::<gtk::Widget>()),
         ("more", app.ui.more.upcast_ref::<gtk::Widget>()),
-        ("history", app.ui.history.upcast_ref::<gtk::Widget>()),
-        ("library", app.ui.library.upcast_ref::<gtk::Widget>()),
-        ("settings", app.ui.menu.upcast_ref::<gtk::Widget>()),
         ("minimise", app.ui.light_amber.upcast_ref::<gtk::Widget>()),
         ("maximise", app.ui.light_green.upcast_ref::<gtk::Widget>()),
         ("close", app.ui.light_red.upcast_ref::<gtk::Widget>()),
@@ -893,20 +1278,157 @@ fn chrome(app: &AppRef) -> String {
             "accessibleName": widget.accessible().and_then(|access| gtk::atk::prelude::AtkObjectExt::name(&access)).map(|name| name.to_string()),
         })
     }).collect();
+    let (top_tabs, side_tabs, active_space, spaces_json): (Vec<_>, Vec<_>, String, Vec<_>) = {
+        let state = app.state.borrow();
+        let active = state.active;
+        let active_space = state.spaces.active_space.clone();
+        let top_tabs = state.tabs.iter().filter(|t| t.space_id == active_space).filter_map(|tab| {
+            let widget: gtk::Widget = if tab.pinned {
+                tab.top_pin.as_ref()?.event.clone().upcast()
+            } else {
+                tab.top_tab.as_ref()?.event.clone().upcast()
+            };
+            let origin = widget.translate_coordinates(&app.ui.overlay, 0, 0).unwrap_or((-1, -1));
+            Some(serde_json::json!({
+                "id": tab.id,
+                "spaceId": tab.space_id,
+                "title": if tab.title.is_empty() { "New tab" } else { tab.title.as_str() },
+                "pinned": tab.pinned,
+                "private": tab.private,
+                "active": tab.id == active,
+                "at": [origin.0, origin.1],
+                "size": [widget.allocated_width(), widget.allocated_height()],
+                "visible": widget.is_visible() && widget.is_child_visible() && widget.is_mapped(),
+            }))
+        }).collect();
+        let side_tabs = state.tabs.iter().filter(|t| t.space_id == active_space).filter_map(|tab| {
+            let widget: gtk::Widget = if tab.pinned {
+                tab.pin.as_ref()?.event.clone().upcast()
+            } else {
+                tab.row.as_ref()?.event.clone().upcast()
+            };
+            let origin = widget.translate_coordinates(&app.ui.overlay, 0, 0).unwrap_or((-1, -1));
+            Some(serde_json::json!({
+                "id": tab.id,
+                "spaceId": tab.space_id,
+                "title": if tab.title.is_empty() { "New tab" } else { tab.title.as_str() },
+                "pinned": tab.pinned,
+                "private": tab.private,
+                "active": tab.id == active,
+                "at": [origin.0, origin.1],
+                "size": [widget.allocated_width(), widget.allocated_height()],
+                "visible": widget.is_visible() && widget.is_child_visible() && widget.is_mapped(),
+            }))
+        }).collect();
+        let spaces_json = state.spaces.spaces.iter().map(|s| {
+            let tab_count = state.tabs.iter().filter(|t| t.space_id == s.id).count();
+            let pinned_count = state.tabs.iter().filter(|t| t.space_id == s.id && t.pinned).count();
+            serde_json::json!({
+                "id": s.id,
+                "name": s.name,
+                "default": s.is_default(),
+                "active": s.id == active_space,
+                "tabCount": tab_count,
+                "pinnedCount": pinned_count,
+            })
+        }).collect();
+        (top_tabs, side_tabs, active_space, spaces_json)
+    };
+    let visible_browser_icons = controls.iter().filter(|c| {
+        let name = c["name"].as_str().unwrap_or("");
+        c["visible"].as_bool().unwrap_or(false)
+            && !matches!(name, "minimise" | "maximise" | "close" | "start-search" | "address" | "sidenewtab" | "sidefold" | "topspace" | "sidespace")
+    }).count();
+    let decor = app.decor_plan.borrow().clone();
+    let prefs = app.prefs.borrow().clone();
+    let topbar_shown = app.ui.topbar.is_visible() && app.ui.topbar.is_mapped();
+    let sidebar_shown = app.ui.side.is_visible() && app.ui.side.is_child_visible() && app.ui.side.is_mapped();
+    let tab_layout = if app.fullscreen.get() {
+        "fullscreen"
+    } else if sidebar_shown {
+        "vertical"
+    } else {
+        "top"
+    };
     serde_json::json!({
         "ok": true,
         "address": app.ui.address_label.text().as_str(),
         "tabCount": app.ui.tab_count.text().as_str(),
         "dark": app.dark(),
-        "toolbarShown": app.ui.toolbar.is_visible(),
+        "topbarShown": topbar_shown,
+        "sidebarShown": sidebar_shown,
+        "tabLayout": tab_layout,
+        "activeSpace": active_space,
+        "spaces": spaces_json,
+        "toolbarShown": app.ui.toolbar.is_visible() && app.ui.toolbar.is_mapped(),
         "bookmarksShown": app.ui.bmarkbar.is_visible() && app.ui.bmarkbar.is_child_visible() && app.ui.bmarkbar.is_mapped(),
-        "rowCount": app.ui.rows.children().len(),
+        "rowCount": app.ui.top_tabs.children().len(),
+        "topTabCount": top_tabs.len(),
+        "topTabs": top_tabs,
+        "sideTabs": side_tabs,
+        "visibleBrowserIcons": visible_browser_icons,
+        "nativeDecorated": app.ui.window.is_decorated(),
+        "windowControlsMode": prefs.window_controls.title(),
+        "leftWindowControls": decor.left_controls.len(),
+        "rightWindowControls": decor.right_controls.len(),
+        "zoomPercent": app.current_zoom_percent(),
+        "startBookmarksMode": prefs.start_bookmarks_mode.title(),
+        "toolbarPrefs": {
+            "toolbar": prefs.show_toolbar,
+            "nav": prefs.show_nav_buttons,
+            "reload": prefs.show_reload_button,
+            "home": prefs.show_home_button,
+            "reader": prefs.show_reader_button,
+            "bookmark": prefs.show_bookmark_button,
+        },
         "startFocused": app.ui.window.focused_widget().as_ref() == Some(app.ui.start.search.upcast_ref()),
         "startHasFocus": app.ui.start.search.has_focus(),
         "windowActive": app.ui.window.is_active(),
         "protected": app.ui.site_info.style_context().has_class("protected"),
         "controls": controls,
     }).to_string()
+}
+
+fn collect_popover_menu_items(widget: &gtk::Widget, out: &mut Vec<serde_json::Value>) {
+    if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
+        let ctx = btn.style_context();
+        if ctx.has_class("menu-row") || ctx.has_class("menu-zoom-btn") || ctx.has_class("menu-zoom-reset") {
+            let label = btn.widget_name().to_string();
+            let shown_text = btn.label().map(|s| s.to_string()).unwrap_or_else(|| label.clone());
+            out.push(serde_json::json!({
+                "label": label,
+                "text": shown_text,
+                "sensitive": btn.is_sensitive(),
+            }));
+            return;
+        }
+    }
+    if let Some(container) = widget.downcast_ref::<gtk::Container>() {
+        for child in container.children() {
+            collect_popover_menu_items(&child, out);
+        }
+    }
+}
+
+fn find_popover_menu_button(widget: &gtk::Widget, target: &str) -> Option<gtk::Button> {
+    if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
+        let ctx = btn.style_context();
+        if ctx.has_class("menu-row") || ctx.has_class("menu-zoom-btn") || ctx.has_class("menu-zoom-reset") {
+            if btn.widget_name().as_str() == target
+                || btn.label().as_deref() == Some(target)
+            {
+                return Some(btn.clone());
+            }
+        }
+    }
+    if let Some(container) = widget.downcast_ref::<gtk::Container>() {
+        for child in container.children() {
+            if let Some(found) = find_popover_menu_button(&child, target) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn browser_menu() -> Option<gtk::Menu> {
@@ -961,15 +1483,16 @@ fn ui_tree(app: &AppRef) -> String {
 }
 
 fn probe(app: &AppRef) -> String {
-    let (tabs, active, url, title) = {
+    let (tabs, active, url, title, active_space, spaces_json) = {
         let state = app.state.borrow();
         let tabs: Vec<String> = state
             .tabs
             .iter()
             .map(|tab| {
                 format!(
-                    "{{\"id\":{},\"url\":\"{}\",\"title\":\"{}\",\"pinned\":{},\"loading\":{},\"private\":{},\"asleep\":{},\"hasView\":{}}}",
+                    "{{\"id\":{},\"spaceId\":\"{}\",\"url\":\"{}\",\"title\":\"{}\",\"pinned\":{},\"loading\":{},\"private\":{},\"asleep\":{},\"hasView\":{}}}",
                     tab.id,
+                    json_escape(&tab.space_id),
                     json_escape(&tab.url),
                     json_escape(&tab.title),
                     tab.pinned,
@@ -980,11 +1503,25 @@ fn probe(app: &AppRef) -> String {
                 )
             })
             .collect();
+        let spaces: Vec<String> = state
+            .spaces
+            .spaces
+            .iter()
+            .map(|s| {
+                format!(
+                    "{{\"id\":\"{}\",\"name\":\"{}\"}}",
+                    json_escape(&s.id),
+                    json_escape(&s.name)
+                )
+            })
+            .collect();
         (
             tabs,
             state.active,
             state.active_tab().map(|tab| tab.url.clone()).unwrap_or_default(),
             state.active_tab().map(|tab| tab.title.clone()).unwrap_or_default(),
+            state.spaces.active_space.clone(),
+            spaces.join(","),
         )
     };
     let find = app.find.borrow();
@@ -1010,9 +1547,23 @@ fn probe(app: &AppRef) -> String {
         .label()
         .map(|label| label.to_string())
         .unwrap_or_default();
+    let topbar_shown = app.ui.topbar.is_visible() && app.ui.topbar.is_mapped();
+    let sidebar_shown = app.ui.side.is_visible() && app.ui.side.is_child_visible() && app.ui.side.is_mapped();
+    let tab_layout = if app.fullscreen.get() {
+        "fullscreen"
+    } else if sidebar_shown {
+        "vertical"
+    } else {
+        "top"
+    };
     format!(
-        "{{\"ok\":true,\"active\":{},\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"orphanViews\":{},\"reading\":{},\"width\":{},\"height\":{},\"shellWidth\":{},\"shellHeight\":{},\"ground\":\"{}\",\"card\":\"{}\",\"viewWidth\":{},\"viewHeight\":{},\"gdkWidth\":{},\"gdkHeight\":{},\"minimumWidth\":{},\"naturalWidth\":{},\"screen\":{{\"width\":{},\"height\":{}}},\"error\":{},\"errorAction\":\"{}\"}}",
+        "{{\"ok\":true,\"active\":{},\"activeSpace\":\"{}\",\"spaces\":[{}],\"topbarShown\":{},\"sidebarShown\":{},\"tabLayout\":\"{}\",\"url\":\"{}\",\"title\":\"{}\",\"tabs\":[{}],\"omni\":{},\"omniCount\":{},\"omniPicked\":{},\"omniText\":\"{}\",\"panel\":\"{}\",\"panelFilter\":\"{}\",\"find\":{},\"findText\":\"{}\",\"findCount\":\"{}\",\"hideMode\":{},\"maximised\":{},\"bookmarkBar\":{},\"bookmarkCount\":{},\"visibleChild\":\"{}\",\"stackChildren\":{},\"orphanViews\":{},\"reading\":{},\"width\":{},\"height\":{},\"shellWidth\":{},\"shellHeight\":{},\"ground\":\"{}\",\"card\":\"{}\",\"viewWidth\":{},\"viewHeight\":{},\"gdkWidth\":{},\"gdkHeight\":{},\"minimumWidth\":{},\"naturalWidth\":{},\"screen\":{{\"width\":{},\"height\":{}}},\"error\":{},\"errorAction\":\"{}\"}}",
         active,
+        json_escape(&active_space),
+        spaces_json,
+        topbar_shown,
+        sidebar_shown,
+        tab_layout,
         json_escape(&url),
         json_escape(&title),
         tabs.join(","),
@@ -1118,8 +1669,9 @@ fn debug(app: &AppRef) -> String {
         .entry
         .translate_coordinates(&app.ui.window, 0, 0)
         .unwrap_or((-1, -1));
+    let (chip_visible, chip_host, chip_kind) = omni.chip_state();
     ok(&format!(
-        ",\"omni\":{{\"visible\":{},\"mapped\":{},\"holder\":\"{}x{}\",\"block\":\"{}x{}\",\"field\":\"{}x{}\",\"entry\":\"{}x{}\",\"list\":\"{}x{}\",\"listVis\":{},\"scrollVis\":{},\"rows\":{},\"rowsVis\":{},\"fieldAt\":\"{},{}\",\"entryAt\":\"{},{}\",\"offers\":{}}}",
+        ",\"omni\":{{\"visible\":{},\"mapped\":{},\"holder\":\"{}x{}\",\"block\":\"{}x{}\",\"field\":\"{}x{}\",\"entry\":\"{}x{}\",\"list\":\"{}x{}\",\"listVis\":{},\"scrollVis\":{},\"rows\":{},\"rowsVis\":{},\"fieldAt\":\"{},{}\",\"entryAt\":\"{},{}\",\"offers\":{},\"chipVisible\":{},\"chipHost\":\"{}\",\"chipKind\":\"{}\"}}",
         omni.visible.get(),
         omni.holder.is_mapped(),
         omni.holder.allocated_width(),
@@ -1143,7 +1695,10 @@ fn debug(app: &AppRef) -> String {
         // Offers the model holds, which can exceed `rowsVis` when the list is
         // capped and scrolls: geometry paired with a count says whether a
         // field moved or the list under it grew.
-        omni.offers.borrow().len()
+        omni.offers.borrow().len(),
+        chip_visible,
+        json_escape(&chip_host),
+        chip_kind
     ))
 }
 
@@ -1157,11 +1712,23 @@ fn debug(app: &AppRef) -> String {
 /// geometry it is about to assert instead of sleeping a guessed amount.
 fn settle(app: &AppRef) -> String {
     let mut rounds = 0;
+    let mut prev_panel_upper = -1.0_f64;
+    let mut panel_stable = 0;
     for _ in 0..60 {
         rounds += 1;
         app.ui.window.check_resize();
         app.ui.overlay.check_resize();
         app.ui.start.root.check_resize();
+        if app.omni.visible.get() {
+            app.omni.holder.check_resize();
+        }
+        {
+            let panels = app.panels.borrow();
+            if panels.open.is_some() {
+                panels.card.check_resize();
+                panels.scroll_for_open().check_resize();
+            }
+        }
         let context = glib::MainContext::default();
         let mut dispatched = 0;
         while dispatched < 256 && context.iteration(false) {
@@ -1172,7 +1739,28 @@ fn settle(app: &AppRef) -> String {
         let layers_ready = [&app.omni.holder, &app.find.borrow().holder]
             .iter()
             .all(|holder| !holder.get_visible() || holder.allocated_width() == width);
-        if width > 1 && height > 1 && layers_ready {
+        let panel_ready = {
+            let panels = app.panels.borrow();
+            if panels.open.is_none() {
+                true
+            } else {
+                let adj = panels.scroll_for_open().vadjustment();
+                let upper = adj.upper();
+                let page = adj.page_size();
+                if !panels.is_refit_pending()
+                    && panels.holder.allocated_width() == width
+                    && page > 1.0
+                    && (upper - prev_panel_upper).abs() < 0.5
+                {
+                    panel_stable += 1;
+                } else {
+                    panel_stable = 0;
+                    prev_panel_upper = upper;
+                }
+                panel_stable >= 2
+            }
+        };
+        if width > 1 && height > 1 && layers_ready && panel_ready {
             break;
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -1315,14 +1903,18 @@ fn peek_view(app: &AppRef) -> Option<webkit2gtk::WebView> {
         if child.widget_name() != "peek-card" {
             continue;
         }
-        let container = child.dynamic_cast_ref::<gtk::Container>()?;
-        for kid in container.children() {
-            if let Ok(view) = kid.downcast::<webkit2gtk::WebView>() {
-                return Some(view);
-            }
-        }
+        return descendant_peek_view(&child);
     }
     None
+}
+
+fn descendant_peek_view(widget: &gtk::Widget) -> Option<webkit2gtk::WebView> {
+    if widget.widget_name() == "peek-view" {
+        return widget.clone().downcast::<webkit2gtk::WebView>().ok();
+    }
+    widget.downcast_ref::<gtk::Container>().and_then(|container| {
+        container.children().iter().find_map(descendant_peek_view)
+    })
 }
 
 fn peek_eval(app: &AppRef, code: &str, sender: &mpsc::Sender<String>) {
@@ -1361,3 +1953,61 @@ fn eval_in(view: &webkit2gtk::WebView, code: &str, sender: &mpsc::Sender<String>
     });
 }
 
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    #[test]
+    fn reset_starts_observation_immediately_and_records_sub_threshold_maxima() {
+        let mut tracker = DriftTracker::default();
+        let t0 = Instant::now();
+        tracker.reset(t0);
+        // A healthy 52ms tick is recorded in worst_gap_ms without triggering a >120ms gap.
+        tracker.tick(t0 + Duration::from_millis(52));
+        let (worst, ticks, gaps) = tracker.snapshot(t0 + Duration::from_millis(60));
+        assert_eq!(ticks, 1);
+        assert_eq!(worst, 52);
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn reset_followed_immediately_by_stall_is_not_masked() {
+        let mut tracker = DriftTracker::default();
+        let t0 = Instant::now();
+        tracker.reset(t0);
+        // Action runs right after reset and blocks for 185ms before next tick.
+        tracker.tick(t0 + Duration::from_millis(185));
+        let (worst, ticks, gaps) = tracker.snapshot(t0 + Duration::from_millis(190));
+        assert_eq!(ticks, 1);
+        assert_eq!(worst, 185);
+        assert_eq!(gaps, vec![185]);
+    }
+
+    #[test]
+    fn snapshot_before_first_tick_catches_in_flight_stall() {
+        let mut tracker = DriftTracker::default();
+        let t0 = Instant::now();
+        tracker.reset(t0);
+        // Even if `drift` is read before the 50ms timer callback fires, pending gap is reported.
+        let (worst, ticks, gaps) = tracker.snapshot(t0 + Duration::from_millis(160));
+        assert_eq!(ticks, 0);
+        assert_eq!(worst, 160);
+        assert_eq!(gaps, vec![160]);
+    }
+
+    #[test]
+    fn gap_log_caps_at_max_recorded_gaps_while_tracking_true_worst() {
+        let mut tracker = DriftTracker::default();
+        let mut t = Instant::now();
+        tracker.reset(t);
+        for i in 0..50u64 {
+            t += Duration::from_millis(130 + i);
+            tracker.tick(t);
+        }
+        let (worst, ticks, gaps) = tracker.snapshot(t);
+        assert_eq!(ticks, 50);
+        assert_eq!(gaps.len(), MAX_RECORDED_GAPS);
+        assert_eq!(worst, 179);
+    }
+}

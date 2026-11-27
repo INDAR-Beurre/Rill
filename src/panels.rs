@@ -5,10 +5,10 @@ use crate::palette::Palette;
 use crate::store::{ago, day_of, now_secs, Records};
 use gtk::prelude::*;
 
-const INSET: i32 = 28;
-const COMPACT_INSET: i32 = 18;
-const RAIL_WIDTH: i32 = 176;
-const MAX_HEIGHT: i32 = 740;
+const INSET: i32 = 20;
+const COMPACT_INSET: i32 = 16;
+const RAIL_WIDTH: i32 = 164;
+const MAX_HEIGHT: i32 = 720;
 
 fn widget_insets(widget: &impl IsA<gtk::Widget>) -> (i32, i32, i32, i32) {
     let context = widget.style_context();
@@ -22,6 +22,35 @@ fn widget_insets(widget: &impl IsA<gtk::Widget>) -> (i32, i32, i32, i32) {
         widget.margin_top() + i32::from(padding.top) + i32::from(border.top) + i32::from(margin.top),
         widget.margin_bottom() + i32::from(padding.bottom) + i32::from(border.bottom) + i32::from(margin.bottom),
     )
+}
+
+/// Chooses fast word-boundary wrapping for ordinary prose labels so GTK3
+/// never lays out every single character onto its own line at `width = 0`
+/// during size negotiation. Labels containing long unbroken tokens (such as
+/// URLs or long hostnames) retain `WordChar` with a minimum character floor so
+/// narrow windows still wrap cleanly without triggering the `width = 0` storm.
+fn wrap_policy(text: &str) -> (gtk::pango::WrapMode, Option<i32>) {
+    if text.split_whitespace().any(|word| word.chars().count() > 24) {
+        (gtk::pango::WrapMode::WordChar, Some(12))
+    } else {
+        (gtk::pango::WrapMode::Word, None)
+    }
+}
+
+fn configure_label_wrap(label: &gtk::Label) {
+    let text = label.text();
+    let (mode, min_chars) = wrap_policy(&text);
+    if !label.wraps() {
+        label.set_line_wrap(true);
+    }
+    if label.line_wrap_mode() != mode {
+        label.set_line_wrap_mode(mode);
+    }
+    if let Some(chars) = min_chars {
+        if label.width_chars() < chars {
+            label.set_width_chars(chars);
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -82,6 +111,8 @@ impl PanelKind {
 thread_local! {
     static EXTENSION_CHOOSERS: std::cell::RefCell<Vec<gtk::FileChooserNative>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static PROFILE_CHOOSERS: std::cell::RefCell<Vec<gtk::FileChooserNative>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Card width clamped to the page viewport width so narrow windows never overflow.
@@ -101,6 +132,9 @@ pub fn shortcut_section(what: &str) -> &'static str {
         | "Jump to a tab"
         | "Switch to a tab by typing its name"
         | "Duplicate this tab"
+        | "Move tab left"
+        | "Move tab right"
+        | "Show or hide the tab sidebar"
         | "Fold the tab column to a strip, or open it" => "Tabs",
         "Back"
         | "Forward"
@@ -161,12 +195,168 @@ pub struct Panels {
     description: gtk::Label,
     compact: std::cell::Cell<bool>,
     refit_queued: std::rc::Rc<std::cell::Cell<bool>>,
+    /// True while a freshly opened panel is awaiting or running its entrance
+    /// animation so immediate/idle layout calls cannot snap its animated `y`.
+    entering: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Incremented on every open/close so deferred entrance callbacks from a
+    /// superseded open become no-ops.
+    open_gen: std::rc::Rc<std::cell::Cell<u64>>,
     /// The card width the body was last measured at. A resize changes the width
     /// a wrapping line needs, so the height has to be asked again.
     fitted_width: std::cell::Cell<i32>,
+    /// Last content width adapted via `adapt_content`, reset on `clear_body`.
+    adapted_width: std::cell::Cell<i32>,
+    /// Last compact layout mode applied to chrome/nav, so repeat `layout_card`
+    /// calls do not mutate unchanged GTK properties and dirty Pango caches.
+    configured_compact: std::cell::Cell<Option<bool>>,
+    /// Persistent rail navigation buttons, rebuilt only when theme polarity changes.
+    nav_buttons: std::cell::RefCell<Vec<(PanelKind, gtk::ToggleButton)>>,
+    nav_dark: std::cell::Cell<Option<bool>>,
+    updating_nav: std::rc::Rc<std::cell::Cell<bool>>,
     /// A permanent home for the Settings body. Other panels clear `body` on
     /// open; keeping Settings here avoids jumping the scroller while typing.
     pub(crate) settings_holder: gtk::Box,
+    /// Open popover owned by a panel control (e.g., the Settings search engine
+    /// picker) so Escape dismisses it before closing the panel and Tab stays
+    /// inside its menu instead of jumping to the panel card.
+    active_popover: std::cell::RefCell<Option<gtk::Popover>>,
+}
+
+/// Recursive lookup for a filter `gtk::Entry` inside a container (supports both
+/// direct entries and entries wrapped inside `.panel-filter-box`).
+fn find_entry(widget: &gtk::Widget) -> Option<gtk::Entry> {
+    if let Ok(entry) = widget.clone().downcast::<gtk::Entry>() {
+        return Some(entry);
+    }
+    if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+        for child in container.children() {
+            if let Some(entry) = find_entry(&child) {
+                return Some(entry);
+            }
+        }
+    }
+    None
+}
+
+fn populate_catalog_rows(
+    app: &AppRef,
+    container: &gtk::Box,
+    entries: &[crate::addons_catalog::CatalogEntry],
+) {
+    for child in container.children() {
+        container.remove(&child);
+    }
+    if entries.is_empty() {
+        let empty = gtk::Label::new(Some("No matching add-ons."));
+        crate::ui::class(&empty, "settingdesc");
+        empty.set_xalign(0.0);
+        empty.set_margin_top(6);
+        empty.set_margin_bottom(6);
+        container.add(&empty);
+        container.show_all();
+        return;
+    }
+    for entry in entries {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        crate::ui::class(&row, "ptrow");
+        crate::ui::class(&row, "panel-list-row");
+
+        let copy = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        copy.set_hexpand(true);
+
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let title = gtk::Label::new(Some(&entry.name));
+        crate::ui::class(&title, "ptitle");
+        title.set_xalign(0.0);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let badge = gtk::Label::new(Some(entry.compat.badge()));
+        crate::ui::class(&badge, "compat-badge");
+        match entry.compat {
+            crate::addons_catalog::CompatTier::Unverified => crate::ui::class(&badge, "content"),
+            crate::addons_catalog::CompatTier::Partial => crate::ui::class(&badge, "partial"),
+            crate::addons_catalog::CompatTier::Unsupported => crate::ui::class(&badge, "unsupported"),
+        };
+        badge.set_valign(gtk::Align::Center);
+        head.pack_start(&title, false, false, 0);
+        head.pack_start(&badge, false, false, 0);
+        copy.add(&head);
+
+        let desc_text = if entry.summary.is_empty() {
+            entry.compat_note.clone()
+        } else {
+            format!("{} {}", entry.summary, entry.compat_note)
+        };
+        let desc = gtk::Label::new(Some(&desc_text));
+        crate::ui::class(&desc, "purl");
+        desc.set_xalign(0.0);
+        desc.set_line_wrap(true);
+        desc.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        copy.add(&desc);
+        row.pack_start(&copy, true, true, 0);
+
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        actions.set_valign(gtk::Align::Center);
+        if let Some(xpi_url) = entry.xpi_url.clone() {
+            let install_btn = gtk::Button::with_label("Install\u{2026}");
+            crate::ui::class(&install_btn, "act");
+            if entry.compat != crate::addons_catalog::CompatTier::Unsupported {
+                crate::ui::class(&install_btn, "primary");
+            }
+            let app_weak = app.weak();
+            let slug = entry.slug.clone();
+            let listing = entry.listing_url.clone();
+            install_btn.connect_clicked(move |btn| {
+                btn.set_sensitive(false);
+                btn.set_label("Fetching\u{2026}");
+                let app_done = app_weak.clone();
+                let btn_done = btn.downgrade();
+                let came_from = listing.clone();
+                crate::addons_catalog::download_amo_xpi(&slug, &xpi_url, move |res| {
+                    if let Some(b) = btn_done.upgrade() {
+                        b.set_sensitive(true);
+                        b.set_label("Install\u{2026}");
+                    }
+                    let Some(app) = app_done.upgrade() else { return };
+                    match res {
+                        Ok(path) => match crate::extensions::inspect(&path) {
+                            Ok(offer) => {
+                                app.close_panels();
+                                crate::permissions::offer_addon(&app, app.active_id(), path, came_from, offer);
+                            }
+                            Err(why) => app.flash_toast(&format!("Could not inspect add-on: {why}")),
+                        },
+                        Err(why) => app.flash_toast(&why),
+                    }
+                });
+            });
+            actions.pack_start(&install_btn, false, false, 0);
+        }
+        let open_btn = gtk::Button::with_label("Open on AMO");
+        crate::ui::class(&open_btn, "act");
+        let app_weak = app.weak();
+        let listing_url = entry.listing_url.clone();
+        open_btn.connect_clicked(move |_| {
+            if let Some(app) = app_weak.upgrade() {
+                app.close_panels();
+                app.new_tab(Some(&listing_url), false, true);
+            }
+        });
+        actions.pack_start(&open_btn, false, false, 0);
+        row.pack_end(&actions, false, false, 0);
+        container.add(&row);
+    }
+    container.show_all();
+}
+
+/// Pure switch state `(active, sensitive)` for an installed extension row.
+/// An extension that cannot run (`runs == false`) must never appear active or
+/// toggleable.
+fn extension_switch_state(runs: bool, enabled: bool) -> (bool, bool) {
+    if runs {
+        (enabled, true)
+    } else {
+        (false, false)
+    }
 }
 
 /// The Settings query hides widgets in place. Rebuilding the panel on each
@@ -268,35 +458,33 @@ impl Panels {
         crate::ui::class(&rail, "panel-rail");
         rail.set_hexpand(false);
         rail.set_size_request(RAIL_WIDTH, -1);
-        let rail_brand = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        rail_brand.set_margin_start(22);
-        rail_brand.set_margin_end(16);
-        rail_brand.set_margin_top(26);
-        rail_brand.set_margin_bottom(26);
-        // Only the wordmark. The "Your browser" caption above it said nothing
-        // the wordmark and the panel itself don't already say.
-        let wordmark = gtk::Label::new(Some("Search"));
+        let rail_brand = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        rail_brand.set_margin_start(16);
+        rail_brand.set_margin_end(12);
+        rail_brand.set_margin_top(20);
+        rail_brand.set_margin_bottom(16);
+        let wordmark = gtk::Label::new(Some(crate::app::APP_NAME));
         crate::ui::class(&wordmark, "panel-rail-brand");
         wordmark.set_xalign(0.0);
         rail_brand.pack_start(&wordmark, false, true, 0);
         rail.pack_start(&rail_brand, false, true, 0);
 
         let nav = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        nav.set_margin_start(12);
-        nav.set_margin_end(12);
-        nav.set_margin_bottom(12);
+        nav.set_margin_start(8);
+        nav.set_margin_end(8);
+        nav.set_margin_bottom(8);
         if let Some(access) = nav.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTabList);
             gtk::atk::prelude::AtkObjectExt::set_name(&access, "Browser panel navigation");
         }
         rail.pack_start(&nav, false, true, 0);
 
-        let rail_hint = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let rail_hint = gtk::Box::new(gtk::Orientation::Vertical, 4);
         crate::ui::class(&rail_hint, "panel-rail-hint");
-        rail_hint.set_margin_start(22);
+        rail_hint.set_margin_start(16);
         rail_hint.set_margin_end(12);
-        rail_hint.set_margin_top(18);
-        rail_hint.set_margin_bottom(22);
+        rail_hint.set_margin_top(12);
+        rail_hint.set_margin_bottom(16);
         let hint_keys = gtk::Label::new(Some("Ctrl ← / →"));
         crate::ui::class(&hint_keys, "keyhint");
         hint_keys.set_halign(gtk::Align::Start);
@@ -315,19 +503,19 @@ impl Panels {
         crate::ui::class(&content, "panel-content");
         content.set_hexpand(true);
         content.set_vexpand(true);
-        let head = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         crate::ui::class(&head, "panel-header");
         head.set_margin_start(INSET);
         head.set_margin_end(INSET);
-        head.set_margin_top(28);
-        head.set_margin_bottom(24);
-        let heading = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        head.set_margin_top(20);
+        head.set_margin_bottom(12);
+        let heading = gtk::Box::new(gtk::Orientation::Vertical, 4);
         heading.set_hexpand(true);
         let title = gtk::Label::new(Some("Bookmarks"));
         crate::ui::class(&title, "panel-heading");
         title.set_xalign(0.0);
         title.set_line_wrap(true);
-        title.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        title.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         if let Some(access) = title.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::Heading);
         }
@@ -335,7 +523,7 @@ impl Panels {
         crate::ui::class(&description, "panel-description");
         description.set_xalign(0.0);
         description.set_line_wrap(true);
-        description.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        description.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         heading.pack_start(&title, false, true, 0);
         heading.pack_start(&description, false, true, 0);
         head.pack_start(&heading, true, true, 0);
@@ -411,9 +599,16 @@ impl Panels {
             description,
             compact: std::cell::Cell::new(false),
             refit_queued: std::rc::Rc::new(std::cell::Cell::new(false)),
+            entering: std::rc::Rc::new(std::cell::Cell::new(false)),
+            open_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
             fitted_width: std::cell::Cell::new(0),
+            adapted_width: std::cell::Cell::new(0),
+            configured_compact: std::cell::Cell::new(None),
+            nav_buttons: std::cell::RefCell::new(Vec::new()),
+            nav_dark: std::cell::Cell::new(None),
+            updating_nav: std::rc::Rc::new(std::cell::Cell::new(false)),
             settings_holder,
-
+            active_popover: std::cell::RefCell::new(None),
         };
 
         close.connect_clicked(move |_| {
@@ -442,9 +637,7 @@ impl Panels {
             let query = text.to_lowercase();
             *self.filter.borrow_mut() = query.clone();
             let children = self.settings_holder.children();
-            let entry = children
-                .iter()
-                .find_map(|child| child.clone().downcast::<gtk::Entry>().ok());
+            let entry = children.iter().find_map(find_entry);
             let list = children
                 .iter()
                 .find_map(|child| child.clone().downcast::<gtk::ScrolledWindow>().ok())
@@ -474,6 +667,12 @@ impl Panels {
                 } else {
                     filter_settings_list(&list, &query);
                 }
+                list.queue_resize();
+                let scroll = self.scroll_for_open();
+                scroll.queue_resize();
+                scroll.check_resize();
+                self.fitted_width.set(0);
+                self.queue_refit();
             }
             return;
         }
@@ -487,10 +686,37 @@ impl Panels {
         }
     }
 
+    pub fn has_open_popover(&self) -> bool {
+        self.active_popover
+            .borrow()
+            .as_ref()
+            .is_some_and(|pop| pop.is_visible())
+    }
+
+    pub fn dismiss_popover(&self) -> bool {
+        let pop = self.active_popover.borrow().clone();
+        if let Some(pop) = pop {
+            if pop.is_visible() {
+                pop.popdown();
+                if let Some(rel) = pop.relative_to() {
+                    if rel.is_mapped() {
+                        rel.grab_focus();
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     fn open_panel_with(&mut self, app: &AppRef, kind: PanelKind) -> Option<gtk::Entry> {
+        self.dismiss_popover();
         let prev = self.open.clone();
         let was_open = prev.is_some();
         let switched = prev.as_ref().is_some_and(|p| *p != kind);
+        let gen = self.open_gen.get().wrapping_add(1);
+        self.open_gen.set(gen);
+        self.entering.set(false);
         crate::motion::cancel(&self.layer.root);
         crate::motion::cancel(&self.scrim);
         crate::motion::cancel(&self.card);
@@ -538,7 +764,11 @@ impl Panels {
         } else {
             0
         };
-        let band = 0;
+        let band = if app.ui.topbar.is_visible() && app.ui.topbar.is_mapped() {
+            app.ui.topbar.allocated_height().max(38)
+        } else {
+            0
+        };
         self.column.set(column);
         self.band.set(band);
         let (width, height) = (
@@ -560,35 +790,86 @@ impl Panels {
         self.card.set_can_focus(true);
         self.layer.show();
         self.layout(width, height);
-        self.queue_refit();
         if !was_open || switched {
-            self.scroll.vadjustment().set_value(0.0);
+            self.scroll_for_open().vadjustment().set_value(0.0);
         }
-        if !was_open {
-            // The scrim fades via direct alpha draw (no full-screen offscreen
-            // surface copy) on the shared entrance role under the card.
-            crate::motion::fade_alpha(&self.scrim, &self.scrim_alpha, crate::motion::dur::ENTER);
+        if !was_open && crate::motion::enabled() {
+            // Hold the frame-0 starting pose immediately while the freshly
+            // built panel settles its initial allocation and app-side
+            // layout_with_column completes, then launch the VSync entrance on
+            // idle so build/layout work cannot snap y or eat the frame budget.
+            self.entering.set(true);
+            self.scrim_alpha.set(0.0);
+            self.scrim.queue_draw();
+            self.card.set_opacity(0.0);
             if width > 1 && height > 1 {
                 let tallest = MAX_HEIGHT.min((height - 80).max(1));
                 let x = column + ((page - card_width) / 2).max(12);
                 let y = ((height - tallest) / 2).max(band + 12);
-                // First open rises the shared 8px into the exact same top anchor
-                // that layout_card uses, so shorter panels never jump vertically.
-                crate::motion::slide_in_fixed(
-                    &self.layer.root,
-                    &self.card,
-                    x,
-                    y,
-                    crate::motion::dur::TRAVEL,
-                    crate::motion::dur::ENTER,
-                );
-            } else {
-                crate::motion::fade_in(&self.card, crate::motion::dur::ENTER);
+                self.layer.root.move_(&self.card, x, y + crate::motion::dur::TRAVEL);
             }
-        } else if switched {
-            // Switching panels only swaps the content inside the open card, so
-            // the card stays put and the content uses the short MICRO role.
-            crate::motion::fade_from(&self.scroll, 0.35, 1.0, crate::motion::dur::MICRO);
+            let open_gen = self.open_gen.clone();
+            let entering = self.entering.clone();
+            glib::idle_add_local_once(move || {
+                if open_gen.get() != gen {
+                    return;
+                }
+                let Some(app) = crate::app::current() else { return };
+                let Ok(panels) = app.panels.try_borrow() else { return };
+                if panels.open.is_none() || panels.open_gen.get() != gen {
+                    return;
+                }
+                let width = app.ui.overlay.allocated_width().max(app.ui.window.allocated_width());
+                let height = app.ui.overlay.allocated_height().max(app.ui.window.allocated_height());
+                let column = panels.column.get();
+                let band = panels.band.get();
+                let page = (width - column).max(0);
+                let card_width = panel_card_width(page);
+                if panels.open.as_ref() != Some(&PanelKind::Settings)
+                    || panels.fitted_width.get() != card_width
+                {
+                    panels.wanted_height.set(panels.fit_height(card_width));
+                    let card_height = panels.card_height(card_width, height);
+                    panels.card.set_size_request(card_width, card_height);
+                    panels.scroll_for_open().check_resize();
+                }
+                panels.layer.place(&panels.scrim, 0, 0, width, height);
+                crate::motion::fade_alpha(&panels.scrim, &panels.scrim_alpha, crate::motion::dur::ENTER);
+                if width > 1 && height > 1 {
+                    let tallest = MAX_HEIGHT.min((height - 80).max(1));
+                    let x = column + ((page - card_width) / 2).max(12);
+                    let y = ((height - tallest) / 2).max(band + 12);
+                    let done_entering = entering.clone();
+                    let done_gen = open_gen.clone();
+                    crate::motion::slide_in_fixed_then(
+                        &panels.layer.root,
+                        &panels.card,
+                        x,
+                        y,
+                        crate::motion::dur::TRAVEL,
+                        crate::motion::dur::ENTER,
+                        move || {
+                            if done_gen.get() == gen {
+                                done_entering.set(false);
+                            }
+                        },
+                    );
+                } else {
+                    entering.set(false);
+                    crate::motion::fade_in(&panels.card, crate::motion::dur::ENTER);
+                }
+            });
+        } else {
+            self.queue_refit();
+            if !was_open {
+                // Reduced motion / SEARCH_BENCH: finish synchronously in one step.
+                crate::motion::fade_alpha(&self.scrim, &self.scrim_alpha, crate::motion::dur::ENTER);
+                crate::motion::fade_in(&self.card, crate::motion::dur::ENTER);
+            } else if switched {
+                // Switching panels only swaps the content inside the open card, so
+                // the card stays put and the content uses the short MICRO role.
+                crate::motion::fade_from(&self.scroll, 0.35, 1.0, crate::motion::dur::MICRO);
+            }
         }
         // Each showing of a panel gets its own generation number. A deferred
         // focus from an earlier showing checks it before it runs. Checking
@@ -646,16 +927,27 @@ impl Panels {
         self.open_panel_with(app, kind);
     }
 
+    pub fn open_panel_filtered(&mut self, app: &AppRef, kind: PanelKind, filter: &str) {
+        let query = filter.trim();
+        *self.filter.borrow_mut() = query.to_lowercase();
+        let entry = self.open_panel_with(app, kind.clone());
+        if let Some(entry) = entry {
+            if entry.text() != query {
+                entry.set_text(query);
+            }
+            entry.set_position(query.chars().count() as i32);
+        }
+        if kind == PanelKind::Settings && !query.is_empty() {
+            self.set_filter(app, PanelKind::Settings, query);
+        }
+    }
+
     /// Rebuild an open Downloads panel in-place without dropping filter text, cursor, or focus.
     pub fn refresh_downloads_open(&mut self, app: &AppRef) {
         if self.open.as_ref() != Some(&PanelKind::Downloads) {
             return;
         }
-        let existing = self
-            .body
-            .children()
-            .into_iter()
-            .find_map(|child| child.downcast::<gtk::Entry>().ok());
+        let existing = self.body.children().iter().find_map(find_entry);
         let was_focused = existing.as_ref().is_some_and(|entry| entry.has_focus());
         let caret = existing.as_ref().map(|entry| entry.position()).unwrap_or(0);
         let typed = existing
@@ -728,20 +1020,32 @@ impl Panels {
         // window allows instead, so switching panels only moves the bottom edge.
         let tallest = MAX_HEIGHT.min((height - 80).max(1));
         let top = ((height - tallest) / 2).max(band + 12);
-        self.layer.place(
-            &self.card,
-            column + ((page - card_width) / 2).max(12),
-            top,
-            card_width,
-            card_height,
-        );
+        if self.entering.get() || crate::motion::is_animating(&self.card) {
+            // Keep size up to date without snapping y mid-entrance.
+            self.card.set_size_request(card_width, card_height);
+        } else {
+            self.layer.place(
+                &self.card,
+                column + ((page - card_width) / 2).max(12),
+                top,
+                card_width,
+                card_height,
+            );
+        }
+    }
+
+    pub fn is_refit_pending(&self) -> bool {
+        self.refit_queued.get()
     }
 
     pub fn close(&mut self, _ui: &crate::ui::Ui) {
+        self.dismiss_popover();
         if self.open.is_none() {
             return;
         }
         self.open = None;
+        self.open_gen.set(self.open_gen.get().wrapping_add(1));
+        self.entering.set(false);
         crate::motion::cancel(&self.layer.root);
         crate::motion::cancel(&self.scrim);
         crate::motion::cancel(&self.card);
@@ -771,6 +1075,7 @@ impl Panels {
                     return None;
                 }
                 panels.fitted_width.set(0);
+                panels.adapted_width.set(0);
                 Some(panels.body.clone())
             });
             if let Some(body) = body {
@@ -782,103 +1087,146 @@ impl Panels {
     }
 
     fn build_nav(&self, app: &AppRef, current: &PanelKind) {
-        for child in self.nav.children() {
-            self.nav.remove(&child);
-        }
-        for kind in PanelKind::all() {
-            let button = gtk::ToggleButton::new();
-            crate::ui::class(&button, "tab");
-            crate::ui::class(&button, "panel-nav-item");
-            button.set_relief(gtk::ReliefStyle::None);
-            button.set_can_focus(true);
-            button.set_focus_on_click(false);
-            button.set_tooltip_text(Some(kind.title()));
-            let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-            crate::ui::class(&content, "panel-nav-content");
-            let icon = crate::icons::area(kind.icon(), 18, app.palette.borrow().muted);
-            crate::ui::class(&icon, "panel-nav-icon");
-            icon.set_valign(gtk::Align::Center);
-            content.pack_start(&icon, false, false, 0);
-            let label = gtk::Label::new(Some(kind.title()));
-            crate::ui::class(&label, "panel-nav-label");
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            content.pack_start(&label, true, true, 0);
-            button.add(&content);
-            if let Some(access) = button.accessible() {
-                gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
-                gtk::atk::prelude::AtkObjectExt::set_name(&access, kind.title());
+        let dark = app.palette.borrow().is_dark();
+        let needs_rebuild = self.nav_buttons.borrow().is_empty() || self.nav_dark.get() != Some(dark);
+        if needs_rebuild {
+            for child in self.nav.children() {
+                self.nav.remove(&child);
             }
-            if &kind == current {
-                button.set_active(true);
-                button.set_state_flags(gtk::StateFlags::CHECKED, false);
-                crate::ui::class(&button, "on");
-            }
-            let app_weak = app.weak();
-            let target = kind.clone();
-            button.connect_clicked(move |_| {
-                if let Some(app) = app_weak.upgrade() {
-                    app.toggle_panel_switch(target.clone());
+            let mut buttons = Vec::with_capacity(PanelKind::all().len());
+            let muted = app.palette.borrow().muted;
+            for kind in PanelKind::all() {
+                let button = gtk::ToggleButton::new();
+                crate::ui::class(&button, "tab");
+                crate::ui::class(&button, "panel-nav-item");
+                button.set_relief(gtk::ReliefStyle::None);
+                button.set_can_focus(true);
+                button.set_focus_on_click(false);
+                button.set_tooltip_text(Some(kind.title()));
+                let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                crate::ui::class(&content, "panel-nav-content");
+                let icon = crate::icons::area(kind.icon(), 15, muted);
+                crate::ui::class(&icon, "panel-nav-icon");
+                icon.set_valign(gtk::Align::Center);
+                content.pack_start(&icon, false, false, 0);
+                let label = gtk::Label::new(Some(kind.title()));
+                crate::ui::class(&label, "panel-nav-label");
+                label.set_xalign(0.0);
+                label.set_hexpand(true);
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                content.pack_start(&label, true, true, 0);
+                button.add(&content);
+                if let Some(access) = button.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
+                    gtk::atk::prelude::AtkObjectExt::set_name(&access, kind.title());
                 }
-            });
-            self.nav.pack_start(&button, false, true, 0);
+                let app_weak = app.weak();
+                let target = kind.clone();
+                let updating = self.updating_nav.clone();
+                button.connect_clicked(move |_| {
+                    if updating.get() {
+                        return;
+                    }
+                    if let Some(app) = app_weak.upgrade() {
+                        app.toggle_panel_switch(target.clone());
+                    }
+                });
+                self.nav.pack_start(&button, false, true, 0);
+                buttons.push((kind, button));
+            }
+            *self.nav_buttons.borrow_mut() = buttons;
+            self.nav_dark.set(Some(dark));
+            // Force compact styling to apply to freshly built nav buttons.
+            self.configured_compact.set(None);
+            self.nav.show_all();
         }
-        self.nav.show_all();
+        self.updating_nav.set(true);
+        for (kind, button) in self.nav_buttons.borrow().iter() {
+            let active = kind == current;
+            if button.is_active() != active {
+                button.set_active(active);
+            }
+            let ctx = button.style_context();
+            if active {
+                if !ctx.has_class("on") {
+                    ctx.add_class("on");
+                }
+                button.set_state_flags(gtk::StateFlags::CHECKED, false);
+            } else {
+                if ctx.has_class("on") {
+                    ctx.remove_class("on");
+                }
+                button.unset_state_flags(gtk::StateFlags::CHECKED);
+            }
+        }
+        self.updating_nav.set(false);
     }
 
     fn configure_layout(&self, card_width: i32, window_height: i32) -> bool {
         let compact = card_width < 700 || (window_height > 1 && window_height < 520);
         let changed = self.compact.replace(compact) != compact;
-        if !changed && self.fitted_width.get() == card_width {
+        let chrome_dirty = self.configured_compact.get() != Some(compact);
+        if !changed && !chrome_dirty && self.fitted_width.get() == card_width && self.adapted_width.get() == self.content_width(card_width) {
             return false;
         }
-        let orientation = if compact { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal };
-        self.card.set_orientation(orientation);
-        self.rail.set_orientation(if compact { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical });
-        self.rail.set_hexpand(compact);
-        self.rail.set_size_request(if compact { -1 } else { RAIL_WIDTH }, -1);
-        self.card.set_size_request(if compact { 560 } else { 880 }, if compact { 420 } else { 420 });
-        self.rail.set_child_packing(&self.nav, compact, true, 0, gtk::PackType::Start);
-        self.nav.set_orientation(if compact { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical });
-        self.nav.set_homogeneous(compact);
-        self.nav.set_margin_top(if compact { 12 } else { 0 });
-        self.nav.set_margin_bottom(12);
-        self.rail_brand.set_no_show_all(compact);
-        self.rail_brand.set_visible(!compact);
-        self.rail_hint.set_no_show_all(compact);
-        self.rail_hint.set_visible(!compact);
-        if !compact {
-            self.rail_brand.show_all();
-            self.rail_hint.show_all();
-        }
-        let context = self.card.style_context();
-        if compact {
-            context.add_class("panel-compact");
-        } else {
-            context.remove_class("panel-compact");
-        }
-        for child in self.nav.children() {
-            self.nav.set_child_packing(&child, compact, true, 0, gtk::PackType::Start);
-            if let Some(button) = child.downcast_ref::<gtk::Button>() {
-                if let Some(content) = button.child().and_then(|child| child.downcast::<gtk::Box>().ok()) {
-                    content.set_halign(if compact { gtk::Align::Center } else { gtk::Align::Fill });
-                    for label in content.children().into_iter().filter(|child| child.is::<gtk::Label>()) {
-                        label.set_no_show_all(compact);
-                        label.set_visible(!compact);
+        if chrome_dirty {
+            let orientation = if compact { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal };
+            self.card.set_orientation(orientation);
+            self.rail.set_orientation(if compact { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical });
+            self.rail.set_hexpand(compact);
+            self.rail.set_size_request(if compact { -1 } else { RAIL_WIDTH }, -1);
+            self.card.set_size_request(if compact { 560 } else { 880 }, 420);
+            self.rail.set_child_packing(&self.nav, compact, true, 0, gtk::PackType::Start);
+            self.nav.set_orientation(if compact { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical });
+            self.nav.set_homogeneous(compact);
+            self.nav.set_margin_top(if compact { 12 } else { 0 });
+            self.nav.set_margin_bottom(12);
+            self.rail_brand.set_no_show_all(compact);
+            self.rail_brand.set_visible(!compact);
+            self.rail_hint.set_no_show_all(compact);
+            self.rail_hint.set_visible(!compact);
+            if !compact {
+                self.rail_brand.show_all();
+                self.rail_hint.show_all();
+            }
+            let context = self.card.style_context();
+            if compact {
+                context.add_class("panel-compact");
+            } else {
+                context.remove_class("panel-compact");
+            }
+            for child in self.nav.children() {
+                self.nav.set_child_packing(&child, compact, true, 0, gtk::PackType::Start);
+                if let Some(button) = child.downcast_ref::<gtk::Button>() {
+                    if let Some(content) = button.child().and_then(|child| child.downcast::<gtk::Box>().ok()) {
+                        content.set_halign(if compact { gtk::Align::Center } else { gtk::Align::Fill });
+                        for label in content.children().into_iter().filter(|child| child.is::<gtk::Label>()) {
+                            label.set_no_show_all(compact);
+                            label.set_visible(!compact);
+                        }
                     }
                 }
             }
+            let inset = if compact { COMPACT_INSET } else { INSET };
+            self.header.set_margin_start(inset);
+            self.header.set_margin_end(inset);
+            self.header.set_margin_top(if compact { 16 } else { 20 });
+            self.header.set_margin_bottom(12);
+            self.body.set_margin_start(inset);
+            self.body.set_margin_end(inset);
+            self.body.set_margin_bottom(inset);
+            self.configured_compact.set(Some(compact));
         }
-        let inset = if compact { COMPACT_INSET } else { INSET };
-        self.header.set_margin_start(inset);
-        self.header.set_margin_end(inset);
-        self.header.set_margin_top(if compact { 20 } else { 28 });
-        self.body.set_margin_start(inset);
-        self.body.set_margin_end(inset);
-        self.body.set_margin_bottom(inset);
-        Self::adapt_content(self.body.upcast_ref(), self.content_width(card_width));
+        self.adapt_body_if_needed(self.content_width(card_width));
         changed
+    }
+
+    fn adapt_body_if_needed(&self, target_width: i32) {
+        if self.adapted_width.get() == target_width {
+            return;
+        }
+        Self::adapt_content(self.body.upcast_ref(), target_width);
+        self.adapted_width.set(target_width);
     }
 
     fn adapt_content(widget: &gtk::Widget, width: i32) {
@@ -887,8 +1235,7 @@ impl Panels {
         let inner = (width - start - end).max(1);
         if let Some(label) = widget.downcast_ref::<gtk::Label>() {
             if context.has_class("setting") || context.has_class("settingdesc") {
-                label.set_line_wrap(true);
-                label.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+                configure_label_wrap(label);
             }
         }
         if let Some(container) = widget.downcast_ref::<gtk::Box>() {
@@ -909,10 +1256,16 @@ impl Panels {
                 || context.has_class("panel-appearance")
             {
                 let stacked = inner < threshold;
-                container.set_orientation(if stacked { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal });
+                let want_orient = if stacked { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal };
+                if container.orientation() != want_orient {
+                    container.set_orientation(want_orient);
+                }
                 for child in container.children() {
                     if !context.has_class("panel-appearance") && (child.is::<gtk::Button>() || child.is::<gtk::ComboBoxText>()) {
-                        child.set_halign(if stacked { gtk::Align::Start } else { gtk::Align::Fill });
+                        let want_align = if stacked { gtk::Align::Start } else { gtk::Align::Fill };
+                        if child.halign() != want_align {
+                            child.set_halign(want_align);
+                        }
                     }
                 }
             }
@@ -982,6 +1335,7 @@ impl Panels {
 
     fn clear_body(&self) {
         self.fitted_width.set(0);
+        self.adapted_width.set(0);
         for child in self.body.children() {
             if child != self.settings_holder {
                 self.body.remove(&child);
@@ -1011,11 +1365,15 @@ impl Panels {
             }
             let width = app.ui.overlay.allocated_width();
             let height = app.ui.overlay.allocated_height();
-            panels
-                .wanted_height
-                .set(panels.fit_height(panel_card_width((width - panels.column.get()).max(1))));
+            let card_width = panel_card_width((width - panels.column.get()).max(1));
+            if panels.open.as_ref() == Some(&PanelKind::Settings)
+                && panels.fitted_width.get() == card_width
+            {
+                return;
+            }
+            panels.wanted_height.set(panels.fit_height(card_width));
             panels.layout_card(width, height);
-            panels.scroll.check_resize();
+            panels.scroll_for_open().check_resize();
         });
     }
 
@@ -1025,14 +1383,14 @@ impl Panels {
     /// round 140 and hoping: the guess was 34px short, which cut the last row of
     /// a list in half and made a scrollable card look broken.
     fn fit_height(&self, card_width: i32) -> i32 {
-        Self::adapt_content(self.body.upcast_ref(), self.content_width(card_width));
+        self.adapt_body_if_needed(self.content_width(card_width));
         let inner = self.body_width(card_width);
         let above = self.chrome_height(card_width);
         let minimum = self.minimum_height().min(MAX_HEIGHT);
         let wanted = self.measure_content(inner) + above;
         if wanted > MAX_HEIGHT {
             let inner_scrolled = (inner - 18).max(1);
-            Self::adapt_content(self.body.upcast_ref(), (self.content_width(card_width) - 18).max(1));
+            self.adapt_body_if_needed((self.content_width(card_width) - 18).max(1));
             self.fitted_width.set(card_width);
             let capped = (self.measure_content(inner_scrolled) + above).clamp(minimum, MAX_HEIGHT);
             // A snapped card can be shorter than the scrollbar's preferred
@@ -1126,21 +1484,52 @@ impl Panels {
         scroll
     }
 
-    fn filter_field(&self, placeholder: &str, on_type: impl Fn(&str) + 'static) -> gtk::Entry {
+    /// Native search field backed by the browser's own Cairo `Icon::Search`
+    /// instead of a named GTK theme icon (`edit-find-symbolic`), avoiding the
+    /// external `glycin-svg` + `bwrap` SVG loader processes while preserving
+    /// full entry focus, click, and accessibility UX.
+    fn filter_field(
+        &self,
+        app: &AppRef,
+        placeholder: &str,
+        on_type: impl Fn(&str) + 'static,
+    ) -> (gtk::Box, gtk::Entry) {
+        let shell = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        crate::ui::class(&shell, "panel-filter-box");
+        shell.set_hexpand(true);
+        shell.set_margin_bottom(12);
+        let icon = crate::icons::area(crate::icons::Icon::Search, 14, app.palette.borrow().muted);
+        crate::ui::class(&icon, "panel-filter-icon");
+        icon.set_valign(gtk::Align::Center);
+        shell.pack_start(&icon, false, false, 0);
+
         let entry = gtk::Entry::new();
         crate::ui::class(&entry, "panel-filter");
+        entry.set_has_frame(false);
         entry.set_placeholder_text(Some(placeholder));
-        entry.set_icon_from_icon_name(gtk::EntryIconPosition::Primary, Some("edit-find-symbolic"));
-        entry.set_icon_activatable(gtk::EntryIconPosition::Primary, false);
         entry.set_width_chars(1);
         entry.set_hexpand(true);
-        entry.set_margin_bottom(16);
         if let Some(access) = entry.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, placeholder);
         }
+        let shell_focus = shell.downgrade();
+        entry.connect_focus_in_event(move |_, _| {
+            if let Some(s) = shell_focus.upgrade() {
+                crate::ui::class(&s, "focused");
+            }
+            crate::gtkx::inh(false)
+        });
+        let shell_blur = shell.downgrade();
+        entry.connect_focus_out_event(move |_, _| {
+            if let Some(s) = shell_blur.upgrade() {
+                s.style_context().remove_class("focused");
+            }
+            crate::gtkx::inh(false)
+        });
         let on_type = std::rc::Rc::new(on_type);
         entry.connect_changed(move |entry| on_type(&entry.text()));
-        entry
+        shell.pack_start(&entry, true, true, 0);
+        (shell, entry)
     }
 
     fn build_bookmarks(&self, app: &AppRef) -> Option<gtk::Entry> {
@@ -1203,12 +1592,12 @@ impl Panels {
         }
         let toolbar = self.toolbar(&format!("{} saved {}", bookmarks.len(), if bookmarks.len() == 1 { "page" } else { "pages" }));
         self.body.add(&toolbar);
-        let filter = self.filter_field("Search bookmarks", |text| {
+        let (filter_box, filter) = self.filter_field(app, "Search bookmarks", |text| {
             if let Some(app) = crate::app::current() {
                 app.filter_panel(PanelKind::Bookmarks, text);
             }
         });
-        self.body.add(&filter);
+        self.body.add(&filter_box);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
         list.set_margin_end(10);
@@ -1227,6 +1616,25 @@ impl Panels {
                 }
                 app.toggle_panel_switch(PanelKind::Bookmarks);
             }))));
+            if let Some(surface) = app.favicon_for_url(&bookmark.url) {
+                if let Some(tile) = row
+                    .child()
+                    .and_then(|c| c.downcast::<gtk::Box>().ok())
+                    .and_then(|hbox| hbox.children().into_iter().next())
+                    .and_then(|id| id.downcast::<gtk::Box>().ok())
+                    .and_then(|id| id.children().into_iter().next())
+                    .and_then(|t| t.downcast::<gtk::EventBox>().ok())
+                {
+                    if let Some(child) = tile.child() {
+                        tile.remove(&child);
+                    }
+                    let img = crate::ui::favicon(&surface, 16);
+                    crate::ui::class(&img, "favicon");
+                    img.set_halign(gtk::Align::Center);
+                    img.set_valign(gtk::Align::Center);
+                    tile.add(&img);
+                }
+            }
             list.add(&row);
         }
         if shown == 0 {
@@ -1313,12 +1721,12 @@ impl Panels {
         header.pack_start(&clear, false, false, 0);
         self.body.add(&header);
 
-        let filter = self.filter_field("Search history", |text| {
+        let (filter_box, filter) = self.filter_field(app, "Search history", |text| {
             if let Some(app) = crate::app::current() {
                 app.filter_panel(PanelKind::History, text);
             }
         });
-        self.body.add(&filter);
+        self.body.add(&filter_box);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
         list.set_margin_end(10);
@@ -1424,12 +1832,12 @@ impl Panels {
         });
         toolbar.pack_start(&open_folder, false, false, 0);
         self.body.add(&toolbar);
-        let filter = self.filter_field("Search downloads", |text| {
+        let (filter_box, filter) = self.filter_field(app, "Search downloads", |text| {
             if let Some(app) = crate::app::current() {
                 app.filter_panel(PanelKind::Downloads, text);
             }
         });
-        self.body.add(&filter);
+        self.body.add(&filter_box);
         let where_to = gtk::Label::new(Some(&format!(
             "Saved in {}",
             crate::web::downloads_dir().to_string_lossy()
@@ -1531,14 +1939,26 @@ impl Panels {
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
         list.set_margin_end(10);
-        let installed_section = self.section(app, crate::icons::Icon::Spark, "Installed", "Enable, inspect, or remove your extensions.");
+
+        let disclosure = gtk::Label::new(Some(
+            "Content scripts and CSS run on the sites an add-on requests. WebExtensions background workers, chrome.*/browser.* APIs, extension storage, and nativeMessaging are not supported by WebKitGTK — password managers (such as Bitwarden) and built-in autofill do not work here.",
+        ));
+        crate::ui::class(&disclosure, "settingdesc");
+        crate::ui::class(&disclosure, "panel-note");
+        disclosure.set_xalign(0.0);
+        disclosure.set_line_wrap(true);
+        disclosure.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        disclosure.set_margin_bottom(14);
+        list.add(&disclosure);
+
+        let installed_section = self.section(app, crate::icons::Icon::Spark, "Installed", "Enable, inspect, or remove installed add-ons.");
 
         if installed.is_empty() {
             installed_section.add(&self.empty_state(
                 app,
                 crate::icons::Icon::Spark,
-                "No extensions installed",
-                "Add a .crx, an .xpi, or an unpacked extension folder below. Each extension shows its compatibility here.",
+                "No add-ons installed",
+                "Browse Firefox Add-ons below or install a .xpi, .crx, or unpacked folder from this computer.",
                 None,
             ));
         }
@@ -1554,16 +1974,20 @@ impl Panels {
                 format!("{}  ·  {}", entry.version, notes.join("; "))
             };
             let id = entry.id.clone();
-            let on = entry.enabled;
+            let runs = entry.runs;
+            let (switch_active, switch_sensitive) = extension_switch_state(runs, entry.enabled);
             let row = self.row_with(
                 app,
                 &entry.name,
                 &subtitle,
-                if entry.enabled { "Disable" } else { "Enable" },
+                if switch_active { "Disable" } else { "Enable" },
                 {
                     let id = id.clone();
                     move |app: &AppRef| {
-                        crate::extensions::set_enabled(&id, !on);
+                        if !runs {
+                            return;
+                        }
+                        crate::extensions::set_enabled(&id, !switch_active);
                         app.rebuild_every_view();
                         app.open_panel(PanelKind::Extensions);
                     }
@@ -1586,33 +2010,45 @@ impl Panels {
                 if let Some(first_btn) = actions.children().into_iter().next() {
                     actions.remove(&first_btn);
                 }
-                let toggle = gtk::Switch::new();
-                toggle.set_active(on);
-                toggle.set_valign(gtk::Align::Center);
-                toggle.set_tooltip_text(Some(if on { "Disable extension" } else { "Enable extension" }));
+                let toggle = Self::pill_switch(app, switch_active, switch_sensitive);
+                toggle.set_tooltip_text(Some(if !switch_sensitive {
+                    "Not supported here — nothing to run"
+                } else if switch_active {
+                    "Disable add-on"
+                } else {
+                    "Enable add-on"
+                }));
                 if let Some(access) = toggle.accessible() {
-                    gtk::atk::prelude::AtkObjectExt::set_name(&access, &format!("Enable {}", entry.name));
+                    gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::ToggleButton);
+                    gtk::atk::prelude::AtkObjectExt::set_name(
+                        &access,
+                        &if switch_sensitive {
+                            format!("Enable {}", entry.name)
+                        } else {
+                            format!("{} (cannot run here)", entry.name)
+                        },
+                    );
                 }
-                let app_weak = app.weak();
-                let id_toggle = id.clone();
-                toggle.connect_active_notify(move |sw| {
-                    if let Some(app) = app_weak.upgrade() {
-                        let next = sw.is_active();
-                        if next != on {
-                            crate::extensions::set_enabled(&id_toggle, next);
-                            app.rebuild_every_view();
-                            app.open_panel(PanelKind::Extensions);
+                if switch_sensitive {
+                    let app_weak = app.weak();
+                    let id_toggle = id.clone();
+                    toggle.connect_toggled(move |sw| {
+                        if let Some(app) = app_weak.upgrade() {
+                            let next = sw.is_active();
+                            if next != switch_active {
+                                crate::extensions::set_enabled(&id_toggle, next);
+                                app.rebuild_every_view();
+                                app.open_panel(PanelKind::Extensions);
+                            }
                         }
-                    }
-                });
+                    });
+                }
                 actions.pack_start(&toggle, false, false, 0);
                 actions.reorder_child(&toggle, 0);
             }
             installed_section.add(&row);
-            // An extension that ships an options page gets a way to open it.
-            // It is a file on disk, so it opens as a page, which is what it is.
             if let Some(page) = crate::extensions::options_page(&entry) {
-                let row = self.link_row(app, &format!("{} options", entry.name), "Opens the page the extension ships", "Options", {
+                let row = self.link_row(app, &format!("{} options", entry.name), "Opens the page the add-on ships", "Options", {
                     let url = format!("file://{page}");
                     move |app: &AppRef| {
                         app.open_panel(PanelKind::Extensions);
@@ -1621,49 +2057,140 @@ impl Panels {
                 });
                 installed_section.add(&row);
             }
-
         }
         list.add(&installed_section);
 
-        // What is acting on the page in front of you, which is the question a
-        // person actually has when they install something.
         let current = app.state.borrow().tab(app.active_id()).map(|tab| tab.url.clone()).unwrap_or_default();
         let acting = if current.is_empty() { Vec::new() } else { crate::extensions::here(&current) };
         if !acting.is_empty() {
-            let active_section = self.section(app, crate::icons::Icon::Globe, "On this page", "Extensions acting on the page in front of you.");
+            let active_section = self.section(app, crate::icons::Icon::Globe, "On this page", "Add-ons acting on the page in front of you.");
             let line = gtk::Label::new(Some(&acting.join(", ")));
             crate::ui::class(&line, "settingdesc");
             line.set_xalign(0.0);
             line.set_line_wrap(true);
-            line.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+            line.set_line_wrap_mode(gtk::pango::WrapMode::Word);
             active_section.add(&line);
             list.add(&active_section);
         }
 
-        let installation = self.section(app, crate::icons::Icon::Plus, "Add an extension", "Browse a store or install an archive or folder from this computer.");
+        // ---- Discover Firefox Add-ons (addons.mozilla.org) ----
+        let discover = self.section(
+            app,
+            crate::icons::Icon::Search,
+            "Discover Firefox Add-ons",
+            "Official addons.mozilla.org listings with honest compatibility badges. Searches connect to addons.mozilla.org only when you press Search.",
+        );
+        let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        search_row.set_margin_bottom(8);
+        let amo_entry = gtk::Entry::new();
+        amo_entry.set_placeholder_text(Some("Search Firefox Add-ons (addons.mozilla.org)…"));
+        amo_entry.set_hexpand(true);
+        amo_entry.set_width_chars(1);
+        if let Some(access) = amo_entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Search Firefox Add-ons");
+        }
+        let amo_search_btn = gtk::Button::with_label("Search");
+        crate::ui::class(&amo_search_btn, "act");
+        amo_search_btn.set_valign(gtk::Align::Center);
+        search_row.pack_start(&amo_entry, true, true, 0);
+        search_row.pack_start(&amo_search_btn, false, false, 0);
+        discover.add(&search_row);
 
-        // Firefox's store, one click away. It opens in a tab like any other
-        // page. An .xpi fetched from it lands in the download hook in web.rs,
-        // which hands it to the same installer as a file chosen below, so an
-        // add-on from the store and one from disk get the same checks.
+        let status_label = gtk::Label::new(Some("Featured official Firefox Add-ons listings:"));
+        crate::ui::class(&status_label, "panel-count");
+        status_label.set_xalign(0.0);
+        status_label.set_margin_bottom(6);
+        discover.add(&status_label);
+
+        let catalog_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        populate_catalog_rows(app, &catalog_box, &crate::addons_catalog::curated_entries());
+        discover.add(&catalog_box);
+
+        {
+            let run_search = {
+                let app_weak = app.weak();
+                let entry_w = amo_entry.downgrade();
+                let status_w = status_label.downgrade();
+                let box_w = catalog_box.downgrade();
+                std::rc::Rc::new(move || {
+                    let (Some(app), Some(entry), Some(status), Some(cbox)) = (
+                        app_weak.upgrade(),
+                        entry_w.upgrade(),
+                        status_w.upgrade(),
+                        box_w.upgrade(),
+                    ) else {
+                        return;
+                    };
+                    let q = entry.text().trim().to_string();
+                    if q.is_empty() {
+                        crate::addons_catalog::cancel_search();
+                        status.set_text("Featured official Firefox Add-ons listings:");
+                        populate_catalog_rows(&app, &cbox, &crate::addons_catalog::curated_entries());
+                        return;
+                    }
+                    status.set_text(&format!("Searching addons.mozilla.org for \"{q}\"…"));
+                    let local_hits = crate::addons_catalog::filter_curated(&q);
+                    if !local_hits.is_empty() {
+                        populate_catalog_rows(&app, &cbox, &local_hits);
+                    }
+                    let app_done = app.weak();
+                    let status_done = status.downgrade();
+                    let box_done = cbox.downgrade();
+                    let q_done = q.clone();
+                    crate::addons_catalog::search_amo(&q, move |result| {
+                        let (Some(app), Some(status), Some(cbox)) = (
+                            app_done.upgrade(),
+                            status_done.upgrade(),
+                            box_done.upgrade(),
+                        ) else {
+                            return;
+                        };
+                        match result {
+                            Ok(entries) if !entries.is_empty() => {
+                                status.set_text(&format!(
+                                    "{} official addons.mozilla.org results for \"{q_done}\":",
+                                    entries.len()
+                                ));
+                                populate_catalog_rows(&app, &cbox, &entries);
+                            }
+                            Ok(_) => {
+                                status.set_text(&format!("No add-ons found on addons.mozilla.org for \"{q_done}\"."));
+                                populate_catalog_rows(&app, &cbox, &[]);
+                            }
+                            Err(_) => {
+                                let fallback = crate::addons_catalog::filter_curated(&q_done);
+                                status.set_text("Could not reach addons.mozilla.org — showing offline catalog matches.");
+                                populate_catalog_rows(&app, &cbox, &fallback);
+                            }
+                        }
+                    });
+                })
+            };
+            let run_click = run_search.clone();
+            amo_search_btn.connect_clicked(move |_| run_click());
+            let run_act = run_search.clone();
+            amo_entry.connect_activate(move |_| run_act());
+        }
+
         let firefox = self.link_row(
             app,
-            "Firefox Add-ons",
-            "addons.mozilla.org, in a new tab. Add to Firefox installs it here.",
-            "Open",
+            "Browse all Firefox Add-ons",
+            "Opens addons.mozilla.org in a new tab. Clicking Add to Firefox triggers the install confirmation card.",
+            "Open store",
             move |app: &AppRef| {
                 app.toggle_panel_switch(PanelKind::Extensions);
                 app.new_tab(Some("https://addons.mozilla.org/firefox/extensions/"), false, true);
             },
         );
-        installation.add(&firefox);
+        discover.add(&firefox);
+        list.add(&discover);
+
+        // ---- Install from disk ----
+        let installation = self.section(app, crate::icons::Icon::Plus, "Install from this computer", "Install a local .xpi, .crx, or unpacked extension folder.");
 
         let field = gtk::Entry::new();
         field.set_placeholder_text(Some("A .crx, an .xpi, or a folder with a manifest.json"));
         field.set_width_chars(1);
-        // The field fills the install row and the chooser sits at its end
-        // (see install_row below). The row's own margins replace the 12px
-        // the field used to carry by itself.
         field.set_hexpand(true);
         if let Some(access) = field.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, "Extension path or archive");
@@ -1684,7 +2211,7 @@ impl Panels {
         choose.connect_clicked(move |_| {
             let Some(app) = app_choose.upgrade() else { return };
             let dialog = gtk::FileChooserNative::new(
-                Some("Install an extension"),
+                Some("Install an add-on"),
                 Some(&app.ui.window),
                 gtk::FileChooserAction::Open,
                 Some("Install"),
@@ -1706,34 +2233,13 @@ impl Panels {
             EXTENSION_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
             dialog.show();
         });
-        // Both ways to install from disk share one row: type a path, or pick
-        // one. When the chooser had its own row under the field, a panel
-        // already at MAX_HEIGHT snapped to a whole row that ended on the
-        // field, so the main action opened below the fold (Gemini R60 fix 5,
-        // council/round-60/05-panel-extensions.png). One row also means one
-        // row edge for snap_to_row: a horizontal box is a leaf there. The
-        // note under it stays secondary text you can scroll to.
         let install_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        install_row.set_margin_top(12);
-        install_row.set_margin_bottom(12);
+        install_row.set_margin_top(8);
+        install_row.set_margin_bottom(8);
         install_row.pack_start(&field, true, true, 0);
         install_row.pack_start(&choose, false, false, 0);
         installation.add(&install_row);
         list.add(&installation);
-
-        let note = gtk::Label::new(Some(
-            "Content scripts and styles can run on the sites an extension requests. WebExtensions background-page APIs are not supported. Each installed extension lists the parts that do not run here.",
-        ));
-        crate::ui::class(&note, "settingdesc");
-        crate::ui::class(&note, "panel-note");
-        note.set_xalign(0.0);
-        note.set_line_wrap(true);
-        note.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
-        // No width of its own: the body's width bounds it, and measure_content
-        // asks for its height at exactly that width. Capping max_width_chars
-        // here made GTK answer with the height at the cap instead (86px for a
-        // sentence that fills 76), which only added slack to the card.
-        list.add(&note);
 
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
@@ -1747,7 +2253,7 @@ impl Panels {
         let prefs = app.prefs.borrow().clone();
         let query = self.filter.borrow().clone();
         let app_weak = std::rc::Rc::<crate::app::App>::downgrade(app);
-        let field = self.filter_field("Search settings", move |text| {
+        let (field_box, field) = self.filter_field(app, "Search settings", move |text| {
             if let Some(app) = app_weak.upgrade() {
                 app.filter_panel(crate::panels::PanelKind::Settings, text);
             }
@@ -1756,10 +2262,10 @@ impl Panels {
         field.set_position(query.chars().count() as i32);
         // The filter is chrome, not a setting: keeping it outside the
         // scroller stops the bottom-of-panel proof from clipping it in half.
-        self.settings_holder.add(&field);
+        self.settings_holder.add(&field_box);
 
-        let appearance = self.section(app, crate::icons::Icon::Spark, "Appearance", "Light, dark, or matched to your desktop.");
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let appearance = self.section(app, crate::icons::Icon::Spark, "Appearance", "Light, dark, homepage shortcuts, dither canvas, and window controls.");
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         crate::ui::class(&buttons, "panel-appearance");
         buttons.set_homogeneous(true);
         for look in [crate::store::Look::Light, crate::store::Look::Dark, crate::store::Look::System] {
@@ -1768,12 +2274,565 @@ impl Panels {
         appearance.add(&buttons);
         appearance.add(&self.setting_switch(
             app,
-            "Show the top controls",
-            "Keeps the address and navigation row on screen. Ctrl Shift S also toggles it.",
+            "Show homepage shortcuts",
+            "Display saved bookmark chips on the regular start page. Never shown on private tabs.",
+            prefs.show_start_shortcuts,
+            |app, on| app.set_start_shortcuts_visible(on),
+        ));
+        appearance.add(&self.option_picker_row(
+            app,
+            "Homepage shortcuts",
+            "Choose how saved bookmarks appear on the start page. Right-clicking the start page also switches modes.",
+            crate::store::StartBookmarksMode::all()
+                .iter()
+                .map(|m| m.title())
+                .collect(),
+            prefs.start_bookmarks_mode.title(),
+            |app, chosen| {
+                if let Some(mode) = crate::store::StartBookmarksMode::all()
+                    .into_iter()
+                    .find(|m| m.title() == chosen)
+                {
+                    app.set_start_bookmarks_mode(mode);
+                }
+            },
+        ));
+        let active_shortcut_count = match prefs.start_shortcuts_count {
+            0..=2 => "2",
+            3..=4 => "4",
+            5..=6 => "6",
+            7..=8 => "8",
+            9..=10 => "10",
+            _ => "12",
+        };
+        appearance.add(&self.option_picker_row(
+            app,
+            "Homepage shortcut count",
+            "Maximum number of saved bookmark chips displayed on the regular start page.",
+            vec!["2", "4", "6", "8", "10", "12"],
+            active_shortcut_count,
+            |app, chosen| {
+                if let Ok(count) = chosen.parse::<usize>() {
+                    app.set_start_shortcuts_count(count);
+                }
+            },
+        ));
+        appearance.add(&self.option_picker_row(
+            app,
+            "Homepage background dither",
+            "Control the ordered halftone horizon behind the start page (Off, Subtle, or Full).",
+            crate::store::StartDitherMode::all()
+                .iter()
+                .map(|m| m.title())
+                .collect(),
+            prefs.start_dither.title(),
+            |app, chosen| {
+                if let Some(mode) = crate::store::StartDitherMode::all()
+                    .into_iter()
+                    .find(|m| m.title() == chosen)
+                {
+                    app.set_start_dither_mode(mode);
+                }
+            },
+        ));
+        appearance.add(&self.option_picker_row(
+            app,
+            "Window controls",
+            "System uses your desktop titlebar when available; Browser draws compact controls in the tab strip; Hidden removes both (use menu Close Window or Alt+F4).",
+            crate::store::WindowControlsMode::all()
+                .iter()
+                .map(|m| m.title())
+                .collect(),
+            prefs.window_controls.title(),
+            |app, chosen| {
+                if let Some(mode) = crate::store::WindowControlsMode::all()
+                    .into_iter()
+                    .find(|m| m.title() == chosen)
+                {
+                    app.set_window_controls_mode(mode);
+                }
+            },
+        ));
+        list.add(&appearance);
+
+        let layout = self.section(
+            app,
+            crate::icons::Icon::Sidebar,
+            "Toolbar & layout",
+            "Presets, toolbar button visibility and order, chrome density, tab sizing, and portable appearance profiles. Hidden actions stay in the browser menu and shortcuts.",
+        );
+        let active_preset = crate::customize::LayoutPreset::detect(&prefs);
+        let preset_row = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        crate::ui::class(&preset_row, "panel-setting-row");
+        crate::ui::class(&preset_row, "customize-preset-row");
+        let preset_head = gtk::Label::new(Some("Layout presets"));
+        crate::ui::class(&preset_head, "setting");
+        preset_head.set_xalign(0.0);
+        let preset_sub = gtk::Label::new(Some(match active_preset {
+            Some(p) => p.description(),
+            None => "Custom layout active. Choose Minimal, Standard, or Full to switch presets.",
+        }));
+        crate::ui::class(&preset_sub, "settingdesc");
+        preset_sub.set_xalign(0.0);
+        preset_sub.set_line_wrap(true);
+        preset_sub.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        let preset_btns = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        crate::ui::class(&preset_btns, "customize-preset-group");
+        preset_btns.set_homogeneous(true);
+        for preset in crate::customize::LayoutPreset::ALL {
+            let btn = gtk::Button::with_label(preset.title());
+            crate::ui::class(&btn, "act");
+            crate::ui::class(&btn, "customize-preset-btn");
+            if active_preset == Some(preset) {
+                crate::ui::class(&btn, "chosen");
+            }
+            btn.set_tooltip_text(Some(preset.description()));
+            if let Some(access) = btn.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, &format!("Apply {} layout preset", preset.title()));
+            }
+            let weak = app.weak();
+            btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.apply_layout_preset(preset);
+                    app.toggle_panel_switch(PanelKind::Settings);
+                }
+            });
+            preset_btns.pack_start(&btn, true, true, 0);
+        }
+        preset_row.pack_start(&preset_head, false, true, 0);
+        preset_row.pack_start(&preset_sub, false, true, 0);
+        preset_row.pack_start(&preset_btns, false, true, 0);
+        layout.add(&preset_row);
+
+        layout.add(&self.setting_switch(
+            app,
+            "Show navigation bar",
+            "Keeps navigation and the address row below the top tabs. Ctrl Shift S also toggles it.",
             prefs.show_toolbar,
             |app, on| app.set_toolbar_visible(on),
         ));
-        list.add(&appearance);
+        layout.add(&self.setting_switch(
+            app,
+            "Back button",
+            "Show the Back navigation button independently in the toolbar.",
+            prefs.show_back_button,
+            |app, on| {
+                app.set_back_button_visible(on);
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        ));
+        layout.add(&self.setting_switch(
+            app,
+            "Forward button",
+            "Show the Forward navigation button independently in the toolbar.",
+            prefs.show_forward_button,
+            |app, on| {
+                app.set_forward_button_visible(on);
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        ));
+        layout.add(&self.setting_switch(
+            app,
+            "Reload / Stop button",
+            "Show the Reload and Stop loading button in the toolbar.",
+            prefs.show_reload_button,
+            |app, on| {
+                app.set_reload_button_visible(on);
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        ));
+        layout.add(&self.setting_switch(
+            app,
+            "Home button",
+            "Show a Home button that returns the active tab to the start page.",
+            prefs.show_home_button,
+            |app, on| {
+                app.set_home_button_visible(on);
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        ));
+        layout.add(&self.setting_switch(
+            app,
+            "Reader mode button",
+            "Show the Reading mode button in the toolbar. Always available from the browser menu and Ctrl Shift R.",
+            prefs.show_reader_button,
+            |app, on| {
+                app.set_reader_button_visible(on);
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        ));
+        layout.add(&self.setting_switch(
+            app,
+            "Bookmark button",
+            "Show the Bookmark button in the toolbar. Always available from the browser menu and Ctrl D.",
+            prefs.show_bookmark_button,
+            |app, on| {
+                app.set_bookmark_button_visible(on);
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        ));
+
+        let order_block = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        crate::ui::class(&order_block, "panel-setting-row");
+        crate::ui::class(&order_block, "customize-order-block");
+        let order_title = gtk::Label::new(Some("Toolbar action order"));
+        crate::ui::class(&order_title, "setting");
+        order_title.set_xalign(0.0);
+        let order_desc = gtk::Label::new(Some(
+            "Arrange toolbar actions left-to-right using Up and Down. The address bar stays visible as a required anchor.",
+        ));
+        crate::ui::class(&order_desc, "settingdesc");
+        order_desc.set_xalign(0.0);
+        order_desc.set_line_wrap(true);
+        order_desc.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        order_block.pack_start(&order_title, false, true, 0);
+        order_block.pack_start(&order_desc, false, true, 0);
+
+        let normalized_order = crate::customize::normalize_toolbar_order(&prefs.toolbar_order);
+        let total_actions = normalized_order.len();
+        for (idx, action) in normalized_order.into_iter().enumerate() {
+            let item_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            crate::ui::class(&item_row, "customize-order-row");
+            if action.is_mandatory() {
+                crate::ui::class(&item_row, "customize-order-required");
+            }
+            let name = gtk::Label::new(Some(action.title()));
+            crate::ui::class(&name, "customize-order-label");
+            name.set_xalign(0.0);
+            name.set_hexpand(true);
+            let status_text = if action.is_mandatory() {
+                "Required"
+            } else if action.is_visible_in(&prefs) {
+                "Shown"
+            } else {
+                "Hidden"
+            };
+            let status = gtk::Label::new(Some(status_text));
+            crate::ui::class(&status, "panel-count");
+            status.set_valign(gtk::Align::Center);
+
+            let up_btn = gtk::Button::with_label("Up");
+            crate::ui::class(&up_btn, "act");
+            crate::ui::class(&up_btn, "customize-order-btn");
+            up_btn.set_sensitive(idx > 0);
+            up_btn.set_valign(gtk::Align::Center);
+            if let Some(a) = up_btn.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Move {} earlier", action.title()));
+            }
+            {
+                let weak = app.weak();
+                up_btn.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        app.move_toolbar_action(action, -1);
+                        app.toggle_panel_switch(PanelKind::Settings);
+                    }
+                });
+            }
+
+            let down_btn = gtk::Button::with_label("Down");
+            crate::ui::class(&down_btn, "act");
+            crate::ui::class(&down_btn, "customize-order-btn");
+            down_btn.set_sensitive(idx + 1 < total_actions);
+            down_btn.set_valign(gtk::Align::Center);
+            if let Some(a) = down_btn.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Move {} later", action.title()));
+            }
+            {
+                let weak = app.weak();
+                down_btn.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        app.move_toolbar_action(action, 1);
+                        app.toggle_panel_switch(PanelKind::Settings);
+                    }
+                });
+            }
+
+            item_row.pack_start(&name, true, true, 0);
+            item_row.pack_start(&status, false, false, 0);
+            item_row.pack_start(&up_btn, false, false, 0);
+            item_row.pack_start(&down_btn, false, false, 0);
+            order_block.pack_start(&item_row, false, true, 0);
+        }
+        layout.add(&order_block);
+
+        layout.add(&self.setting_switch(
+            app,
+            "Vertical tabs (sidebar)",
+            "Switch exclusively between top tabs and the vertical tab sidebar. Ctrl S also toggles it.",
+            prefs.sidebar && !prefs.column_folded,
+            |app, on| app.set_sidebar_visible(on),
+        ));
+
+        let tab_width_row = self.stepper_row(
+            app,
+            "Top tab width",
+            "Width of each tab pill in the top tab strip (96 to 280 px).",
+            prefs.top_tab_width,
+            crate::store::MIN_TOP_TAB_WIDTH,
+            crate::store::MAX_TOP_TAB_WIDTH,
+            16,
+            |app, next| app.set_top_tab_width(next),
+        );
+        layout.add(&tab_width_row);
+
+        let side_width_row = self.stepper_row(
+            app,
+            "Sidebar width",
+            "Width of the vertical tab sidebar (176 to 440 px). Dragging the divider also updates this.",
+            prefs.side_width.round() as i32,
+            crate::store::MIN_SIDE_WIDTH as i32,
+            crate::store::MAX_SIDE_WIDTH as i32,
+            16,
+            |app, next| app.set_sidebar_width(next as f64),
+        );
+        layout.add(&side_width_row);
+
+        let profile_row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        crate::ui::class(&profile_row, "panel-setting-row");
+        crate::ui::class(&profile_row, "customize-io-row");
+        let profile_copy = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        crate::ui::class(&profile_copy, "panel-setting-copy");
+        profile_copy.set_hexpand(true);
+        let profile_title = gtk::Label::new(Some("Appearance & layout profile"));
+        crate::ui::class(&profile_title, "setting");
+        profile_title.set_xalign(0.0);
+        let profile_desc = gtk::Label::new(Some(
+            "Export or import only appearance, toolbar, density, and homepage layout preferences as JSON. Cookies, history, bookmarks, passwords, and privacy settings are never included.",
+        ));
+        crate::ui::class(&profile_desc, "settingdesc");
+        profile_desc.set_xalign(0.0);
+        profile_desc.set_line_wrap(true);
+        profile_desc.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        profile_copy.add(&profile_title);
+        profile_copy.add(&profile_desc);
+        let profile_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        profile_actions.set_valign(gtk::Align::Center);
+        let export_btn = gtk::Button::with_label("Export…");
+        crate::ui::class(&export_btn, "act");
+        if let Some(a) = export_btn.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Export appearance and layout profile");
+        }
+        {
+            let weak = app.weak();
+            export_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_export_profile_chooser(&app);
+                }
+            });
+        }
+        let import_btn = gtk::Button::with_label("Import…");
+        crate::ui::class(&import_btn, "act");
+        if let Some(a) = import_btn.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Import appearance and layout profile");
+        }
+        {
+            let weak = app.weak();
+            import_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_import_profile_chooser(&app);
+                }
+            });
+        }
+        profile_actions.pack_start(&export_btn, false, false, 0);
+        profile_actions.pack_start(&import_btn, false, false, 0);
+        profile_row.pack_start(&profile_copy, true, true, 0);
+        profile_row.pack_start(&profile_actions, false, false, 0);
+        layout.add(&profile_row);
+
+        let reset_row = self.link_row(
+            app,
+            "Reset to minimal layout",
+            "Restore minimal defaults: navigation bar, Back, Forward, and Reload on; default order; Home, Reader, Bookmark, Bookmarks bar, sidebar, and roomy density off.",
+            "Reset to minimal",
+            |app: &AppRef| {
+                app.reset_toolbar_layout();
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        );
+        crate::ui::class(&reset_row, "panel-setting-row");
+        layout.add(&reset_row);
+        list.add(&layout);
+
+        let spaces_sec = self.section(
+            app,
+            crate::icons::Icon::Tab,
+            "Spaces",
+            "Organize tabs into persistent groups inside your shared browser profile (cookies, logins, history, and bookmarks are shared — not security containers; use Private Tabs for isolated sessions).",
+        );
+        let create_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        crate::ui::class(&create_row, "panel-setting-row");
+        crate::ui::class(&create_row, "space-create-row");
+        let new_space_entry = gtk::Entry::new();
+        crate::ui::class(&new_space_entry, "panel-input");
+        new_space_entry.set_hexpand(true);
+        new_space_entry.set_max_length(crate::spaces::MAX_SPACE_NAME_LEN as i32);
+        new_space_entry.set_placeholder_text(Some("New space name (e.g. Work, Reading)"));
+        if let Some(a) = new_space_entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "New space name");
+        }
+        let add_space_btn = gtk::Button::with_label("Create space");
+        crate::ui::class(&add_space_btn, "act");
+        crate::ui::class(&add_space_btn, "primary");
+        add_space_btn.set_valign(gtk::Align::Center);
+        {
+            let weak = app.weak();
+            let entry_ref = new_space_entry.clone();
+            let do_create = std::rc::Rc::new(move || {
+                let Some(app) = weak.upgrade() else { return };
+                let raw = entry_ref.text().to_string();
+                match app.create_space(&raw) {
+                    Ok(created) => {
+                        entry_ref.set_text("");
+                        app.flash_toast(&format!("Created space \"{}\"", created.name));
+                        app.toggle_panel_switch(PanelKind::Settings);
+                    }
+                    Err(msg) => app.flash_toast(msg),
+                }
+            });
+            let c1 = do_create.clone();
+            add_space_btn.connect_clicked(move |_| c1());
+            let c2 = do_create.clone();
+            new_space_entry.connect_activate(move |_| c2());
+        }
+        create_row.pack_start(&new_space_entry, true, true, 0);
+        create_row.pack_start(&add_space_btn, false, false, 0);
+        spaces_sec.add(&create_row);
+
+        let (all_spaces, active_space_id, space_counts, default_space_name) = {
+            let state = app.state.borrow();
+            let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for tab in &state.tabs {
+                *counts.entry(tab.space_id.clone()).or_insert(0) += 1;
+            }
+            (
+                state.spaces.spaces.clone(),
+                state.spaces.active_space.clone(),
+                counts,
+                state.spaces.default_name().to_string(),
+            )
+        };
+        for space in all_spaces {
+            let tab_count = space_counts.get(&space.id).copied().unwrap_or(0);
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            crate::ui::class(&row, "panel-setting-row");
+            crate::ui::class(&row, "space-row");
+
+            let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let name_entry = gtk::Entry::new();
+            crate::ui::class(&name_entry, "panel-input");
+            name_entry.set_hexpand(true);
+            name_entry.set_max_length(crate::spaces::MAX_SPACE_NAME_LEN as i32);
+            name_entry.set_text(&space.name);
+            if let Some(a) = name_entry.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Rename space {}", space.name));
+            }
+
+            let rename_btn = gtk::Button::with_label("Rename");
+            crate::ui::class(&rename_btn, "act");
+            rename_btn.set_valign(gtk::Align::Center);
+            {
+                let weak = app.weak();
+                let sid = space.id.clone();
+                let entry_ref = name_entry.clone();
+                let do_rename = std::rc::Rc::new(move || {
+                    let Some(app) = weak.upgrade() else { return };
+                    match app.rename_space(&sid, &entry_ref.text()) {
+                        Ok(name) => {
+                            app.flash_toast(&format!("Renamed space to \"{name}\""));
+                            app.toggle_panel_switch(PanelKind::Settings);
+                        }
+                        Err(msg) => app.flash_toast(msg),
+                    }
+                });
+                let r1 = do_rename.clone();
+                rename_btn.connect_clicked(move |_| r1());
+                let r2 = do_rename.clone();
+                name_entry.connect_activate(move |_| r2());
+            }
+
+            let switch_btn = gtk::Button::with_label(if space.id == active_space_id { "Active" } else { "Switch" });
+            crate::ui::class(&switch_btn, "act");
+            switch_btn.set_sensitive(space.id != active_space_id);
+            switch_btn.set_valign(gtk::Align::Center);
+            {
+                let weak = app.weak();
+                let sid = space.id.clone();
+                switch_btn.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        if app.switch_space(&sid) {
+                            app.toggle_panel_switch(PanelKind::Settings);
+                        }
+                    }
+                });
+            }
+
+            top.pack_start(&name_entry, true, true, 0);
+            top.pack_start(&rename_btn, false, false, 0);
+            top.pack_start(&switch_btn, false, false, 0);
+
+            if !space.is_default() {
+                let delete_btn = gtk::Button::with_label("Delete");
+                crate::ui::class(&delete_btn, "act");
+                crate::ui::class(&delete_btn, "danger");
+                delete_btn.set_valign(gtk::Align::Center);
+                let consequence = if tab_count == 1 {
+                    format!("Delete \"{}\" and move its 1 tab to \"{}\"", space.name, default_space_name)
+                } else {
+                    format!("Delete \"{}\" and move its {} tabs to \"{}\"", space.name, tab_count, default_space_name)
+                };
+                delete_btn.set_tooltip_text(Some(&consequence));
+                if let Some(a) = delete_btn.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&a, &consequence);
+                }
+                let weak = app.weak();
+                let sid = space.id.clone();
+                let sname = space.name.clone();
+                let dname = default_space_name.clone();
+                delete_btn.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        match app.delete_space(&sid) {
+                            Ok(moved) => {
+                                let msg = if moved == 0 {
+                                    format!("Deleted space \"{sname}\"")
+                                } else if moved == 1 {
+                                    format!("Deleted \"{sname}\" — moved 1 tab to \"{dname}\"")
+                                } else {
+                                    format!("Deleted \"{sname}\" — moved {moved} tabs to \"{dname}\"")
+                                };
+                                app.flash_toast(&msg);
+                                app.toggle_panel_switch(PanelKind::Settings);
+                            }
+                            Err(msg) => app.flash_toast(msg),
+                        }
+                    }
+                });
+                top.pack_start(&delete_btn, false, false, 0);
+            }
+            row.pack_start(&top, false, true, 0);
+
+            let meta_text = if space.is_default() {
+                format!(
+                    "Default space (cannot be deleted) · {} {}",
+                    tab_count,
+                    if tab_count == 1 { "tab" } else { "tabs" }
+                )
+            } else {
+                format!(
+                    "{} {} · Deleting moves all tabs here into \"{}\"",
+                    tab_count,
+                    if tab_count == 1 { "tab" } else { "tabs" },
+                    default_space_name
+                )
+            };
+            let meta = gtk::Label::new(Some(&meta_text));
+            crate::ui::class(&meta, "settingdesc");
+            crate::ui::class(&meta, "space-meta");
+            meta.set_xalign(0.0);
+            meta.set_line_wrap(true);
+            row.pack_start(&meta, false, true, 0);
+            spaces_sec.add(&row);
+        }
+        list.add(&spaces_sec);
 
         let browsing = self.section(app, crate::icons::Icon::Shield, "Browsing", "Blocking, memory use, and the bookmarks bar.");
         browsing.add(&self.setting_switch(app, "Block ads and trackers", "Rules enforced inside the engine, before a request is made.", prefs.shield, |app, on| {
@@ -1785,6 +2844,7 @@ impl Panels {
         browsing.add(&self.setting_switch(app, "Keep hidden things hidden", "What you hide on a site stays hidden there.", prefs.curtain, |app, on| {
             app.prefs.borrow_mut().curtain = on;
             app.prefs.borrow().save();
+            crate::curtain::apply_curtain_pref(app);
             app.reload();
         }));
 
@@ -1832,6 +2892,29 @@ impl Panels {
                 app.flash_toast(if on { "Less memory from the next launch" } else { "Full rendering from the next launch" });
             },
         ));
+        let autofill_row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        crate::ui::class(&autofill_row, "panel-setting-row");
+        let autofill_copy = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        crate::ui::class(&autofill_copy, "panel-setting-copy");
+        autofill_copy.set_hexpand(true);
+        let autofill_title = gtk::Label::new(Some("Passwords and autofill"));
+        crate::ui::class(&autofill_title, "setting");
+        autofill_title.set_xalign(0.0);
+        let autofill_desc = gtk::Label::new(Some(
+            "Disabled by design. Rill never saves passwords or autofills forms; use a standalone Linux password manager or paste credentials manually.",
+        ));
+        crate::ui::class(&autofill_desc, "settingdesc");
+        autofill_desc.set_xalign(0.0);
+        autofill_desc.set_line_wrap(true);
+        autofill_desc.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        autofill_copy.add(&autofill_title);
+        autofill_copy.add(&autofill_desc);
+        crate::ui::pack(&autofill_row, &autofill_copy, true);
+        let autofill_state = gtk::Label::new(Some("Off"));
+        crate::ui::class(&autofill_state, "panel-count");
+        autofill_state.set_valign(gtk::Align::Center);
+        crate::ui::pack(&autofill_row, &autofill_state, false);
+        browsing.add(&autofill_row);
         list.add(&browsing);
 
         let tabs = self.section(app, crate::icons::Icon::Sidebar, "Tabs & pages", "Page colours, tab spacing, and session restore.");
@@ -1848,13 +2931,16 @@ impl Panels {
             },
         ));
 
-        tabs.add(&self.setting_switch(app, "Roomy tabs", "Taller rows, easier to hit with a mouse.", prefs.roomy_tabs, |app, on| {
-            app.prefs.borrow_mut().roomy_tabs = on;
-            app.prefs.borrow().save();
-            app.apply_style();
-            app.render();
-            app.toggle_panel_switch(PanelKind::Settings);
-        }));
+        tabs.add(&self.setting_switch(
+            app,
+            "Roomy tabs & density",
+            "Uses taller tab rows, top tabs, and toolbar spacing for easier mouse targets.",
+            prefs.roomy_tabs,
+            |app, on| {
+                app.set_roomy_tabs(on);
+                app.toggle_panel_switch(PanelKind::Settings);
+            },
+        ));
 
         tabs.add(&self.setting_switch(app, "Open where you left off", "Tabs come back when the browser starts again.", prefs.restore_session, |app, on| {
             app.prefs.borrow_mut().restore_session = on;
@@ -1876,46 +2962,131 @@ impl Panels {
         let title = gtk::Label::new(Some("Search engine"));
         crate::ui::class(&title, "setting");
         title.set_xalign(0.0);
-        let sub = gtk::Label::new(Some("Used for searches from the address field."));
+        let sub = gtk::Label::new(Some("Used for searches from the address field and start page."));
         crate::ui::class(&sub, "settingdesc");
         sub.set_xalign(0.0);
         sub.set_line_wrap(true);
         texts.add(&title);
         texts.add(&sub);
         engine_row.pack_start(&texts, true, true, 0);
-        let combo = gtk::ComboBoxText::new();
-        combo.set_valign(gtk::Align::Center);
-        if let Some(access) = combo.accessible() {
+        // Native Cairo-arrow engine picker instead of GtkComboBoxText:
+        // GtkComboBoxText loads a themed `pan-down-symbolic` SVG on first paint,
+        // spawning external `glycin-image-rs` + `bwrap` processes synchronously
+        // (~100ms main-loop stall on cold Settings open + 3 extra processes).
+        let engines = crate::store::Prefs::engines();
+        let active_name = engines
+            .iter()
+            .copied()
+            .find(|engine| *engine == prefs.search_engine)
+            .unwrap_or_else(|| engines.first().copied().unwrap_or("Startpage"));
+        let picker = gtk::MenuButton::new();
+        crate::ui::class(&picker, "act");
+        crate::ui::class(&picker, "engine-picker");
+        picker.set_valign(gtk::Align::Center);
+        picker.set_can_focus(true);
+        if let Some(access) = picker.accessible() {
             use gtk::atk::prelude::AtkObjectExt;
+            access.set_role(gtk::atk::Role::ComboBox);
             access.set_name("Search engine");
             if let Some(label_access) = title.accessible() {
                 access.add_relationship(gtk::atk::RelationType::LabelledBy, &label_access);
             }
         }
-        for engine in crate::store::Prefs::engines() {
-            combo.append_text(engine);
-        }
-        let engines = crate::store::Prefs::engines();
-        let index = engines.iter().position(|engine| *engine == prefs.search_engine).unwrap_or(0);
-        combo.set_active(Some(index as u32));
-        {
+        let picker_inner = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let picker_label = gtk::Label::new(Some(active_name));
+        picker_label.set_xalign(0.0);
+        let picker_arrow = crate::icons::area(crate::icons::Icon::Down, 12, app.palette.borrow().muted);
+        picker_arrow.set_valign(gtk::Align::Center);
+        picker_inner.pack_start(&picker_label, true, true, 0);
+        picker_inner.pack_start(&picker_arrow, false, false, 0);
+        picker.add(&picker_inner);
+
+        let popover = gtk::Popover::new(Some(&picker));
+        crate::ui::class(&popover, "engine-popover");
+        popover.set_modal(true);
+        let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        menu_box.set_margin_top(4);
+        menu_box.set_margin_bottom(4);
+        menu_box.set_margin_start(4);
+        menu_box.set_margin_end(4);
+        let option_buttons: std::rc::Rc<std::cell::RefCell<Vec<(String, gtk::Button)>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        for engine in engines {
+            let item = gtk::Button::with_label(engine);
+            crate::ui::class(&item, "act");
+            if *engine == *active_name {
+                crate::ui::class(&item, "chosen");
+            }
+            item.set_relief(gtk::ReliefStyle::None);
+            if let Some(lbl) = item.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+                lbl.set_xalign(0.0);
+            }
+            option_buttons.borrow_mut().push((engine.to_string(), item.clone()));
             let app_weak = app.weak();
-            combo.connect_changed(move |combo| {
+            let chosen = engine.to_string();
+            let label_ref = picker_label.clone();
+            let pop_weak = popover.downgrade();
+            let picker_weak = picker.downgrade();
+            let options_ref = option_buttons.clone();
+            item.connect_clicked(move |_| {
+                label_ref.set_text(&chosen);
+                for (name, btn) in options_ref.borrow().iter() {
+                    let ctx = btn.style_context();
+                    if name == &chosen {
+                        ctx.add_class("chosen");
+                    } else {
+                        ctx.remove_class("chosen");
+                    }
+                }
                 if let Some(app) = app_weak.upgrade() {
-                    if let Some(text) = combo.active_text() {
-                        app.prefs.borrow_mut().search_engine = text.to_string();
-                        app.prefs.borrow().save();
+                    app.prefs.borrow_mut().search_engine = chosen.clone();
+                    app.prefs.borrow().save();
+                    crate::suggest::stop();
+                    app.refresh_open_search_offers();
+                    app.render();
+                }
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                if let Some(btn) = picker_weak.upgrade() {
+                    if btn.is_mapped() {
+                        btn.grab_focus();
+                    }
+                }
+            });
+            menu_box.pack_start(&item, false, true, 0);
+        }
+        menu_box.show_all();
+        popover.add(&menu_box);
+        {
+            let picker_weak = picker.downgrade();
+            popover.connect_closed(move |_| {
+                if let Some(btn) = picker_weak.upgrade() {
+                    if btn.is_mapped() {
+                        btn.grab_focus();
                     }
                 }
             });
         }
-        engine_row.pack_start(&combo, false, false, 0);
+        *self.active_popover.borrow_mut() = Some(popover.clone());
+        picker.set_popover(Some(&popover));
+        engine_row.pack_start(&picker, false, false, 0);
         search.add(&engine_row);
 
-        search.add(&self.setting_switch(app, "Suggestions from your search engine", "What you type is sent to the engine as you type.", prefs.engine_suggestions, |app, on| {
-            app.prefs.borrow_mut().engine_suggestions = on;
-            app.prefs.borrow().save();
-        }));
+        search.add(&self.setting_switch(
+            app,
+            "Suggestions from your search engine",
+            "Sends search queries as you type to your chosen engine from the address field and start page. Never sent in private tabs, or for addresses, emails, paths, secrets, or shortcuts.",
+            prefs.engine_suggestions,
+            |app, on| {
+                app.prefs.borrow_mut().engine_suggestions = on;
+                app.prefs.borrow().save();
+                if !on {
+                    crate::suggest::stop();
+                }
+                app.refresh_open_search_offers();
+            },
+        ));
         list.add(&search);
 
         // Keyword shortcuts belong with the engine: both decide where typed
@@ -1982,15 +3153,12 @@ impl Panels {
         importing.add(&import_row);
         list.add(&importing);
 
-        let about = gtk::Label::new(Some(&format!(
-            "Search {} · WebKitGTK · Built with Rust",
-            env!("CARGO_PKG_VERSION")
-        )));
+        let about = gtk::Label::new(Some(&about_label_text()));
         crate::ui::class(&about, "settingdesc");
         crate::ui::class(&about, "panel-about");
         about.set_xalign(0.0);
         about.set_line_wrap(true);
-        about.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        about.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         about.set_margin_top(2);
         list.add(&about);
 
@@ -2021,7 +3189,7 @@ impl Panels {
         for section in ["Browser", "Tabs", "Page"] {
             let group = gtk::Box::new(gtk::Orientation::Vertical, 0);
             crate::ui::class(&group, "panel-section");
-            group.set_margin_bottom(18);
+            group.set_margin_bottom(16);
             let mut headed = false;
             // One row per action, not one per key. SHEET lists a second
             // spelling as its own row (Ctrl Y and Ctrl H are both History,
@@ -2048,27 +3216,33 @@ impl Panels {
                     crate::ui::class(&head, "panel-section-heading");
                     head.set_xalign(0.0);
                     head.set_margin_top(0);
-                    head.set_margin_bottom(12);
+                    head.set_margin_bottom(8);
                     if let Some(access) = head.accessible() {
                         gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::Heading);
                     }
                     group.add(&head);
                 }
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
                 crate::ui::class(&row, "panel-shortcut-row");
+                let key_col = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                key_col.set_size_request(168, -1);
+                key_col.set_valign(gtk::Align::Center);
                 let keycap = gtk::Label::new(Some(key.as_str()));
                 crate::ui::class(&keycap, "keycap");
                 crate::ui::class(&keycap, "panel-shortcut-key");
                 keycap.set_xalign(0.0);
-                keycap.set_size_request(142, -1);
+                keycap.set_halign(gtk::Align::Start);
+                keycap.set_valign(gtk::Align::Center);
                 keycap.set_line_wrap(true);
-                keycap.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
-                crate::ui::pack(&row, &keycap, false);
+                keycap.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+                key_col.pack_start(&keycap, false, false, 0);
+                crate::ui::pack(&row, &key_col, false);
                 let label = gtk::Label::new(Some(what));
                 crate::ui::class(&label, "setting");
                 label.set_xalign(0.0);
+                label.set_valign(gtk::Align::Center);
                 label.set_line_wrap(true);
-                label.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+                label.set_line_wrap_mode(gtk::pango::WrapMode::Word);
                 crate::ui::pack(&row, &label, true);
                 group.add(&row);
             }
@@ -2082,10 +3256,228 @@ impl Panels {
         self.body.show_all();
     }
 
+    fn option_picker_row(
+        &self,
+        app: &AppRef,
+        title_text: &str,
+        description: &str,
+        options: Vec<&'static str>,
+        active_name: &str,
+        on_choose: impl Fn(&AppRef, &'static str) + 'static,
+    ) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        crate::ui::class(&row, "panel-setting-row");
+        crate::ui::class(&row, "panel-setting-select");
+        let texts = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        crate::ui::class(&texts, "panel-setting-copy");
+        texts.set_hexpand(true);
+        let title = gtk::Label::new(Some(title_text));
+        crate::ui::class(&title, "setting");
+        title.set_xalign(0.0);
+        let sub = gtk::Label::new(Some(description));
+        crate::ui::class(&sub, "settingdesc");
+        sub.set_xalign(0.0);
+        sub.set_line_wrap(true);
+        sub.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        texts.add(&title);
+        texts.add(&sub);
+        row.pack_start(&texts, true, true, 0);
+
+        let picker = gtk::MenuButton::new();
+        crate::ui::class(&picker, "act");
+        crate::ui::class(&picker, "setting-picker");
+        picker.set_valign(gtk::Align::Center);
+        picker.set_can_focus(true);
+        if let Some(access) = picker.accessible() {
+            use gtk::atk::prelude::AtkObjectExt;
+            access.set_role(gtk::atk::Role::ComboBox);
+            access.set_name(title_text);
+        }
+        let inner = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let lbl = gtk::Label::new(Some(active_name));
+        lbl.set_xalign(0.0);
+        let arrow = crate::icons::area(crate::icons::Icon::Down, 12, app.palette.borrow().muted);
+        arrow.set_valign(gtk::Align::Center);
+        inner.pack_start(&lbl, true, true, 0);
+        inner.pack_start(&arrow, false, false, 0);
+        picker.add(&inner);
+
+        let popover = gtk::Popover::new(Some(&picker));
+        crate::ui::class(&popover, "engine-popover");
+        popover.set_modal(true);
+        let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        menu_box.set_margin_top(4);
+        menu_box.set_margin_bottom(4);
+        menu_box.set_margin_start(4);
+        menu_box.set_margin_end(4);
+        let buttons_ref: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, gtk::Button)>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let on_choose = std::rc::Rc::new(on_choose);
+        for opt in options {
+            let btn = gtk::Button::with_label(opt);
+            crate::ui::class(&btn, "act");
+            if opt == active_name {
+                crate::ui::class(&btn, "chosen");
+            }
+            btn.set_relief(gtk::ReliefStyle::None);
+            if let Some(bl) = btn.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+                bl.set_xalign(0.0);
+            }
+            buttons_ref.borrow_mut().push((opt, btn.clone()));
+            let app_weak = app.weak();
+            let lbl_ref = lbl.clone();
+            let pop_weak = popover.downgrade();
+            let buttons = buttons_ref.clone();
+            let cb = on_choose.clone();
+            btn.connect_clicked(move |_| {
+                lbl_ref.set_text(opt);
+                for (name, b) in buttons.borrow().iter() {
+                    let ctx = b.style_context();
+                    if *name == opt {
+                        ctx.add_class("chosen");
+                    } else {
+                        ctx.remove_class("chosen");
+                    }
+                }
+                if let Some(app) = app_weak.upgrade() {
+                    cb(&app, opt);
+                }
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+            });
+            menu_box.pack_start(&btn, false, true, 0);
+        }
+        menu_box.show_all();
+        popover.add(&menu_box);
+        {
+            let slot = self.active_popover.clone();
+            let pop_clone = popover.clone();
+            popover.connect_show(move |_| {
+                *slot.borrow_mut() = Some(pop_clone.clone());
+            });
+            let slot_hide = self.active_popover.clone();
+            let picker_weak = picker.downgrade();
+            popover.connect_closed(move |pop| {
+                let mut active = slot_hide.borrow_mut();
+                if active.as_ref().is_some_and(|p| p == pop) {
+                    *active = None;
+                }
+                if let Some(btn) = picker_weak.upgrade() {
+                    if btn.is_mapped() {
+                        btn.grab_focus();
+                    }
+                }
+            });
+        }
+        picker.set_popover(Some(&popover));
+        row.pack_start(&picker, false, false, 0);
+        row
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stepper_row(
+        &self,
+        app: &AppRef,
+        title_text: &str,
+        description: &str,
+        value: i32,
+        min: i32,
+        max: i32,
+        step: i32,
+        on_change: impl Fn(&AppRef, i32) + 'static,
+    ) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        crate::ui::class(&row, "panel-setting-row");
+        crate::ui::class(&row, "customize-stepper-row");
+        let texts = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        crate::ui::class(&texts, "panel-setting-copy");
+        texts.set_hexpand(true);
+        let title = gtk::Label::new(Some(title_text));
+        crate::ui::class(&title, "setting");
+        title.set_xalign(0.0);
+        let sub = gtk::Label::new(Some(description));
+        crate::ui::class(&sub, "settingdesc");
+        sub.set_xalign(0.0);
+        sub.set_line_wrap(true);
+        sub.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+        texts.add(&title);
+        texts.add(&sub);
+        row.pack_start(&texts, true, true, 0);
+
+        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        controls.set_valign(gtk::Align::Center);
+        let current = std::rc::Rc::new(std::cell::Cell::new(value.clamp(min, max)));
+        let value_lbl = gtk::Label::new(Some(&format!("{} px", current.get())));
+        crate::ui::class(&value_lbl, "customize-stepper-value");
+        value_lbl.set_width_chars(6);
+        value_lbl.set_xalign(0.5);
+
+        let minus = gtk::Button::with_label("\u{2212}");
+        crate::ui::class(&minus, "act");
+        crate::ui::class(&minus, "customize-stepper-btn");
+        minus.set_sensitive(current.get() > min);
+        if let Some(a) = minus.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Decrease {title_text}"));
+        }
+
+        let plus = gtk::Button::with_label("+");
+        crate::ui::class(&plus, "act");
+        crate::ui::class(&plus, "customize-stepper-btn");
+        plus.set_sensitive(current.get() < max);
+        if let Some(a) = plus.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Increase {title_text}"));
+        }
+
+        let cb = std::rc::Rc::new(on_change);
+        {
+            let weak = app.weak();
+            let cur = current.clone();
+            let lbl = value_lbl.clone();
+            let minus_ref = minus.clone();
+            let plus_ref = plus.clone();
+            let cb_ref = cb.clone();
+            minus.connect_clicked(move |_| {
+                let next = (cur.get() - step).clamp(min, max);
+                cur.set(next);
+                lbl.set_text(&format!("{next} px"));
+                minus_ref.set_sensitive(next > min);
+                plus_ref.set_sensitive(next < max);
+                if let Some(app) = weak.upgrade() {
+                    cb_ref(&app, next);
+                }
+            });
+        }
+        {
+            let weak = app.weak();
+            let cur = current.clone();
+            let lbl = value_lbl.clone();
+            let minus_ref = minus.clone();
+            let plus_ref = plus.clone();
+            let cb_ref = cb.clone();
+            plus.connect_clicked(move |_| {
+                let next = (cur.get() + step).clamp(min, max);
+                cur.set(next);
+                lbl.set_text(&format!("{next} px"));
+                minus_ref.set_sensitive(next > min);
+                plus_ref.set_sensitive(next < max);
+                if let Some(app) = weak.upgrade() {
+                    cb_ref(&app, next);
+                }
+            });
+        }
+
+        controls.pack_start(&minus, false, false, 0);
+        controls.pack_start(&value_lbl, false, false, 0);
+        controls.pack_start(&plus, false, false, 0);
+        row.pack_start(&controls, false, false, 0);
+        row
+    }
+
     fn toolbar(&self, text: &str) -> gtk::Box {
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         crate::ui::class(&toolbar, "panel-toolbar");
-        toolbar.set_margin_bottom(14);
+        toolbar.set_margin_bottom(12);
         let count = gtk::Label::new(Some(text));
         crate::ui::class(&count, "sub");
         crate::ui::class(&count, "panel-count");
@@ -2096,19 +3488,15 @@ impl Panels {
         toolbar
     }
 
-    fn section_header(&self, app: &AppRef, icon: crate::icons::Icon, label: &gtk::Label) -> gtk::Box {
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    fn section_header(&self, _app: &AppRef, _icon: crate::icons::Icon, label: &gtk::Label) -> gtk::Box {
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         crate::ui::class(&header, "panel-section-header");
-        let mark = crate::icons::area(icon, 16, app.palette.borrow().muted);
-        crate::ui::class(&mark, "panel-section-icon");
-        mark.set_valign(gtk::Align::Center);
-        header.pack_start(&mark, false, false, 0);
         crate::ui::class(label, "group");
         crate::ui::class(label, "panel-section-heading");
         label.set_xalign(0.0);
         label.set_hexpand(true);
         label.set_line_wrap(true);
-        label.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        label.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         label.set_margin_top(0);
         label.set_margin_bottom(0);
         if let Some(access) = label.accessible() {
@@ -2121,13 +3509,12 @@ impl Panels {
     fn section(&self, app: &AppRef, icon: crate::icons::Icon, title: &str, description: &str) -> gtk::Box {
         let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&section, "panel-section");
-        section.set_margin_bottom(18);
+        section.set_margin_bottom(16);
         if let Some(access) = section.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::Grouping);
             gtk::atk::prelude::AtkObjectExt::set_name(&access, title);
         }
-        // Sentence case, like every other heading in the browser. The 12px/600
-        // label already sets the section apart, so it doesn't need capitals.
+        // Sentence case, like every other heading in the browser.
         let label = gtk::Label::new(Some(title));
         section.pack_start(&self.section_header(app, icon, &label), false, true, 0);
         if !description.is_empty() {
@@ -2136,9 +3523,9 @@ impl Panels {
             crate::ui::class(&detail, "panel-section-description");
             detail.set_xalign(0.0);
             detail.set_line_wrap(true);
-            detail.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
-            detail.set_margin_top(6);
-            detail.set_margin_bottom(12);
+            detail.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+            detail.set_margin_top(4);
+            detail.set_margin_bottom(8);
             section.pack_start(&detail, false, true, 0);
         }
         section
@@ -2148,7 +3535,7 @@ impl Panels {
         crate::ui::class(&section, "panel-section");
         section.set_spacing(0);
         section.set_margin_top(0);
-        section.set_margin_bottom(18);
+        section.set_margin_bottom(16);
         if let Some(access) = section.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::Grouping);
             gtk::atk::prelude::AtkObjectExt::set_name(&access, title);
@@ -2168,14 +3555,17 @@ impl Panels {
             if let Some(label) = child.downcast_ref::<gtk::Label>() {
                 if !description_seen && label.style_context().has_class("settingdesc") && !label.is_no_show_all() {
                     crate::ui::class(label, "panel-section-description");
-                    label.set_margin_top(6);
-                    label.set_margin_bottom(12);
+                    label.set_margin_top(4);
+                    label.set_margin_bottom(8);
                     description_seen = true;
                 }
             }
             if let Some(row) = child.downcast_ref::<gtk::Box>() {
                 if row.orientation() == gtk::Orientation::Horizontal && !row.style_context().has_class("panel-section-header") {
                     crate::ui::class(row, "panel-setting-row");
+                    for button in row.children().into_iter().filter_map(|widget| widget.downcast::<gtk::Button>().ok()) {
+                        button.set_valign(gtk::Align::Center);
+                    }
                     let entries = row.children().iter().filter(|widget| widget.is::<gtk::Entry>()).count();
                     if entries > 1 {
                         crate::ui::class(row, "panel-keyword-form");
@@ -2208,7 +3598,7 @@ impl Panels {
             crate::ui::class(&button, "chosen");
             button.set_state_flags(gtk::StateFlags::CHECKED, false);
         }
-        let contents = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        let contents = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let preview = gtk::DrawingArea::new();
         crate::ui::class(&preview, "panel-appearance-preview");
         // 36px is enough to tell light from dark at a glance. At 54px the
@@ -2219,8 +3609,20 @@ impl Panels {
         preview.connect_draw(move |widget, context| {
             let width = f64::from(widget.allocated_width());
             let height = f64::from(widget.allocated_height());
+            if width <= 2.0 || height <= 2.0 {
+                return crate::gtkx::inh(false);
+            }
             let source = |color: crate::palette::Rgb| {
                 context.set_source_rgb(f64::from(color.0) / 255.0, f64::from(color.1) / 255.0, f64::from(color.2) / 255.0);
+            };
+            let rounded_rect = |cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64| {
+                let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
+                cr.new_sub_path();
+                cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+                cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+                cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+                cr.arc(x + r, y + r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+                cr.close_path();
             };
             let halves = if frame_look == crate::store::Look::System { 2 } else { 1 };
             for index in 0..halves {
@@ -2229,50 +3631,76 @@ impl Panels {
                 let left = f64::from(index) * width / f64::from(halves);
                 let span = width / f64::from(halves);
                 let _ = context.save();
+                // Clip to the concentric 4px rounded mini-window frame (12px card - 8px padding).
+                rounded_rect(context, 0.5, 0.5, (width - 1.0).max(0.0), (height - 1.0).max(0.0), 4.0);
+                context.clip();
                 context.rectangle(left, 0.0, span, height);
                 context.clip();
-                source(palette.card);
-                let _ = context.paint();
                 source(palette.ground);
-                context.rectangle(0.0, 0.0, width * 0.24, height);
+                let _ = context.paint();
+                // Mini top tab strip across the top of the preview.
+                let bar_h = 8.5;
+                source(palette.surface());
+                rounded_rect(context, 3.0, 2.0, 22.0, 5.0, 2.0);
                 let _ = context.fill();
+                source(palette.hover);
+                rounded_rect(context, 27.0, 2.0, 16.0, 5.0, 2.0);
+                let _ = context.fill();
+                // Mini rounded viewport frame inset inside the ground shell.
+                let vp_x = 3.0;
+                let vp_y = bar_h;
+                let vp_w = (width - 6.0).max(8.0);
+                let vp_h = (height - bar_h - 3.0).max(8.0);
+                let _ = context.save();
+                rounded_rect(context, vp_x, vp_y, vp_w, vp_h, 3.0);
+                source(palette.card);
+                let _ = context.fill_preserve();
+                context.clip();
+                // Mini Bayer-dithered rising horizon in the rounded viewport.
+                let (mid, core) = crate::startpage::dither_stops(&palette, false);
+                let mut py = (vp_y + vp_h * 0.28).floor() as i32;
+                while f64::from(py) < vp_y + vp_h {
+                    let ny = (f64::from(py) - vp_y + 1.0) / vp_h;
+                    let mut px = vp_x.floor() as i32;
+                    while f64::from(px) < vp_x + vp_w {
+                        let nx = (f64::from(px) - vp_x) / vp_w;
+                        let level = crate::startpage::bayer_level(
+                            (px / 2) as usize,
+                            (py / 2) as usize,
+                            crate::startpage::horizon_density(nx as f32, ny as f32),
+                        );
+                        if level != 0 {
+                            source(if level == 2 { core } else { mid });
+                            context.rectangle(f64::from(px), f64::from(py), 2.0, 2.0);
+                            let _ = context.fill();
+                        }
+                        px += 2;
+                    }
+                    py += 2;
+                }
+                // Mini rounded search bar on the clean upper canvas.
+                let pill_w = (vp_w * 0.58).max(18.0);
+                let pill_x = vp_x + (vp_w - pill_w) * 0.5;
+                let pill_y = vp_y + 5.5;
+                source(palette.surface());
+                rounded_rect(context, pill_x, pill_y, pill_w, 6.0, 2.5);
+                let _ = context.fill_preserve();
                 source(palette.hairline);
-                context.set_line_width(1.0);
-                context.move_to(width * 0.24 + 0.5, 0.0);
-                context.line_to(width * 0.24 + 0.5, height);
+                context.set_line_width(0.8);
                 let _ = context.stroke();
                 source(palette.accent());
-                context.rectangle(6.0, 12.0, (width * 0.24 - 12.0).max(4.0), 3.0);
+                rounded_rect(context, pill_x + pill_w - 5.2, pill_y + 1.1, 3.8, 3.8, 1.4);
                 let _ = context.fill();
-                // The preview is 36px tall. The old steps drew the last sidebar
-                // line at y36 and the last content line at y37, so both were
-                // cut off by the frame (round-54 review, Settings). At 5px steps
-                // the lines sit at 18/23/28 and 22/27/32, all inside the frame,
-                // and the bottom margin (4px or more) is close to the top one.
-                source(palette.muted);
-                for line in 0..3 {
-                    let top = 18.0 + f64::from(line) * 5.0;
-                    context.rectangle(6.0, top, (width * 0.24 - 14.0).max(3.0), 1.0);
-                    let _ = context.fill();
-                }
-                source(palette.ink);
-                context.rectangle(width * 0.34, 13.0, width * 0.44, 3.0);
-                let _ = context.fill();
+                let _ = context.restore();
+                // Viewport hairline border.
                 source(palette.hairline);
-                for line in 0..3 {
-                    let top = 22.0 + f64::from(line) * 5.0;
-                    context.rectangle(width * 0.34, top, width * if line == 2 { 0.32 } else { 0.53 }, 1.0);
-                    let _ = context.fill();
-                }
-                // Each preview is outlined in its own palette's hairline, drawn
-                // while that half's clip is still set. The old frame always used
-                // the light hairline, so the Dark preview (and the dark half of
-                // System) had a pale ring that no dark window has (Gemini R60
-                // polish). Under the clip, System gets a light frame on its light
-                // half and a dark frame on its dark half.
+                context.set_line_width(0.8);
+                rounded_rect(context, vp_x, vp_y, vp_w, vp_h, 3.0);
+                let _ = context.stroke();
+                // Outer preview frame border.
                 source(palette.hairline);
                 context.set_line_width(1.0);
-                context.rectangle(0.5, 0.5, (width - 1.0).max(0.0), (height - 1.0).max(0.0));
+                rounded_rect(context, 0.5, 0.5, (width - 1.0).max(0.0), (height - 1.0).max(0.0), 4.0);
                 let _ = context.stroke();
                 let _ = context.restore();
             }
@@ -2297,10 +3725,81 @@ impl Panels {
         button.connect_clicked(move |_| {
             if let Some(app) = app_weak.upgrade() {
                 app.switch_look(look.clone());
-                app.toggle_panel_switch(PanelKind::Settings);
             }
         });
         button.upcast()
+    }
+
+    /// Native Cairo-drawn 40x24 pill toggle switch backed by a `ToggleButton`.
+    ///
+    /// Replaces `gtk::Switch`, whose Adwaita theme loads symbolic SVG state
+    /// glyphs via `gdk-pixbuf` -> external `glycin-image-rs` + `bwrap`
+    /// subprocesses synchronously on first paint (~80-100ms main-loop stall on
+    /// cold Settings open plus 3 extra persistent processes).
+    pub(crate) fn pill_switch(app: &AppRef, value: bool, sensitive: bool) -> gtk::ToggleButton {
+        let button = gtk::ToggleButton::new();
+        crate::ui::class(&button, "mark");
+        crate::ui::class(&button, "pill-switch");
+        button.set_relief(gtk::ReliefStyle::None);
+        button.set_can_focus(true);
+        button.set_valign(gtk::Align::Center);
+        button.set_active(value);
+        button.set_sensitive(sensitive);
+
+        let palette = app.palette.borrow();
+        let dark = palette.is_dark();
+        let off_track = crate::css::quiet::pick(crate::css::quiet::SWITCH_OFF, dark);
+        let on_track = palette.accent();
+        let off_knob = palette.surface();
+        let on_knob = palette.accent_ink();
+        drop(palette);
+
+        let canvas = gtk::DrawingArea::new();
+        canvas.set_size_request(40, 24);
+        let btn_weak = button.downgrade();
+        canvas.connect_draw(move |widget, cr| {
+            let active = btn_weak.upgrade().is_some_and(|b| b.is_active());
+            let w = f64::from(widget.allocated_width()).max(40.0);
+            let h = f64::from(widget.allocated_height()).max(24.0);
+            let x0 = ((w - 40.0) / 2.0).max(0.0);
+            let y0 = ((h - 24.0) / 2.0).max(0.0);
+            let r = 12.0;
+
+            let track = if active { on_track } else { off_track };
+            cr.new_sub_path();
+            cr.arc(x0 + 40.0 - r, y0 + r, r, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+            cr.arc(x0 + r, y0 + r, r, std::f64::consts::FRAC_PI_2, 3.0 * std::f64::consts::FRAC_PI_2);
+            cr.close_path();
+            cr.set_source_rgb(
+                f64::from(track.0) / 255.0,
+                f64::from(track.1) / 255.0,
+                f64::from(track.2) / 255.0,
+            );
+            let _ = cr.fill();
+
+            let knob_x = if active { x0 + 28.0 } else { x0 + 12.0 };
+            let knob_y = y0 + 12.0;
+            // Subtle shadow under the circular knob matching `.panel switch slider`.
+            cr.arc(knob_x, knob_y + 1.0, 9.0, 0.0, 2.0 * std::f64::consts::PI);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.18);
+            let _ = cr.fill();
+
+            let knob = if active { on_knob } else { off_knob };
+            cr.arc(knob_x, knob_y, 9.0, 0.0, 2.0 * std::f64::consts::PI);
+            cr.set_source_rgb(
+                f64::from(knob.0) / 255.0,
+                f64::from(knob.1) / 255.0,
+                f64::from(knob.2) / 255.0,
+            );
+            let _ = cr.fill();
+            crate::gtkx::inh(false)
+        });
+        let canvas_for_toggle = canvas.clone();
+        button.connect_toggled(move |_| {
+            canvas_for_toggle.queue_draw();
+        });
+        button.add(&canvas);
+        button
     }
 
     fn setting_switch(
@@ -2320,33 +3819,25 @@ impl Panels {
         crate::ui::class(&name, "setting");
         name.set_xalign(0.0);
         name.set_line_wrap(true);
-        name.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        name.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         let sub = gtk::Label::new(Some(subtitle));
         crate::ui::class(&sub, "settingdesc");
         sub.set_xalign(0.0);
         sub.set_line_wrap(true);
-        sub.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        sub.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         texts.add(&name);
         texts.add(&sub);
         crate::ui::pack(&row, &texts, true);
-        let switch = gtk::Switch::new();
-        switch.set_active(value);
-        switch.set_valign(gtk::Align::Center);
-        // The switch is drawn, not typed: there is no text in it for a screen
-        // reader to read and nothing under the pointer to say what it sets, so
-        // the row's name is given to it both ways. The subtitle is a sentence,
-        // not a name, and is left out. The switch already reports that it is a
-        // switch; only the name is missing.
+        let switch = Self::pill_switch(app, value, true);
         switch.set_tooltip_text(Some(title));
         if let Some(access) = switch.accessible() {
-            // Fully qualified: gtk's prelude brings several traits with a
-            // `set_name`, and this one is atk's.
+            gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::ToggleButton);
             gtk::atk::prelude::AtkObjectExt::set_name(&access, title);
             gtk::atk::prelude::AtkObjectExt::set_description(&access, subtitle);
         }
         let app_weak = app.weak();
         let changed = std::rc::Rc::new(changed);
-        switch.connect_active_notify(move |switch| {
+        switch.connect_toggled(move |switch| {
             if let Some(app) = app_weak.upgrade() {
                 changed(&app, switch.is_active());
             }
@@ -2363,27 +3854,27 @@ impl Panels {
         description: &str,
         tip: Option<(&str, &str)>,
     ) -> gtk::Box {
-        let empty = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        let empty = gtk::Box::new(gtk::Orientation::Vertical, 8);
         crate::ui::class(&empty, "panel-empty");
-        empty.set_margin_top(28);
-        empty.set_margin_bottom(28);
-        let mark = crate::icons::area(icon, 32, app.palette.borrow().muted);
+        empty.set_margin_top(20);
+        empty.set_margin_bottom(20);
+        let mark = crate::icons::area(icon, 24, app.palette.borrow().muted);
         crate::ui::class(&mark, "panel-empty-icon");
         mark.set_halign(gtk::Align::Start);
-        mark.set_margin_bottom(8);
+        mark.set_margin_bottom(4);
         empty.pack_start(&mark, false, false, 0);
         let heading = gtk::Label::new(Some(title));
         crate::ui::class(&heading, "panel-empty-title");
         heading.set_xalign(0.0);
         heading.set_line_wrap(true);
-        heading.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        heading.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         empty.pack_start(&heading, false, true, 0);
         let detail = gtk::Label::new(Some(description));
         crate::ui::class(&detail, "settingdesc");
         crate::ui::class(&detail, "panel-empty-description");
         detail.set_xalign(0.0);
         detail.set_line_wrap(true);
-        detail.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+        detail.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         empty.pack_start(&detail, false, true, 0);
         if let Some((key, text)) = tip {
             let hint = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -2397,7 +3888,7 @@ impl Panels {
             crate::ui::class(&action, "settingdesc");
             action.set_xalign(0.0);
             action.set_line_wrap(true);
-            action.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+            action.set_line_wrap_mode(gtk::pango::WrapMode::Word);
             hint.pack_start(&action, true, true, 0);
             empty.pack_start(&hint, false, true, 0);
         }
@@ -2443,8 +3934,8 @@ impl Panels {
         }
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         crate::ui::class(&hbox, "panel-row-layout");
-        hbox.set_margin_top(12);
-        hbox.set_margin_bottom(12);
+        hbox.set_margin_top(2);
+        hbox.set_margin_bottom(2);
         let identity = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         crate::ui::class(&identity, "panel-row-identity");
         identity.set_hexpand(true);
@@ -2461,7 +3952,7 @@ impl Panels {
         tile.add(&letter);
         crate::ui::pack(&identity, &tile, false);
 
-        let texts = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let texts = gtk::Box::new(gtk::Orientation::Vertical, 2);
         texts.set_hexpand(true);
         let name = gtk::Label::new(Some(title));
         crate::ui::class(&name, "ptitle");
@@ -2472,7 +3963,7 @@ impl Panels {
         url.set_xalign(0.0);
         if self.open.as_ref() == Some(&PanelKind::Extensions) {
             url.set_line_wrap(true);
-            url.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
+            url.set_line_wrap_mode(gtk::pango::WrapMode::Word);
         } else {
             url.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         }
@@ -2484,12 +3975,6 @@ impl Panels {
 
         let button = gtk::Button::with_label(action);
         crate::ui::class(&button, "act");
-        if !matches!(action, "Disable" | "Enable") {
-            let arrow = crate::icons::area(crate::icons::Icon::ArrowRight, 12, app.palette.borrow().muted);
-            button.set_image(Some(&arrow));
-            button.set_image_position(gtk::PositionType::Right);
-            button.set_always_show_image(true);
-        }
         button.set_valign(gtk::Align::Center);
         // One Tab stop per row (Gemini R60 polish): the row itself takes focus
         // and Return runs this action, so the button stays clickable but is
@@ -2709,6 +4194,95 @@ fn bytes(n: u64) -> String {
     }
 }
 
+fn open_export_profile_chooser(app: &AppRef) {
+    let dialog = gtk::FileChooserNative::new(
+        Some("Export appearance & layout profile"),
+        Some(&app.ui.window),
+        gtk::FileChooserAction::Save,
+        Some("Export"),
+        Some("Cancel"),
+    );
+    dialog.set_do_overwrite_confirmation(true);
+    dialog.set_current_name("rill-layout-profile.json");
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("JSON profiles"));
+    filter.add_pattern("*.json");
+    dialog.add_filter(filter);
+    let weak = app.weak();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let (Some(app), Some(path)) = (weak.upgrade(), dialog.filename()) {
+                let payload = {
+                    let prefs = app.prefs.borrow();
+                    crate::customize::export_prefs_json(&prefs)
+                };
+                match payload {
+                    Ok(json) => match std::fs::write(&path, json.as_bytes()) {
+                        Ok(()) => app.flash_toast("Exported appearance & layout profile"),
+                        Err(_) => app.flash_toast("Could not write layout profile file"),
+                    },
+                    Err(_) => app.flash_toast("Could not encode layout profile"),
+                }
+            }
+        }
+        dialog.destroy();
+        PROFILE_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+    });
+    PROFILE_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+    dialog.show();
+}
+
+fn open_import_profile_chooser(app: &AppRef) {
+    let dialog = gtk::FileChooserNative::new(
+        Some("Import appearance & layout profile"),
+        Some(&app.ui.window),
+        gtk::FileChooserAction::Open,
+        Some("Import"),
+        Some("Cancel"),
+    );
+    dialog.set_select_multiple(false);
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("JSON profiles"));
+    filter.add_pattern("*.json");
+    dialog.add_filter(filter);
+    let weak = app.weak();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let (Some(app), Some(path)) = (weak.upgrade(), dialog.filename()) {
+                let read_result = std::fs::File::open(&path).and_then(|file| {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    file.take((crate::customize::MAX_IMPORT_BYTES + 1) as u64)
+                        .read_to_string(&mut buf)?;
+                    Ok(buf)
+                });
+                match read_result {
+                    Ok(raw) => match app.import_appearance_profile_str(&raw) {
+                        Ok(()) => {
+                            app.flash_toast("Imported appearance & layout profile");
+                            app.toggle_panel_switch(PanelKind::Settings);
+                        }
+                        Err(err) => app.flash_toast(&err.message()),
+                    },
+                    Err(_) => app.flash_toast("Could not read layout profile file"),
+                }
+            }
+        }
+        dialog.destroy();
+        PROFILE_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+    });
+    PROFILE_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+    dialog.show();
+}
+
+fn about_label_text() -> String {
+    format!(
+        "{} {} · WebKitGTK · Built with Rust",
+        crate::app::APP_NAME,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 #[cfg(test)]
 mod download_words {
     use super::{bytes, download_subtitle};
@@ -2760,5 +4334,33 @@ mod download_words {
         assert_eq!(bytes(512), "512 B");
         assert_eq!(bytes(2048), "2 KB");
         assert_eq!(bytes(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn non_running_extensions_never_show_an_active_or_enabled_switch() {
+        assert_eq!(super::extension_switch_state(false, true), (false, false));
+        assert_eq!(super::extension_switch_state(false, false), (false, false));
+        assert_eq!(super::extension_switch_state(true, true), (true, true));
+        assert_eq!(super::extension_switch_state(true, false), (false, true));
+    }
+
+    #[test]
+    fn wrap_policy_uses_fast_word_wrap_for_prose_and_bounded_word_char_for_long_tokens() {
+        assert_eq!(
+            super::wrap_policy("Applies a dark background and light text to all pages."),
+            (gtk::pango::WrapMode::Word, None)
+        );
+        assert_eq!(
+            super::wrap_policy("Hidden on very-long-unbroken-subdomain.example-host.invalid"),
+            (gtk::pango::WrapMode::WordChar, Some(12))
+        );
+    }
+
+    #[test]
+    fn about_line_uses_rill_brand_and_package_version() {
+        let line = super::about_label_text();
+        assert!(line.starts_with("Rill "), "{line}");
+        assert!(line.contains("WebKitGTK"), "{line}");
+        assert!(!line.starts_with("Search "), "{line}");
     }
 }

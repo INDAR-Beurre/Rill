@@ -1,4 +1,4 @@
-// Search: a small, fast, quiet web browser for Linux.
+// Rill: a small, fast, quiet web browser for Linux.
 //
 // The engine is the one the desktop already ships (WebKitGTK), so there is no
 // second copy of a browser inside this one and the whole thing starts in the
@@ -16,10 +16,13 @@ macro_rules! note {
     }};
 }
 
+mod addons_catalog;
 mod app;
 mod bench;
 mod css;
 mod curtain;
+mod customize;
+mod decor;
 mod files;
 mod extensions;
 mod find;
@@ -43,6 +46,7 @@ mod import;
 mod welcome;
 mod shield;
 mod sitecard;
+mod spaces;
 mod status;
 mod shield_assets;
 mod store;
@@ -124,6 +128,9 @@ fn main() {
         std::env::set_var("SEARCH_LOW_MEMORY", "1");
     }
 
+    glib::set_prgname(Some("search"));
+    glib::set_application_name("Rill");
+
     if gtk::init().is_err() {
         note!("search: could not open a display");
         std::process::exit(1);
@@ -200,12 +207,22 @@ fn main() {
     }
 
     app.ui.window.show_all();
-    // show_all shows every child, including the bookmarks bar that was built
-    // hidden, so the answer to "is there anything kept" has to be applied after
-    // the window is shown rather than before it.
+    // show_all shows every child that did not opt out; enforce exclusive tab
+    // layout (never both topbar and vertical sidebar) and bookmarks/toolbar
+    // visibility immediately afterwards.
+    app.sync_tab_layout();
     app.render();
     app.ui.window.present();
-    if !fresh && !app.prefs.borrow().welcomed {
+    // Only show full-tab first-run introduction on a blank normal startup tab;
+    // never hijack a restored web-page session or explicit --url launch.
+    if !fresh
+        && !app.prefs.borrow().welcomed
+        && app
+            .state
+            .borrow()
+            .active_tab()
+            .is_none_or(|t| t.url.is_empty() && !t.private)
+    {
         welcome::show(&app);
     }
 
@@ -214,10 +231,11 @@ fn main() {
         app.ui.window.connect_destroy(move |_| {
             if let Some(app) = app_weak.upgrade() {
                 app.save_session();
-                let (history, hidden) = {
+                let (history, hidden, spaces) = {
                     let state = app.state.borrow();
-                    (state.history.clone(), state.hidden.clone())
+                    (state.history.clone(), state.hidden.clone(), state.spaces.clone())
                 };
+                store::Records::save_spaces(&spaces);
                 store::Records::save_history(&history);
                 store::Records::save_hidden(&hidden);
             }

@@ -1,0 +1,87 @@
+{
+  "candidate": "build/rill-spaces-f48",
+  "sha256": "9d7fb7c5839f122cfdc82b8c61cab71fa7536cd542df0342ed5c608a8a8c1703",
+  "binary_bytes": 4832096,
+  "release_status": "unreleased local preview",
+  "rust": {
+    "command": "cargo test --release -j 4",
+    "passed": 395,
+    "failed": 0,
+    "ignored": 2,
+    "release_build_warnings": 0
+  },
+  "changes": [
+    "Flat welcome choices with colored native Cairo marks; no large outlined capsule cards",
+    "Private shield, preset appearance/layout icons, six search engine marks, and distinct starter shortcut marks",
+    "DrawingArea pointer pass-through on all welcome marks",
+    "Integrated Vivaldi-inspired toolbar/layout/start-page customization and validated JSON profile import/export"
+  ],
+  "final_hash_suites": {
+    "deep_customization_and_welcome": {
+      "backend": "X11 Xvfb+Openbox",
+      "input": "real pointer and keyboard",
+      "passed": 42,
+      "failed": 0,
+      "report": "/home/alex/Search Linux/baseline/f49-qa-evidence/final-9d7fb7c5/deep-custom-welcome/deep-custom-welcome-report.json"
+    },
+    "icon_center_real_pointer": {
+      "backend": "X11 Xvfb+Openbox",
+      "passed": 13,
+      "failed": 0,
+      "report": "/home/alex/Search Linux/baseline/f49-qa-evidence/final-9d7fb7c5/icon-center/icon-center-report.json"
+    },
+    "browser_menu_real_pointer": {
+      "method": "dynamic AT-SPI accessible-name bounds and physical xdotool clicks",
+      "passed": 17,
+      "failed": 0,
+      "report": "/home/alex/Search Linux/baseline/f49-qa-evidence/final-9d7fb7c5/menu-pointer/menu-pointer-report.json"
+    }
+  },
+  "prior_exact_hash_suites": {
+    "sha256": "2aaa8c13bcbce5807d9837185a375604f14486064b326aa428e7b9a2bd290d61",
+    "delta_to_final": "Only WelcomeMark::GitHub silhouette/eye colors changed to adapt to light and dark palettes; no shapes, hit areas, layout, state or event handlers changed.",
+    "deep_customization_and_welcome": 42,
+    "footer_minimal_defaults": 13,
+    "test_ui_self_test": "pass",
+    "test_ui_full_openbox": {
+      "passed": true,
+      "screenshots": 41
+    },
+    "stress_quick_openbox": {
+      "passed": 158,
+      "failed": 0,
+      "idle_total_pss_mb": 151.1,
+      "idle_own_pss_mb": 92.3
+    }
+  },
+  "parent_integration": {
+    "sha256": "9d7fb7c5839f122cfdc82b8c61cab71fa7536cd542df0342ed5c608a8a8c1703",
+    "backend": "X11 Xvfb+Openbox",
+    "passed": 145,
+    "failed": 0,
+    "report": "/home/alex/Search Linux/baseline/f49-integration/parent-smoke-final/report.json"
+  },
+  "native_wayland": {
+    "sha256": "9d7fb7c5839f122cfdc82b8c61cab71fa7536cd542df0342ed5c608a8a8c1703",
+    "compositor": "headless Sway",
+    "passed": 30,
+    "failed": 0,
+    "report": "/home/alex/Search Linux/baseline/f49-integration/wayland-final/report.json"
+  },
+  "visual": {
+    "screenshots": "/home/alex/Search Linux/baseline/f49-controls-evidence/final-9d7fb7c5",
+    "manifest": "/home/alex/Search Linux/baseline/f49-controls-evidence/final-9d7fb7c5/manifest.json",
+    "method": "unedited external X11 client-window captures",
+    "captured_states": "intro, Steps 1-3, live preview, 900x560, 900x700, light/dark start page",
+    "gtkwarnings": 0
+  },
+  "frozen_artifacts": "13 entries verified byte-identical in /home/alex/Search Linux/baseline/f49-integration/frozen-verification.json",
+  "unverified": [
+    "KDE/KWin",
+    "Hyprland",
+    "Omarchy",
+    "physical hardware compositor smoothness",
+    "full Vivaldi extension/API parity",
+    "live internet AMO queries (offline test environment)"
+  ]
+}

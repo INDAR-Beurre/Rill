@@ -39,6 +39,7 @@ pub enum Intent {
     PreviousTab,
     Back,
     Forward,
+    Home,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -57,8 +58,12 @@ pub enum Intent {
     DuplicateTab,
     /// Ctrl I: the site card for the page on screen.
     SiteCard,
-    /// Ctrl S: fold the tab column to a strip, or open it again.
+    /// Ctrl S: show or hide the optional tab sidebar.
     FoldColumn,
+    /// Ctrl Shift Page Up: move the active tab one slot left.
+    MoveTabLeft,
+    /// Ctrl Shift Page Down: move the active tab one slot right.
+    MoveTabRight,
 }
 
 pub struct Key {
@@ -138,8 +143,11 @@ impl Key {
                 ("c", true) => Intent::CopyAddress,
                 // Shift Tab is a keyval of its own, and Ctrl Shift Tab is the
                 // one a browser keeps for the other direction.
-                ("tab", false) | ("page_down", _) => Intent::NextTab,
-                ("tab", true) | ("iso_left_tab", _) | ("page_up", _) => Intent::PreviousTab,
+                // Ctrl Shift Page Up / Page Down reorder the active tab in the top strip.
+                ("tab", false) | ("page_down", false) => Intent::NextTab,
+                ("tab", true) | ("iso_left_tab", _) | ("page_up", false) => Intent::PreviousTab,
+                ("page_up", true) => Intent::MoveTabLeft,
+                ("page_down", true) => Intent::MoveTabRight,
                 ("bracketleft", _) => Intent::Back,
                 ("bracketright", _) => Intent::Forward,
                 ("plus", _) | ("equal", _) | ("kp_add", _) => Intent::ZoomIn,
@@ -171,6 +179,7 @@ impl Key {
             match name {
                 "left" => return Intent::Back,
                 "right" => return Intent::Forward,
+                "home" => return Intent::Home,
                 _ => {}
             }
         }
@@ -216,10 +225,13 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("jump", "Ctrl 1 to 9", "Jump to a tab", "3", true, false, false),
     ("switchtab", "Ctrl K", "Switch to a tab by typing its name", "k", true, false, false),
     ("duplicatetab", "Ctrl Shift K", "Duplicate this tab", "k", true, true, false),
-    ("foldcolumn", "Ctrl S", "Fold the tab column to a strip, or open it", "s", true, false, false),
+    ("movetableft", "Ctrl Shift Page Up", "Move tab left", "page_up", true, true, false),
+    ("movetabright", "Ctrl Shift Page Down", "Move tab right", "page_down", true, true, false),
+    ("foldcolumn", "Ctrl S", "Show or hide the tab sidebar", "s", true, false, false),
     ("toolbar", "Ctrl Shift S", "Show or hide the top controls", "s", true, true, false),
     ("back", "Alt Left", "Back", "left", false, false, true),
     ("forward", "Alt Right", "Forward", "right", false, false, true),
+    ("home", "Alt Home", "Home page", "home", false, false, true),
     ("reload", "Ctrl R", "Reload", "r", true, false, false),
     ("f5", "F5", "Reload", "f5", false, false, false),
     ("reloadbypass", "Ctrl F5", "Reload past the cache", "f5", true, false, false),
@@ -274,7 +286,11 @@ pub fn apply(app: &AppRef, intent: Intent) {
     match intent {
         Intent::Nothing => {}
         Intent::Escape => {
-            if app.omni.visible.get() {
+            if app.space_popover.borrow().as_ref().is_some_and(|p| p.is_visible()) {
+                app.close_space_switcher();
+            } else if app.menu_popover.borrow().as_ref().is_some_and(|p| p.is_visible()) {
+                app.close_main_menu();
+            } else if app.omni.visible.get() {
                 app.close_omni();
             } else if app.find.borrow().visible {
                 app.toggle_find();
@@ -335,6 +351,7 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::PreviousTab => app.cycle(false),
         Intent::Back => app.go_back(),
         Intent::Forward => app.go_forward(),
+        Intent::Home => app.go_home(),
         Intent::ZoomIn => app.zoom(0.1),
         Intent::ZoomOut => app.zoom(-0.1),
         Intent::ZoomReset => app.reset_zoom(),
@@ -351,6 +368,8 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::FoldColumn => app.toggle_fold(),
         Intent::ToggleToolbar => app.toggle_toolbar(),
         Intent::SiteCard => crate::sitecard::open(app),
+        Intent::MoveTabLeft => app.move_active_tab(-1),
+        Intent::MoveTabRight => app.move_active_tab(1),
     }
 }
 
@@ -361,7 +380,9 @@ pub fn taken(app: &AppRef, intent: Intent) -> bool {
     match intent {
         Intent::Nothing => false,
         Intent::Escape => {
-            app.omni.visible.get()
+            app.space_popover.borrow().as_ref().is_some_and(|p| p.is_visible())
+                || app.menu_popover.borrow().as_ref().is_some_and(|p| p.is_visible())
+                || app.omni.visible.get()
                 || app.find.borrow().visible
                 || app.panels.borrow().open.is_some()
                 || app.reading.get()
@@ -397,7 +418,12 @@ pub fn arrow_belongs_to_panel(panel_open: bool, focus_in_entry: bool) -> bool {
 }
 
 fn focus_in_panel(app: &AppRef) -> bool {
-    let card = app.panels.borrow().card.clone();
+    let panels = app.panels.borrow();
+    if panels.has_open_popover() {
+        return true;
+    }
+    let card = panels.card.clone();
+    drop(panels);
     app.ui.window.focused_widget().is_some_and(|widget| widget.is_ancestor(&card))
 }
 
@@ -428,6 +454,10 @@ pub fn handle(app: &AppRef, event: &gtk::gdk::EventKey) -> glib::Propagation {
         {
             return crate::gtkx::inh(true);
         }
+    }
+
+    if intent == Intent::Escape && panel_open && app.panels.borrow().dismiss_popover() {
+        return crate::gtkx::inh(true);
     }
 
     // Decide before applying: stopping a load changes the state `taken`
@@ -550,6 +580,7 @@ mod sheet_tests {
             | Intent::PreviousTab
             | Intent::Back
             | Intent::Forward
+            | Intent::Home
             | Intent::ZoomIn
             | Intent::ZoomOut
             | Intent::ZoomReset
@@ -565,7 +596,9 @@ mod sheet_tests {
             | Intent::DuplicateTab
             | Intent::SiteCard
             | Intent::FoldColumn
-            | Intent::ToggleToolbar => true,
+            | Intent::ToggleToolbar
+            | Intent::MoveTabLeft
+            | Intent::MoveTabRight => true,
         }
     }
 
@@ -606,6 +639,7 @@ mod sheet_tests {
             Intent::PreviousTab,
             Intent::Back,
             Intent::Forward,
+            Intent::Home,
             Intent::ZoomIn,
             Intent::ZoomOut,
             Intent::ZoomReset,
@@ -621,6 +655,8 @@ mod sheet_tests {
             Intent::SiteCard,
             Intent::FoldColumn,
             Intent::ToggleToolbar,
+            Intent::MoveTabLeft,
+            Intent::MoveTabRight,
         ];
         for wanted in all {
             if !must_be_advertised(wanted) {

@@ -393,13 +393,14 @@ pub fn offer_addon(
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let weak = app.weak();
-    let mut install_button = None;
-    for (label, install) in [("Cancel", false), ("Install", true)] {
+    let mut cancel_button = None;
+    for (label, install) in addon_prompt_buttons() {
         let button = gtk::Button::with_label(label);
         crate::ui::class(&button, "act");
         if install {
             crate::ui::class(&button, "primary");
-            install_button = Some(button.clone());
+        } else {
+            cancel_button = Some(button.clone());
         }
         let weak = weak.clone();
         button.connect_clicked(move |_| {
@@ -410,11 +411,30 @@ pub fn offer_addon(
         crate::ui::pack(&buttons, &button, false);
     }
     card.add(&buttons);
-    let focus = install_button.as_ref().map(|b| b.clone().upcast::<gtk::Widget>());
+    // Unsigned add-on prompts default keyboard focus to Cancel (matching
+    // permission prompts defaulting to Block) so Return/Space cannot install
+    // an unsigned archive accidentally.
+    let focus = cancel_button.as_ref().map(|b| b.clone().upcast::<gtk::Widget>());
     show(app, tab, card.clone(), focus, Answer::AddOn { path });
-    if let Some(install) = install_button {
-        install.grab_focus();
+    if let Some(cancel) = cancel_button {
+        cancel.grab_focus();
     }
+}
+
+/// Button order for unsigned add-on installation prompts. The first button
+/// (Cancel) receives default keyboard focus so accidental Return/Space cancels.
+pub(crate) fn addon_prompt_buttons() -> [(&'static str, bool); 2] {
+    [("Cancel", false), ("Install", true)]
+}
+
+/// Label of the button that receives default focus in `offer_addon`.
+#[cfg(test)]
+pub(crate) fn addon_default_focus_label() -> &'static str {
+    addon_prompt_buttons()
+        .iter()
+        .find(|(_, install)| !*install)
+        .map(|(label, _)| *label)
+        .unwrap_or("Cancel")
 }
 
 /// The card's words, kept apart from GTK so a test can read them.
@@ -563,7 +583,8 @@ fn show(app: &App, tab: TabId, card: gtk::Box, focus: Option<gtk::Widget>, answe
     });
     sync_visible(app);
     if app.active_id() == tab {
-        crate::motion::pop_card_in(&card, PAGE_TOP, -crate::motion::dur::TRAVEL, crate::motion::dur::ENTER);
+        let top = card.margin_top();
+        crate::motion::pop_card_in(&card, top, -crate::motion::dur::TRAVEL, crate::motion::dur::ENTER);
     }
 }
 
@@ -579,10 +600,8 @@ pub(crate) fn card(app: &App, message: &str) -> gtk::Box {
     card.set_valign(gtk::Align::Start);
     card.set_margin_start(12);
     card.set_margin_end(PAGE_INSET);
-    // The overlay begins at the window's top edge, band included, so a card
-    // placed PAGE_TOP below it sat 9px inside the 23px band and lost the top
-    // of its title (round 43's site card). The page starts under the band.
-    card.set_margin_top(PAGE_TOP);
+    let top = crate::find::toolbar_band(&app.ui) + PAGE_TOP;
+    card.set_margin_top(top);
     card.set_margin_bottom(8);
     card.set_size_request(300, -1);
     // Room inside the border. `.dlbar` has none, because the downloads bar

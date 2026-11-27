@@ -1,42 +1,28 @@
-# What is different from the Mac build
+# What is different from macOS Search
 
-Search was written for macOS. This is the same idea on Linux, and it is not the
-same program. Where the two differ, this page says how, and whether the
-difference is a platform fact, a decision, or something simply missing.
+Rill began as an independent Linux implementation of macOS Search. It is the
+same core idea on Linux, and it is not the same program. Where the two differ,
+this page says how, and whether the difference is a platform fact, a decision,
+or something simply missing.
 
 ## The window
 
-The window buttons are drawn here: a plain close, minimise and maximise mark on
-a wash, not the three coloured circles macOS uses. Copying another operating
-system's buttons onto this desktop was the loudest wrong note in the first
-builds, and a browser that looks like a Mac on Linux looks like a port.
-
 The Mac window is an `NSWindow` with real traffic lights, a real titlebar, and
-the system's own window shadows and corners. On Linux the browser draws its own:
-a `GtkWindow` with no desktop titlebar, a zero-height client-side `HeaderBar`
-kept alive only so a drag can move the window, and three 28px marks drawn by
-`ui::window_controls` in `GtkEventBox`es, wired to close, minimise and maximise.
-The marks are drawn glyphs, not coloured circles, and each carries a tooltip and
-an accessible name because there is no text in it to read.
+the system's own window shadows and corners. On Linux, Rill negotiates window
+decorations cleanly via **Settings → Window controls** (`System`, `Browser`, or
+`Hidden`): in `System` mode on X11 desktops with an EWMH window manager, the
+desktop draws its single native titlebar with zero duplicate browser controls;
+in `Browser` mode (or Wayland sessions without server-side decorations), Rill
+draws compact pill close/minimise/maximise buttons in the top tab strip
+honoring `gtk-decoration-layout`.
 
-That is the largest fidelity decision in this build, and it is deliberate: a
-desktop titlebar above a Mac-style frame reads as two windows stacked. The cost
-is that window rules, snapping and the system menu come from the compositor
-rather than from the header, and window shadows differ between GNOME, KDE and
-whatever else is running.
-
-The redesigned Linux interface deliberately moves beyond visual fidelity to
-the original. A permanent 72px toolbar holds the address display, navigation,
-site information, reading/bookmark controls, and window buttons. The tab
-column's top band is a brand/drag handle instead of a hiding place for hover-only
-navigation. Both surfaces can move the window; video fullscreen hides the
-toolbar and column together.
-
-The start page is native GTK, with editorial serif typography and a Cairo
-orbital illustration—not a remote site or an embedded HTML dashboard. Its
-search field works directly, and `Ctrl L` retains the shared omnibox. Personal
-bookmarks and recent pages appear only in ordinary browsing; empty profiles
-get explicitly labeled curated links.
+The current Linux interface uses a top tab strip with an optional vertical tab
+sidebar (`Ctrl S`) and a mouse-first navigation toolbar (visible by default for
+new profiles, individually customizable in Settings or via right-click, and
+toggleable with `Ctrl Shift S`). The native GTK start page renders a cached
+8×8 Bayer ordered-dither horizon with customizable bookmark shortcuts (`Icons and
+names`, `Icons only`, or `Icons, names & URL`). Video fullscreen hides chrome
+and restores it cleanly on exit.
 
 Panels use a navigation rail and ruled content sections. On smaller windows,
 the rail becomes compact icon navigation and settings controls reflow. Light
@@ -67,9 +53,8 @@ will fail only here.
 
 Memory is the visible consequence. Safari's WebKit shares a great deal between
 processes because the OS was built for it; on Linux each WebKit process maps the
-same shared libraries again. That is why one tab used 218.6 MB of total proportional resident memory in the round-76 quick run
-(`council/round-76/stress-report-slide-quick.json`, which passes the 230 MB WebKitGTK floor but still misses the original ~100 MB request), while the browser's own
-anonymous memory is 49 to 119 MB depending on
+same shared libraries again. That is why for one idle tab proportional resident memory was 182.9 MB total PSS in the archived F39 full run
+(`docs/benchmarks/stress-report-f39.json`: 182.9 MB warm / 185.3 MB cold total PSS, 94.5 MB own anonymous PSS, 441.9 MB RSS, 3 processes across idle, History/Bookmarks, and Settings open/close with zero `glycin`/`bwrap`; passes the rebaselined 230 MB WebKitGTK floor while still missing the original ~100 MB request), while the browser's own anonymous memory is 49 to 119 MB depending on
 the page and the host.
 
 ## Keys, menus and the system
@@ -78,8 +63,15 @@ the page and the host.
 - The Mac build has a real menu bar in the system menu. Here a toolbar menu
   exposes all browser actions, and the column footer offers direct Settings,
   Library, History, and Downloads access.
-- Services, Share, Handoff, iCloud tabs, Spaces and full-screen gestures are not
-  ported. They are Mac surface with no Linux equivalent in this build.
+- Services, Share, Handoff, iCloud tabs, Spaces, full-screen gestures,
+  cross-app video picture-in-picture, built-in system keychain passwords /
+  passkeys, and a signed macOS-style self-updater are not ported (platform gaps
+  or deliberate scope decisions; see `docs/LIMITS.md` and
+  `baseline/feature-parity.md`).
+- Split View is represented by `Shift` + click Peek cards (a floating second
+  page card with `Keep` / `Close`) rather than persistent side-by-side split
+  panes, and tab sleep is global (10-minute timeout with audio exemption)
+  without per-site keep-awake overrides.
 - Downloads go to the XDG download directory (`~/Downloads` by default), not to
   a Mac `NSSavePanel` sheet.
 - Settings, history, bookmarks, hidden elements, permission grants and the
@@ -106,8 +98,11 @@ the page and the host.
 ## Reading mode
 
 On the Mac this is a second view over the article. Here it is done inside the
-page: `assets/reader.js` takes the article out of the document, sets it again in
-the browser's own type, and remembers the original body so it can be put back.
+page in an isolated WebKit script world (`"search-reader"`, `src/reader.rs`):
+`assets/reader.js` extracts the article with strict allowlist DOM sanitization
+and direct DOM node adoption (no main-world globals and no `innerHTML` re-parse),
+sets it in the browser's own type, and keeps the original body nodes in closure
+state so exiting restores them cleanly.
 That costs no second process and no second load, and Back does not have to be
 rewritten to undo it.
 

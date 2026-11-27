@@ -27,21 +27,135 @@ impl Look {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartBookmarksMode {
+    #[default]
+    IconsAndNames,
+    IconsOnly,
+    IconsNamesUrl,
+}
+
+impl StartBookmarksMode {
+    pub fn title(self) -> &'static str {
+        match self {
+            StartBookmarksMode::IconsAndNames => "Icons and names",
+            StartBookmarksMode::IconsOnly => "Icons only",
+            StartBookmarksMode::IconsNamesUrl => "Icons, names & URL",
+        }
+    }
+
+    pub fn all() -> [StartBookmarksMode; 3] {
+        [
+            StartBookmarksMode::IconsAndNames,
+            StartBookmarksMode::IconsOnly,
+            StartBookmarksMode::IconsNamesUrl,
+        ]
+    }
+}
+
+pub const MIN_SIDE_WIDTH: f64 = 176.0;
+pub const MAX_SIDE_WIDTH: f64 = 440.0;
+pub const DEFAULT_SIDE_WIDTH: f64 = 224.0;
+pub const MIN_TOP_TAB_WIDTH: i32 = 96;
+pub const MAX_TOP_TAB_WIDTH: i32 = 280;
+pub const DEFAULT_TOP_TAB_WIDTH: i32 = 144;
+pub const MIN_START_SHORTCUTS_COUNT: usize = 2;
+pub const MAX_START_SHORTCUTS_COUNT: usize = 12;
+pub const DEFAULT_START_SHORTCUTS_COUNT: usize = 8;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartDitherMode {
+    Off,
+    Subtle,
+    #[default]
+    Full,
+}
+
+impl StartDitherMode {
+    pub fn title(self) -> &'static str {
+        match self {
+            StartDitherMode::Off => "Off",
+            StartDitherMode::Subtle => "Subtle",
+            StartDitherMode::Full => "Full",
+        }
+    }
+
+    pub fn all() -> [StartDitherMode; 3] {
+        [
+            StartDitherMode::Off,
+            StartDitherMode::Subtle,
+            StartDitherMode::Full,
+        ]
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowControlsMode {
+    #[default]
+    System,
+    Browser,
+    Hidden,
+}
+
+impl WindowControlsMode {
+    pub fn title(self) -> &'static str {
+        match self {
+            WindowControlsMode::System => "System",
+            WindowControlsMode::Browser => "Browser",
+            WindowControlsMode::Hidden => "Hidden",
+        }
+    }
+
+    pub fn all() -> [WindowControlsMode; 3] {
+        [
+            WindowControlsMode::System,
+            WindowControlsMode::Browser,
+            WindowControlsMode::Hidden,
+        ]
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Prefs {
     pub appearance: Look,
     pub sidebar: bool,
-    /// Ctrl S folds the tab column to a thin strip. Kept across launches; a
-    /// page going full screen hides the column without changing this.
     #[serde(default)]
     pub column_folded: bool,
     pub side_width: f64,
-    /// The reference keeps the page clear of browser chrome until asked for
-    /// it. Ctrl+L still opens the command field, and the menu can reveal the
-    /// persistent controls again.
-    #[serde(default)]
+    #[serde(default = "default_top_tab_width")]
+    pub top_tab_width: i32,
+    #[serde(default = "default_true")]
     pub show_toolbar: bool,
+    #[serde(default = "default_true")]
+    pub show_nav_buttons: bool,
+    #[serde(default = "default_true")]
+    pub show_back_button: bool,
+    #[serde(default = "default_true")]
+    pub show_forward_button: bool,
+    #[serde(default = "default_true")]
+    pub show_reload_button: bool,
+    #[serde(default = "default_true")]
+    pub show_home_button: bool,
+    #[serde(default)]
+    pub show_reader_button: bool,
+    #[serde(default)]
+    pub show_bookmark_button: bool,
+    #[serde(default = "crate::customize::ToolbarAction::default_order")]
+    pub toolbar_order: Vec<crate::customize::ToolbarAction>,
+    #[serde(default = "default_true")]
+    pub show_start_shortcuts: bool,
+    #[serde(default = "default_start_shortcuts_count")]
+    pub start_shortcuts_count: usize,
+    #[serde(default)]
+    pub start_bookmarks_mode: StartBookmarksMode,
+    #[serde(default)]
+    pub start_dither: StartDitherMode,
+    #[serde(default)]
+    pub window_controls: WindowControlsMode,
     pub roomy_tabs: bool,
     pub shield: bool,
     pub curtain: bool,
@@ -86,9 +200,11 @@ pub struct Prefs {
     /// starting set, the same as a fresh profile. See src/keyword.rs.
     #[serde(default = "crate::keyword::defaults")]
     pub keywords: Vec<crate::keyword::Keyword>,
-    /// Suggestions from the search engine under the address field. Off by
-    /// default: what you type is sent to the engine as you type. See src/suggest.rs.
-    #[serde(default)]
+    /// Suggestions from the search engine in the address field and start page.
+    /// Enabled by default; what you type as a search query is sent to the chosen
+    /// engine as you type (never in private tabs, or for URLs, emails, paths,
+    /// secrets, or keyword shortcuts). See src/suggest.rs.
+    #[serde(default = "default_engine_suggestions")]
     pub engine_suggestions: bool,
     /// Set once the welcome card has been shown and started with, so it is
     /// not shown on every launch. See src/welcome.rs.
@@ -105,18 +221,48 @@ pub struct Prefs {
     pub skip_restore: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_top_tab_width() -> i32 {
+    DEFAULT_TOP_TAB_WIDTH
+}
+
+fn default_start_shortcuts_count() -> usize {
+    DEFAULT_START_SHORTCUTS_COUNT
+}
+
 fn default_window() -> (i32, i32) {
     (1180, 760)
+}
+
+fn default_engine_suggestions() -> bool {
+    true
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             appearance: Look::System,
-            sidebar: true,
+            sidebar: false,
             column_folded: false,
-            side_width: 240.0,
-            show_toolbar: false,
+            side_width: DEFAULT_SIDE_WIDTH,
+            top_tab_width: DEFAULT_TOP_TAB_WIDTH,
+            show_toolbar: true,
+            show_nav_buttons: true,
+            show_back_button: true,
+            show_forward_button: true,
+            show_reload_button: true,
+            show_home_button: false,
+            show_reader_button: false,
+            show_bookmark_button: false,
+            toolbar_order: crate::customize::ToolbarAction::default_order(),
+            show_start_shortcuts: true,
+            start_shortcuts_count: DEFAULT_START_SHORTCUTS_COUNT,
+            start_bookmarks_mode: StartBookmarksMode::IconsAndNames,
+            start_dither: StartDitherMode::Full,
+            window_controls: WindowControlsMode::System,
             roomy_tabs: false,
             shield: true,
             curtain: true,
@@ -127,14 +273,14 @@ impl Default for Prefs {
             // playing sound is never put to sleep, so music and calls are safe.
             sleep_minutes: 10,
             restore_session: true,
-            search_engine: "DuckDuckGo".into(),
+            search_engine: "Startpage".into(),
             show_bookmarks_bar: false,
             window_size: default_window(),
             window_maximised: false,
             darken_pages: false,
             low_memory: false,
             keywords: crate::keyword::defaults(),
-            engine_suggestions: false,
+            engine_suggestions: true,
             welcomed: false,
             desktop_dark: false,
             skip_restore: false,
@@ -143,18 +289,57 @@ impl Default for Prefs {
 }
 
 impl Prefs {
+    pub fn reset_toolbar_layout(&mut self) {
+        crate::customize::LayoutPreset::Minimal.apply(self);
+    }
+
+    pub fn from_json_str(raw: &str) -> Option<Prefs> {
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let has_back = value.get("show_back_button").is_some();
+        let has_forward = value.get("show_forward_button").is_some();
+        let has_nav = value.get("show_nav_buttons").is_some();
+        let mut prefs: Prefs = serde_json::from_value(value).ok()?;
+        if !has_back {
+            prefs.show_back_button = if has_nav { prefs.show_nav_buttons } else { true };
+        }
+        if !has_forward {
+            prefs.show_forward_button = if has_nav { prefs.show_nav_buttons } else { true };
+        }
+        Some(prefs.sanitised())
+    }
+
     pub fn path() -> PathBuf {
         files::path_in(&files::config_dir(), "prefs.json")
     }
 
     pub fn load() -> Prefs {
-        files::read_json(&Prefs::path()).map(|p: Prefs| p.sanitised()).unwrap_or_default()
+        use std::io::Read;
+        let Ok(file) = std::fs::File::open(Prefs::path()) else {
+            return Prefs::default();
+        };
+        let mut raw = String::new();
+        if file.take(2 * 1024 * 1024 + 1).read_to_string(&mut raw).is_err() {
+            return Prefs::default();
+        }
+        if raw.len() > 2 * 1024 * 1024 {
+            return Prefs::default();
+        }
+        Prefs::from_json_str(&raw).unwrap_or_default()
     }
 
     pub fn sanitised(mut self) -> Prefs {
-        self.side_width = self.side_width.clamp(176.0, 440.0);
+        if !self.side_width.is_finite() {
+            self.side_width = DEFAULT_SIDE_WIDTH;
+        }
+        self.side_width = self.side_width.clamp(MIN_SIDE_WIDTH, MAX_SIDE_WIDTH);
+        self.top_tab_width = self.top_tab_width.clamp(MIN_TOP_TAB_WIDTH, MAX_TOP_TAB_WIDTH);
+        self.start_shortcuts_count = self
+            .start_shortcuts_count
+            .clamp(MIN_START_SHORTCUTS_COUNT, MAX_START_SHORTCUTS_COUNT);
+        self.toolbar_order = crate::customize::normalize_toolbar_order(&self.toolbar_order);
+        self.show_nav_buttons = self.show_back_button || self.show_forward_button;
         if self.search_engine.trim().is_empty() {
-            self.search_engine = "DuckDuckGo".into();
+            self.search_engine = "Startpage".into();
         }
         self
     }
@@ -175,17 +360,18 @@ impl Prefs {
     pub fn search_url(&self, query: &str) -> String {
         let q = urlencode(query);
         let base = match self.search_engine.as_str() {
+            "Ecosia" => "https://www.ecosia.org/search?q=",
+            "DuckDuckGo" => "https://duckduckgo.com/?q=",
             "Google" => "https://www.google.com/search?q=",
             "Bing" => "https://www.bing.com/search?q=",
             "Brave" => "https://search.brave.com/search?q=",
-            "Startpage" => "https://www.startpage.com/sp/search?query=",
-            _ => "https://duckduckgo.com/?q=",
+            _ => "https://www.startpage.com/sp/search?query=",
         };
         format!("{base}{q}")
     }
 
-    pub fn engines() -> [&'static str; 5] {
-        ["DuckDuckGo", "Google", "Bing", "Brave", "Startpage"]
+    pub fn engines() -> [&'static str; 6] {
+        ["Startpage", "Ecosia", "DuckDuckGo", "Google", "Bing", "Brave"]
     }
 }
 
@@ -212,6 +398,14 @@ pub struct TabRecord {
     /// false so session files written before this field still load.
     #[serde(default)]
     pub active: bool,
+    /// Which Space this tab belongs to. Defaults to `"default"` so session
+    /// files written before Spaces existed migrate seamlessly into Default.
+    #[serde(default = "crate::spaces::default_space_id")]
+    pub space_id: String,
+    /// True for the last active tab within its space, so switching spaces
+    /// after a restart returns to the tab you were last viewing there.
+    #[serde(default)]
+    pub space_active: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -250,6 +444,20 @@ impl Records {
     /// safe to call from a worker: an older snapshot never replaces a newer one.
     pub fn save_session_at(tabs: &[TabRecord], snapshot: u64) -> bool {
         files::write_json_ordered(&Self::file("session.json"), &tabs.to_vec(), snapshot)
+    }
+
+    pub fn load_spaces() -> crate::spaces::SpaceStore {
+        files::read_json::<crate::spaces::SpaceStore>(&Self::file("spaces.json"))
+            .map(|s| s.sanitised())
+            .unwrap_or_default()
+    }
+
+    pub fn save_spaces(spaces: &crate::spaces::SpaceStore) -> bool {
+        Self::save_spaces_at(spaces, files::snapshot_number())
+    }
+
+    pub fn save_spaces_at(spaces: &crate::spaces::SpaceStore, snapshot: u64) -> bool {
+        files::write_json_ordered(&Self::file("spaces.json"), spaces, snapshot)
     }
 
     pub fn load_history() -> Vec<HistoryEntry> {
@@ -441,14 +649,47 @@ mod tests {
     #[test]
     fn words_become_a_search() {
         let prefs = Prefs::default();
-        assert!(prefs.search_url("two words").starts_with("https://duckduckgo.com/?q=two+words"));
+        assert_eq!(prefs.search_engine, "Startpage");
+        assert!(prefs.engine_suggestions);
+        assert_eq!(
+            prefs.search_url("two words"),
+            "https://www.startpage.com/sp/search?query=two+words"
+        );
     }
 
     #[test]
     fn another_engine_is_another_address() {
         let mut prefs = Prefs::default();
-        prefs.search_engine = "Google".into();
-        assert_eq!(prefs.search_url("rust gtk"), "https://www.google.com/search?q=rust+gtk");
+        for (engine, expected) in [
+            ("Startpage", "https://www.startpage.com/sp/search?query=rust+%26+gtk"),
+            ("Ecosia", "https://www.ecosia.org/search?q=rust+%26+gtk"),
+            ("DuckDuckGo", "https://duckduckgo.com/?q=rust+%26+gtk"),
+            ("Google", "https://www.google.com/search?q=rust+%26+gtk"),
+            ("Bing", "https://www.bing.com/search?q=rust+%26+gtk"),
+            ("Brave", "https://search.brave.com/search?q=rust+%26+gtk"),
+        ] {
+            prefs.search_engine = engine.into();
+            assert_eq!(prefs.search_url("rust & gtk"), expected, "engine={engine}");
+        }
+    }
+
+    #[test]
+    fn existing_saved_engine_and_suggestion_opt_out_are_preserved() {
+        let dir = scratch("preserve-optout");
+        let path = dir.join("prefs.json");
+        std::fs::write(
+            &path,
+            r#"{"search_engine":"DuckDuckGo","engine_suggestions":false}"#,
+        )
+        .expect("write existing prefs");
+
+        let back: Prefs = files::read_json::<Prefs>(&path)
+            .expect("saved prefs parse")
+            .sanitised();
+        assert_eq!(back.search_engine, "DuckDuckGo");
+        assert!(!back.engine_suggestions);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -541,10 +782,32 @@ mod tests {
 
         let prefs = Prefs {
             show_toolbar: false,
+            show_nav_buttons: false,
+            show_back_button: false,
+            show_forward_button: false,
+            show_reload_button: false,
+            show_home_button: false,
+            show_reader_button: true,
+            show_bookmark_button: true,
+            toolbar_order: vec![
+                crate::customize::ToolbarAction::Address,
+                crate::customize::ToolbarAction::Back,
+                crate::customize::ToolbarAction::Forward,
+                crate::customize::ToolbarAction::Reload,
+                crate::customize::ToolbarAction::Home,
+                crate::customize::ToolbarAction::Reader,
+                crate::customize::ToolbarAction::Bookmark,
+            ],
+            show_start_shortcuts: false,
+            start_shortcuts_count: 6,
+            start_bookmarks_mode: StartBookmarksMode::IconsOnly,
+            start_dither: StartDitherMode::Subtle,
+            window_controls: WindowControlsMode::Hidden,
             appearance: Look::Dark,
             sidebar: false,
             column_folded: true,
             side_width: 301.0,
+            top_tab_width: 192,
             roomy_tabs: true,
             shield: false,
             curtain: false,
@@ -569,6 +832,17 @@ mod tests {
         files::write_json(&path, &prefs);
         let back: Prefs = files::read_json(&path).expect("the file this test just wrote parses");
 
+        assert!(!back.show_toolbar);
+        assert!(!back.show_nav_buttons && !back.show_back_button && !back.show_forward_button);
+        assert!(!back.show_reload_button && !back.show_home_button);
+        assert!(back.show_reader_button && back.show_bookmark_button);
+        assert_eq!(back.toolbar_order[0], crate::customize::ToolbarAction::Address);
+        assert!(!back.show_start_shortcuts);
+        assert_eq!(back.start_shortcuts_count, 6);
+        assert_eq!(back.start_bookmarks_mode, StartBookmarksMode::IconsOnly);
+        assert_eq!(back.start_dither, StartDitherMode::Subtle);
+        assert_eq!(back.top_tab_width, 192);
+        assert_eq!(back.window_controls, WindowControlsMode::Hidden);
         assert_eq!(back.window_size, (1280, 720));
         assert!(back.window_maximised);
         assert!(back.low_memory);
@@ -634,6 +908,144 @@ mod tests {
         assert!(files::read_json::<Prefs>(&path).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_session_without_space_fields_migrates_into_default() {
+        let legacy = r#"[
+            {"url":"https://a.example/","title":"A","pinned":true,"active":false},
+            {"url":"https://b.example/","title":"B","pinned":false,"active":true}
+        ]"#;
+        let records: Vec<TabRecord> = serde_json::from_str(legacy).expect("legacy session parses");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].space_id, crate::spaces::DEFAULT_SPACE_ID);
+        assert_eq!(records[1].space_id, crate::spaces::DEFAULT_SPACE_ID);
+        assert!(!records[0].space_active);
+        assert!(records[1].active);
+    }
+
+    #[test]
+    fn spaces_store_round_trips_through_disk() {
+        let dir = scratch("spaces-roundtrip");
+        let path = dir.join("spaces.json");
+        let mut store = crate::spaces::SpaceStore::default();
+        let work = store.create("Work").unwrap();
+        assert!(store.set_active(&work.id));
+        files::write_json(&path, &store);
+
+        let loaded = files::read_json::<crate::spaces::SpaceStore>(&path)
+            .expect("spaces parse")
+            .sanitised();
+        assert_eq!(loaded.spaces.len(), 2);
+        assert_eq!(loaded.active_space, work.id);
+        assert_eq!(loaded.spaces[1].name, "Work");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toolbar_minimal_defaults_legacy_home_and_reset() {
+        let fresh = Prefs::default();
+        assert!(fresh.show_toolbar);
+        assert!(fresh.show_nav_buttons);
+        assert!(fresh.show_reload_button);
+        assert!(!fresh.show_home_button);
+        assert!(!fresh.show_reader_button);
+        assert!(!fresh.show_bookmark_button);
+
+        let legacy: Prefs = serde_json::from_str(r#"{"appearance":"dark"}"#).expect("legacy parses");
+        assert!(legacy.show_home_button);
+        assert!(!legacy.show_reader_button);
+        assert!(!legacy.show_bookmark_button);
+
+        let explicit_false: Prefs = serde_json::from_str(
+            r#"{"show_home_button":false,"show_reader_button":true,"show_bookmark_button":true}"#,
+        )
+        .expect("explicit false parses");
+        assert!(!explicit_false.show_home_button);
+        assert!(explicit_false.show_reader_button);
+        assert!(explicit_false.show_bookmark_button);
+
+        let explicit_true: Prefs = serde_json::from_str(r#"{"show_home_button":true}"#)
+            .expect("explicit true parses");
+        assert!(explicit_true.show_home_button);
+
+        let mut customized = Prefs {
+            show_toolbar: false,
+            show_nav_buttons: false,
+            show_back_button: false,
+            show_forward_button: false,
+            show_reload_button: false,
+            show_home_button: true,
+            show_reader_button: true,
+            show_bookmark_button: true,
+            show_bookmarks_bar: true,
+            sidebar: true,
+            column_folded: true,
+            top_tab_width: 220,
+            side_width: 320.0,
+            roomy_tabs: true,
+            show_start_shortcuts: false,
+            start_shortcuts_count: 4,
+            start_dither: StartDitherMode::Off,
+            ..Prefs::default()
+        };
+        customized.reset_toolbar_layout();
+        assert!(customized.show_toolbar);
+        assert!(customized.show_nav_buttons);
+        assert!(customized.show_back_button);
+        assert!(customized.show_forward_button);
+        assert!(customized.show_reload_button);
+        assert!(!customized.show_home_button);
+        assert!(!customized.show_reader_button);
+        assert!(!customized.show_bookmark_button);
+        assert!(!customized.show_bookmarks_bar);
+        assert!(!customized.sidebar);
+        assert!(!customized.column_folded);
+        assert!(!customized.roomy_tabs);
+        assert_eq!(customized.top_tab_width, DEFAULT_TOP_TAB_WIDTH);
+        assert_eq!(customized.side_width, DEFAULT_SIDE_WIDTH);
+        assert!(customized.show_start_shortcuts);
+        assert_eq!(customized.start_shortcuts_count, DEFAULT_START_SHORTCUTS_COUNT);
+        assert_eq!(customized.start_dither, StartDitherMode::Full);
+        assert_eq!(customized.toolbar_order, crate::customize::ToolbarAction::default_order());
+    }
+
+    #[test]
+    fn legacy_nav_group_migrates_to_independent_back_and_forward() {
+        let legacy_off = Prefs::from_json_str(r#"{"show_nav_buttons":false}"#).expect("parses");
+        assert!(!legacy_off.show_back_button);
+        assert!(!legacy_off.show_forward_button);
+        assert!(!legacy_off.show_nav_buttons);
+
+        let legacy_default = Prefs::from_json_str(r#"{"appearance":"dark"}"#).expect("parses");
+        assert!(legacy_default.show_back_button);
+        assert!(legacy_default.show_forward_button);
+        assert!(legacy_default.show_nav_buttons);
+        assert!(legacy_default.show_home_button);
+        assert!(legacy_default.show_start_shortcuts);
+        assert_eq!(legacy_default.start_shortcuts_count, DEFAULT_START_SHORTCUTS_COUNT);
+        assert_eq!(legacy_default.start_dither, StartDitherMode::Full);
+        assert_eq!(legacy_default.top_tab_width, DEFAULT_TOP_TAB_WIDTH);
+
+        let split = Prefs::from_json_str(r#"{"show_nav_buttons":false,"show_back_button":true,"show_forward_button":false}"#).expect("parses");
+        assert!(split.show_back_button);
+        assert!(!split.show_forward_button);
+        assert!(split.show_nav_buttons);
+    }
+
+    #[test]
+    fn sanitised_clamps_new_layout_bounds_and_normalizes_toolbar_order() {
+        let loaded = Prefs::from_json_str(
+            r#"{"side_width":999.0,"top_tab_width":20,"start_shortcuts_count":100,"toolbar_order":["home","home"]}"#,
+        )
+        .expect("parses");
+        assert_eq!(loaded.side_width, MAX_SIDE_WIDTH);
+        assert_eq!(loaded.top_tab_width, MIN_TOP_TAB_WIDTH);
+        assert_eq!(loaded.start_shortcuts_count, MAX_START_SHORTCUTS_COUNT);
+        assert_eq!(loaded.toolbar_order.len(), crate::customize::ToolbarAction::CANONICAL.len());
+        assert_eq!(loaded.toolbar_order[0], crate::customize::ToolbarAction::Home);
+        assert!(loaded.toolbar_order.contains(&crate::customize::ToolbarAction::Address));
     }
 }
 

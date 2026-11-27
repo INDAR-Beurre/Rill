@@ -4,76 +4,81 @@
 // Nothing here knows what a tab is; it makes widgets, and the browser keeps
 // them true.
 use crate::icons::{self, Icon};
-use crate::palette::Palette;
+use crate::palette::{Palette, Rgb};
 use gtk::prelude::*;
 
 pub struct Ui {
     pub window: gtk::Window,
     pub overlay: gtk::Overlay,
     pub shell: gtk::Box,
+    /// Full-width top tab strip (with pinned tabs, reorderable tabs, `+` new tab,
+    /// single browser menu button, and right-aligned Linux window controls).
+    pub topbar: gtk::EventBox,
+    pub top_lights_left: gtk::Box,
+    pub top_lights_right: gtk::Box,
+    pub top_more_slot: gtk::Box,
+    pub top_space_btn: gtk::Button,
+    pub top_space_label: gtk::Label,
+    pub top_pins_holder: gtk::Box,
+    pub top_pins: gtk::Box,
+    pub top_tabs_scroll: gtk::ScrolledWindow,
+    pub top_tabs: gtk::Box,
+    pub top_drag: gtk::EventBox,
     pub paned: gtk::Paned,
-    /// The column: the tab rows and their foot, with the hairline on its
-    /// right edge.
+    /// Exclusive vertical tab sidebar (toggled with Ctrl S; hides topbar when active).
     pub side: gtk::Box,
-    /// What is left of the column when it is folded (Ctrl S): a thin strip,
-    /// clicked to unfold. `body` holds everything else in the column.
     pub strip: gtk::EventBox,
     pub body: gtk::Box,
-    /// The whole band at the top of the column, which is the window's handle:
-    /// a titlebar that is not drawn still has to be somewhere to grab.
     pub top: gtk::EventBox,
+    pub side_lights_left: gtk::Box,
+    pub side_lights_right: gtk::Box,
+    pub side_more_slot: gtk::Box,
+    pub side_space_btn: gtk::Button,
+    pub side_space_label: gtk::Label,
+    pub side_spaces_footer: gtk::Box,
+    pub side_spaces: gtk::Box,
+    pub side_tabs_heading: gtk::Label,
     pub toolbar: gtk::EventBox,
-    pub fold: gtk::Button,
+    pub tools: gtk::Box,
+    pub location: gtk::Box,
+    pub viewport_frame: gtk::Box,
+    pub viewport_corners: [gtk::DrawingArea; 4],
+    pub viewport_corner_colors: std::rc::Rc<std::cell::Cell<(Rgb, Rgb)>>,
     pub side_fold: gtk::Button,
+    pub side_newtab: gtk::Button,
     pub address: gtk::Button,
     pub address_label: gtk::Label,
     /// The path after the trusted origin chip. Kept as a separate, quiet
     /// label so a path cannot be mistaken for the site's authority.
     pub address_path: gtk::Label,
-    pub address_hint: gtk::Label,
     pub site_info: gtk::Button,
     pub reader: gtk::Button,
     pub bookmark: gtk::Button,
     pub more: gtk::Button,
     pub newtab: gtk::Button,
-    pub private_tab: gtk::Button,
-    pub library: gtk::Button,
-    pub history: gtk::Button,
-    pub downloads: gtk::Button,
     pub tab_count: gtk::Label,
     pub start: crate::startpage::StartPage,
     pub light_red: gtk::EventBox,
     pub light_amber: gtk::EventBox,
     pub light_green: gtk::EventBox,
-    /// Quiet top-right window controls shown only when the sidebar is folded
-    /// and the optional toolbar is hidden, so minimise/maximise/close stay
-    /// reachable in every non-fullscreen shell state.
-    pub folded_controls: gtk::Box,
-    pub folded_red: gtk::EventBox,
-    pub folded_amber: gtk::EventBox,
-    pub folded_green: gtk::EventBox,
     pub back: gtk::Button,
     pub forward: gtk::Button,
     pub reload: gtk::Button,
+    pub home: gtk::Button,
     pub pins: gtk::Grid,
     pub pins_holder: gtk::Box,
     pub rows: gtk::Box,
-    /// The scrolled window the rows live in, so a tab switch can bring the row
-    /// it switched to into view. Without it, Ctrl Tab past the bottom of the
-    /// list changes the page and leaves the highlight somewhere off-screen.
     pub rows_scroll: gtk::ScrolledWindow,
-    pub menu: gtk::Button,
     pub stack: gtk::Stack,
     pub progress: gtk::DrawingArea,
     pub progress_frac: std::rc::Rc<std::cell::Cell<f64>>,
-    /// The row of kept pages under the top band. A real browser keeps them one
-    /// click away; this one does too, and the row is only visible when there is
-    /// something in it or when it was asked for.
     pub bmarkbar: gtk::EventBox,
     pub bmarks: gtk::Box,
-    /// The error page's wrapper. A Box has no window of its own, so a press on
-    /// the apology went to whatever was behind it; this EventBox is the widget
-    /// that can receive the click and is the child the stack holds as "error".
+    pub bmark_search_box: gtk::Box,
+    pub bmark_search: gtk::Entry,
+    pub bmark_layer: crate::layer::Layer,
+    pub bmark_card: gtk::Box,
+    pub bmark_suggest: gtk::Box,
     pub error_holder: gtk::EventBox,
     pub errorpage: gtk::Box,
     pub error_glyph: gtk::EventBox,
@@ -136,6 +141,42 @@ pub struct ColumnPlan {
     pub body: bool,
 }
 
+/// Exclusive visibility plan for the two tab chrome layouts.
+/// Outside fullscreen, topbar and vertical sidebar are strictly mutually
+/// exclusive (never both visible, never both hidden). In fullscreen, both hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabLayoutPlan {
+    pub show_topbar: bool,
+    pub show_sidebar: bool,
+}
+
+pub fn tab_layout_plan(sidebar: bool, column_folded: bool, fullscreen: bool) -> TabLayoutPlan {
+    if fullscreen {
+        return TabLayoutPlan {
+            show_topbar: false,
+            show_sidebar: false,
+        };
+    }
+    let vertical = sidebar && !column_folded;
+    TabLayoutPlan {
+        show_topbar: !vertical,
+        show_sidebar: vertical,
+    }
+}
+
+/// Build an icon `DrawingArea` whose native GDK window passes pointer events
+/// through to its enclosing `GtkButton`. Prevents post-realize icon swaps from
+/// stacking above `GtkButton`'s input-only event window and eating real clicks.
+pub fn passthrough_icon(kind: Icon, size: i32, color: Rgb) -> gtk::DrawingArea {
+    let area = icons::area(kind, size, color);
+    area.connect_realize(|widget| {
+        if let Some(win) = widget.window() {
+            win.set_pass_through(true);
+        }
+    });
+    area
+}
+
 pub fn column_plan(folded: bool, page_full: bool, sidebar: bool, side_width: i32) -> ColumnPlan {
     let width = match (sidebar, folded) {
         (false, _) => 0,
@@ -145,17 +186,148 @@ pub fn column_plan(folded: bool, page_full: bool, sidebar: bool, side_width: i32
     ColumnPlan {
         side_shown: !page_full,
         width,
-        paned_at: if folded { STRIP_WIDTH } else { side_width },
+        paned_at: width,
         strip: folded && sidebar,
-        body: !folded,
+        body: !folded && sidebar,
     }
 }
 
 pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs) -> Ui {
     let overlay = gtk::Overlay::new();
 
-    // The column and the page, with the column's edge between them: a paned
-    // window keeps the width the column was given, and lets it be dragged.
+    let layout_plan = tab_layout_plan(prefs.sidebar, prefs.column_folded, false);
+
+    // ---- Top tab bar (38px, full-width, Linux-native CSD header strip) ----
+    let topbar = gtk::EventBox::new();
+    class(&topbar, "topbar");
+    topbar.set_size_request(-1, 38);
+    topbar.set_no_show_all(true);
+    topbar.set_visible(layout_plan.show_topbar);
+    topbar.add_events(
+        gtk::gdk::EventMask::BUTTON_PRESS_MASK
+            | gtk::gdk::EventMask::ENTER_NOTIFY_MASK
+            | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK,
+    );
+    let top_row = widget_box(gtk::Orientation::Horizontal, 4);
+    top_row.set_margin_start(8);
+    top_row.set_margin_end(8);
+    top_row.set_margin_top(4);
+    top_row.set_margin_bottom(4);
+    topbar.add(&top_row);
+
+    // Optional left-side browser window controls (populated only when CSD is
+    // active and gtk-decoration-layout places controls on the left).
+    let top_lights_left = widget_box(gtk::Orientation::Horizontal, 2);
+    top_lights_left.set_valign(gtk::Align::Center);
+    top_lights_left.set_margin_end(4);
+    top_lights_left.set_no_show_all(true);
+    top_lights_left.hide();
+    pack(&top_row, &top_lights_left, false);
+
+    // Space switcher pill in top bar (hidden while only Default space exists).
+    let top_space_btn = gtk::Button::new();
+    class(&top_space_btn, "space-pill");
+    class(&top_space_btn, "top-space-btn");
+    top_space_btn.set_relief(gtk::ReliefStyle::None);
+    top_space_btn.set_valign(gtk::Align::Center);
+    top_space_btn.set_can_focus(true);
+    top_space_btn.set_focus_on_click(false);
+    let top_space_inner = widget_box(gtk::Orientation::Horizontal, 4);
+    let top_space_label = gtk::Label::new(Some(crate::spaces::DEFAULT_SPACE_NAME));
+    class(&top_space_label, "space-pill-label");
+    top_space_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    top_space_label.set_max_width_chars(14);
+    pack(&top_space_inner, &top_space_label, false);
+    let top_space_arrow = passthrough_icon(Icon::Down, 10, palette.muted);
+    top_space_arrow.set_valign(gtk::Align::Center);
+    pack(&top_space_inner, &top_space_arrow, false);
+    top_space_btn.add(&top_space_inner);
+    label_a11y(&top_space_btn, "Switch space", gtk::atk::Role::PushButton);
+    top_space_btn.set_no_show_all(true);
+    top_space_btn.hide();
+    pack(&top_row, &top_space_btn, false);
+
+    // Pinned top tabs + hairline separator (hidden when empty).
+    let top_pins_holder = widget_box(gtk::Orientation::Horizontal, 4);
+    top_pins_holder.set_valign(gtk::Align::Center);
+    let top_pins = widget_box(gtk::Orientation::Horizontal, 4);
+    top_pins.set_valign(gtk::Align::Center);
+    pack(&top_pins_holder, &top_pins, false);
+    let top_pin_sep = gtk::Separator::new(gtk::Orientation::Vertical);
+    class(&top_pin_sep, "topbar-sep");
+    top_pin_sep.set_margin_start(2);
+    top_pin_sep.set_margin_end(2);
+    top_pin_sep.set_margin_top(6);
+    top_pin_sep.set_margin_bottom(6);
+    pack(&top_pins_holder, &top_pin_sep, false);
+    top_pins_holder.set_no_show_all(true);
+    top_pins_holder.hide();
+    pack(&top_row, &top_pins_holder, false);
+
+    // Horizontally scrollable top tab strip. Propagating natural width with a
+    // 0px minimum keeps `+` directly beside the last tab when tabs fit, while
+    // shrinking cleanly to a scrollable strip when tabs overflow so `+` stays
+    // pinned and visible at every window width.
+    let top_tabs_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    class(&top_tabs_scroll, "toptabs-scroll");
+    top_tabs_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    top_tabs_scroll.set_shadow_type(gtk::ShadowType::None);
+    top_tabs_scroll.set_propagate_natural_width(true);
+    top_tabs_scroll.set_propagate_natural_height(false);
+    top_tabs_scroll.set_min_content_width(0);
+    top_tabs_scroll.set_hexpand(false);
+    top_tabs_scroll.set_valign(gtk::Align::Center);
+    top_tabs_scroll.set_overlay_scrolling(true);
+
+    let top_tabs = widget_box(gtk::Orientation::Horizontal, 4);
+    class(&top_tabs, "toptabs");
+    top_tabs.set_hexpand(false);
+    top_tabs.set_halign(gtk::Align::Start);
+    top_tabs.set_valign(gtk::Align::Center);
+    if let Some(access) = top_tabs.accessible() {
+        gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTabList);
+        gtk::atk::prelude::AtkObjectExt::set_name(&access, "Open tabs");
+    }
+    top_tabs_scroll.add(&top_tabs);
+    pack(&top_row, &top_tabs_scroll, false);
+
+    let newtab = icons::button(Icon::Plus, 14, palette.muted, "top-newtab");
+    newtab.set_valign(gtk::Align::Center);
+    newtab.set_can_focus(true);
+    newtab.set_focus_on_click(false);
+    label_a11y(&newtab, "New tab (Ctrl T)", gtk::atk::Role::PushButton);
+    pack(&top_row, &newtab, false);
+
+    let top_drag = gtk::EventBox::new();
+    top_drag.set_visible_window(false);
+    top_drag.set_hexpand(true);
+    top_drag.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+    pack(&top_row, &top_drag, true);
+
+    // Right side of top bar: ONE compact browser menu button (reparented into
+    // sidebar header in vertical-tab mode) + optional right-aligned Linux window controls.
+    let top_more_slot = widget_box(gtk::Orientation::Horizontal, 0);
+    top_more_slot.set_valign(gtk::Align::Center);
+    let more = icons::button(Icon::Menu, 14, palette.muted, "chrome-tool");
+    more.set_valign(gtk::Align::Center);
+    more.set_can_focus(true);
+    more.set_focus_on_click(false);
+    label_a11y(&more, "Browser menu", gtk::atk::Role::PushButton);
+    pack(&top_more_slot, &more, false);
+    pack(&top_row, &top_more_slot, false);
+
+    let top_lights_right = widget_box(gtk::Orientation::Horizontal, 2);
+    top_lights_right.set_valign(gtk::Align::Center);
+    top_lights_right.set_margin_start(4);
+    top_lights_right.set_no_show_all(true);
+    let (light_red, light_amber, light_green) = window_controls(palette);
+    pack(&top_lights_right, &light_amber, false);
+    pack(&top_lights_right, &light_green, false);
+    pack(&top_lights_right, &light_red, false);
+    top_lights_right.hide();
+    pack(&top_row, &top_lights_right, false);
+
+    // ---- Optional vertical sidebar (hidden by default; Ctrl S toggles) ----
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     crate::ui::class(&paned, "shell");
     paned.set_wide_handle(false);
@@ -165,8 +337,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let side_width = prefs.side_width.round() as i32;
     let side = widget_box(gtk::Orientation::Vertical, 0);
     crate::ui::class(&side, "side");
-    let plan = column_plan(prefs.column_folded, false, prefs.sidebar, side_width);
-    let min_width = if !prefs.sidebar {
+    let plan = column_plan(prefs.column_folded, false, layout_plan.show_sidebar, side_width);
+    let min_width = if !layout_plan.show_sidebar {
         0
     } else if prefs.column_folded {
         STRIP_WIDTH
@@ -174,6 +346,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         MIN_COL
     };
     side.set_size_request(min_width, -1);
+    side.set_no_show_all(true);
+    side.set_visible(layout_plan.show_sidebar);
     let strip = gtk::EventBox::new();
     crate::ui::class(&strip, "colstrip");
     strip.set_visible_window(true);
@@ -185,117 +359,134 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     strip.set_size_request(STRIP_WIDTH, -1);
     strip.set_no_show_all(true);
     strip.set_visible(plan.strip);
-    label_a11y(&strip, "Show tab column", gtk::atk::Role::PushButton);
-    strip.set_tooltip_text(Some("Show tab column"));
-    let strip_glyph = icons::area(Icon::Sidebar, 15, palette.muted);
+    label_a11y(&strip, "Show tab sidebar", gtk::atk::Role::PushButton);
+    let strip_glyph = icons::area(Icon::Sidebar, 14, palette.muted);
     strip_glyph.set_halign(gtk::Align::Center);
     strip_glyph.set_valign(gtk::Align::Start);
-    strip_glyph.set_margin_top(14);
+    strip_glyph.set_margin_top(12);
     strip.add(&strip_glyph);
     strip_glyph.show();
-    strip.show();
     pack(&side, &strip, true);
+
     let body = widget_box(gtk::Orientation::Vertical, 0);
-    // Opted out of show_all, so the window's show_all cannot unfold a column
-    // saved as folded. apply_column shows the body's own subtree when unfolded.
     body.set_no_show_all(true);
     body.set_visible(plan.body);
     pack(&side, &body, true);
 
     let top = gtk::EventBox::new();
     crate::ui::class(&top, "topband");
-    top.set_size_request(-1, 44);
-    top.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
-    let band = widget_box(gtk::Orientation::Horizontal, 10);
-    // Brand at the 24px text edge, the same edge as the section labels and
-    // the row content below it. At 20px it was the only item off that line.
-    band.set_margin_start(24);
-    band.set_margin_end(18);
-    band.set_margin_top(5);
-    band.set_margin_bottom(5);
-    top.add(&band);
-    let brand_mark = gtk::EventBox::new();
-    class(&brand_mark, "brand-mark");
-    brand_mark.set_size_request(30, 30);
-    brand_mark.set_valign(gtk::Align::Center);
-    let glyph = icons::area(Icon::Orbit, 20, palette.accent_ink());
-    glyph.set_halign(gtk::Align::Center);
-    glyph.set_valign(gtk::Align::Center);
-    brand_mark.add(&glyph);
-    pack(&band, &brand_mark, false);
-    let brand = gtk::Label::new(Some("search"));
-    class(&brand, "brand-word");
-    brand.set_xalign(0.0);
-    pack(&band, &brand, true);
-    // Window controls belong to the window, not to the optional browser
-    // toolbar. They stay visible in the 34px column band when the toolbar is
-    // hidden, so a browser with no chrome still has normal window affordances.
-    let lights = widget_box(gtk::Orientation::Horizontal, 2);
-    lights.set_valign(gtk::Align::Center);
-    lights.set_margin_end(10);
-    let (light_red, light_amber, light_green) = window_controls(palette);
-    pack(&lights, &light_amber, false);
-    pack(&lights, &light_green, false);
-    pack(&lights, &light_red, false);
-    pack(&band, &lights, false);
+    crate::ui::class(&top, "side-header");
+    top.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+    let top_stack = widget_box(gtk::Orientation::Vertical, 2);
+    top.add(&top_stack);
+
+    // Row 1: always-reachable chrome controls (window controls when CSD is
+    // active, Browser Menu reparented here in vertical mode, and Top Tabs toggle).
+    let side_chrome_row = widget_box(gtk::Orientation::Horizontal, 4);
+    side_chrome_row.set_margin_start(8);
+    side_chrome_row.set_margin_end(8);
+    side_chrome_row.set_margin_top(6);
+    side_chrome_row.set_margin_bottom(2);
+    let side_lights_left = widget_box(gtk::Orientation::Horizontal, 2);
+    side_lights_left.set_valign(gtk::Align::Center);
+    side_lights_left.set_no_show_all(true);
+    side_lights_left.hide();
+    pack(&side_chrome_row, &side_lights_left, false);
+
+    let side_more_slot = widget_box(gtk::Orientation::Horizontal, 0);
+    side_more_slot.set_valign(gtk::Align::Center);
+    pack(&side_chrome_row, &side_more_slot, false);
+
+    let side_fold = icons::button(Icon::Sidebar, 14, palette.muted, "sidebar-tool");
+    side_fold.set_valign(gtk::Align::Center);
+    side_fold.set_can_focus(true);
+    side_fold.set_focus_on_click(false);
+    label_a11y(&side_fold, "Switch to top tabs (Ctrl S)", gtk::atk::Role::PushButton);
+    pack(&side_chrome_row, &side_fold, false);
+
+    let side_spacer = widget_box(gtk::Orientation::Horizontal, 0);
+    side_spacer.set_hexpand(true);
+    pack(&side_chrome_row, &side_spacer, true);
+
+    let side_lights_right = widget_box(gtk::Orientation::Horizontal, 2);
+    side_lights_right.set_valign(gtk::Align::Center);
+    side_lights_right.set_no_show_all(true);
+    side_lights_right.hide();
+    pack(&side_chrome_row, &side_lights_right, false);
+    pack(&top_stack, &side_chrome_row, false);
+
+    // Row 2: active Space pill (when multiple spaces exist) or "Tabs" heading + count.
+    let band = widget_box(gtk::Orientation::Horizontal, 6);
+    band.set_margin_start(12);
+    band.set_margin_end(10);
+    band.set_margin_top(2);
+    band.set_margin_bottom(4);
+    let side_space_btn = gtk::Button::new();
+    class(&side_space_btn, "space-menu-button");
+    class(&side_space_btn, "side-space-btn");
+    side_space_btn.set_relief(gtk::ReliefStyle::None);
+    side_space_btn.set_valign(gtk::Align::Center);
+    side_space_btn.set_can_focus(true);
+    side_space_btn.set_focus_on_click(false);
+    let side_space_inner = widget_box(gtk::Orientation::Horizontal, 4);
+    let side_space_label = gtk::Label::new(Some(crate::spaces::DEFAULT_SPACE_NAME));
+    class(&side_space_label, "space-pill-label");
+    side_space_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    side_space_label.set_max_width_chars(16);
+    side_space_label.set_no_show_all(true);
+    side_space_label.hide();
+    pack(&side_space_inner, &side_space_label, false);
+    let side_space_arrow = passthrough_icon(Icon::Down, 10, palette.muted);
+    side_space_arrow.set_valign(gtk::Align::Center);
+    pack(&side_space_inner, &side_space_arrow, false);
+    side_space_btn.add(&side_space_inner);
+    label_a11y(&side_space_btn, "Switch space", gtk::atk::Role::PushButton);
+    side_space_btn.set_no_show_all(true);
+    side_space_btn.hide();
+
+    let side_tabs_heading = gtk::Label::new(Some("Tabs"));
+    class(&side_tabs_heading, "sidebar-section");
+    side_tabs_heading.set_xalign(0.0);
+    side_tabs_heading.set_no_show_all(true);
+    side_tabs_heading.show();
+    pack(&band, &side_tabs_heading, false);
+
+    let band_spacer = widget_box(gtk::Orientation::Horizontal, 0);
+    band_spacer.set_hexpand(true);
+    pack(&band, &band_spacer, true);
+
+    let tab_count = gtk::Label::new(Some("1"));
+    class(&tab_count, "sidebar-count");
+    pack(&band, &tab_count, false);
+    pack(&top_stack, &band, false);
+    band.set_no_show_all(true);
+    band.hide();
     pack(&body, &top, false);
 
-    // Pinned pages: squares that keep their place.
-    // One gutter for the whole column. Surfaces (pin tiles, row fills) start
-    // 12px from the edge. Text labels start 24px in, which lines them up with
-    // the row content (12px row margin plus the row's own 12px inset). Before
-    // this, pins used 16px, section labels 20px and rows 12px, so no two
-    // edges in the column lined up.
     let pins_holder = widget_box(gtk::Orientation::Vertical, 0);
-    pins_holder.set_margin_start(12);
-    pins_holder.set_margin_end(12);
-    pins_holder.set_margin_top(6);
-    pins_holder.set_margin_bottom(18);
-    // Sentence case, like the panel and settings headings. The 12px label
-    // already sets the section apart without being written in capitals.
-    let pin_heading = gtk::Label::new(Some("Pinned"));
-    class(&pin_heading, "sidebar-section");
-    pin_heading.set_xalign(0.0);
-    pin_heading.set_margin_start(12);
-    pin_heading.set_margin_bottom(8);
-    pack(&pins_holder, &pin_heading, false);
+    pins_holder.set_margin_start(8);
+    pins_holder.set_margin_end(8);
+    pins_holder.set_margin_top(2);
+    pins_holder.set_margin_bottom(6);
+    pins_holder.set_no_show_all(true);
     let pins = gtk::Grid::new();
+    class(&pins, "pin-rail");
     pins.set_column_spacing(6);
-    pins.set_row_spacing(4);
-    pins.set_column_homogeneous(true);
-    pins.set_halign(gtk::Align::Fill);
-    pins.set_hexpand(true);
+    pins.set_row_spacing(6);
+    pins.set_column_homogeneous(false);
+    pins.set_halign(gtk::Align::Start);
+    pins.set_hexpand(false);
     pack(&pins_holder, &pins, false);
-    pack(&body, &pins_holder, false);
-    // The divider is the quiet boundary between saved places and this
-    // session's open tabs.
     let pin_divider = gtk::Separator::new(gtk::Orientation::Horizontal);
     class(&pin_divider, "hairline");
-    pin_divider.set_margin_start(12);
-    pin_divider.set_margin_end(12);
-    pin_divider.set_margin_bottom(10);
-    pack(&body, &pin_divider, false);
+    pin_divider.set_margin_top(8);
+    pack(&pins_holder, &pin_divider, false);
+    pins_holder.hide();
+    pack(&body, &pins_holder, false);
 
-    let section = widget_box(gtk::Orientation::Horizontal, 6);
-    // Label at the 24px text edge, so it lines up with the row content below.
-    // The count stays 20px from the right edge, in line with the row's close
-    // button (12px row margin plus the 8px end inset).
-    section.set_margin_start(24);
-    section.set_margin_end(20);
-    section.set_margin_bottom(8);
-    let tabs_heading = gtk::Label::new(Some("Open tabs"));
-    class(&tabs_heading, "sidebar-section");
-    tabs_heading.set_xalign(0.0);
-    pack(&section, &tabs_heading, true);
-    let tab_count = gtk::Label::new(Some("01"));
-    class(&tab_count, "sidebar-count");
-    pack(&section, &tab_count, false);
-    pack(&body, &section, false);
-
-    // The rows.
-    let rows = widget_box(gtk::Orientation::Vertical, 0);
-    rows.set_margin_start(12);
-    rows.set_margin_end(12);
+    let rows = widget_box(gtk::Orientation::Vertical, 4);
+    rows.set_margin_start(8);
+    rows.set_margin_end(8);
     let rows_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     rows_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     rows_scroll.set_vexpand(true);
@@ -303,97 +494,139 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     rows_scroll.set_propagate_natural_width(false);
     rows_scroll.set_min_content_width(0);
     rows.set_size_request(0, -1);
-    // The New tab command belongs after the last row, not at the bottom of
-    // an empty column. A stack keeps it inside the scrolled area while the
-    // row list itself stays tab-only for render_rows.
     let rows_stack = widget_box(gtk::Orientation::Vertical, 0);
     pack(&rows_stack, &rows, false);
     rows_scroll.add(&rows_stack);
     pack(&body, &rows_scroll, true);
 
-    // New tab is a quiet command in the same column rhythm as the tab rows.
-    // It lives outside the rebuilt row list so render_rows can still compare
-    // the list exactly against the browser's tabs.
-    let create = widget_box(gtk::Orientation::Horizontal, 0);
-    let newtab = gtk::Button::new();
-    class(&newtab, "newtab-row");
-    newtab.set_hexpand(true);
-    let create_content = widget_box(gtk::Orientation::Horizontal, 9);
-    let create_icon = icons::area(Icon::Plus, 15, palette.muted);
+    let create = widget_box(gtk::Orientation::Horizontal, 4);
+    create.set_margin_start(8);
+    create.set_margin_end(8);
+    create.set_margin_top(4);
+    create.set_margin_bottom(8);
+    let side_newtab = gtk::Button::new();
+    class(&side_newtab, "newtab-row");
+    side_newtab.set_hexpand(true);
+    let create_content = widget_box(gtk::Orientation::Horizontal, 8);
+    let create_icon = icons::area(Icon::Plus, 14, palette.muted);
     create_icon.set_valign(gtk::Align::Center);
     pack(&create_content, &create_icon, false);
     let create_label = gtk::Label::new(Some("New tab"));
     class(&create_label, "newtab-label");
     create_label.set_xalign(0.0);
     pack(&create_content, &create_label, true);
-    newtab.add(&create_content);
-    label_a11y(&newtab, "New tab (Ctrl T)", gtk::atk::Role::PushButton);
-    let private_tab = icons::button(Icon::Mask, 17, palette.muted, "private-tab");
-    private_tab.set_can_focus(true);
-    label_a11y(&private_tab, "New private tab (Ctrl Shift N)", gtk::atk::Role::PushButton);
-    private_tab.set_no_show_all(true);
-    private_tab.hide();
-    pack(&create, &newtab, true);
-    pack(&create, &private_tab, false);
+    side_newtab.add(&create_content);
+    label_a11y(&side_newtab, "New tab (Ctrl T)", gtk::atk::Role::PushButton);
+    pack(&create, &side_newtab, true);
     pack(&rows_stack, &create, false);
 
-    let footer = widget_box(gtk::Orientation::Horizontal, 4);
-    class(&footer, "sidebar-footer");
-    footer.set_margin_start(12);
-    footer.set_margin_end(12);
-    footer.set_margin_bottom(14);
-    let library = icons::button(Icon::Book, 17, palette.muted, "sidebar-tool");
-    label_a11y(&library, "Library (Ctrl Shift B)", gtk::atk::Role::PushButton);
-    let history = icons::button(Icon::Clock, 17, palette.muted, "sidebar-tool");
-    label_a11y(&history, "History (Ctrl H)", gtk::atk::Role::PushButton);
-    let downloads = icons::button(Icon::Download, 17, palette.muted, "sidebar-tool");
-    label_a11y(&downloads, "Downloads (Ctrl J)", gtk::atk::Role::PushButton);
-    let menu = icons::button(Icon::Settings, 17, palette.muted, "sidebar-tool");
-    label_a11y(&menu, "Settings and more", gtk::atk::Role::PushButton);
-    library.set_can_focus(true);
-    history.set_can_focus(true);
-    downloads.set_can_focus(true);
-    menu.set_can_focus(true);
-    let side_fold = icons::button(Icon::Sidebar, 16, palette.muted, "sidebar-tool");
-    side_fold.set_can_focus(true);
-    label_a11y(&side_fold, "Hide tab column (Ctrl S)", gtk::atk::Role::PushButton);
-    pack(&footer, &library, false);
-    pack(&footer, &history, false);
-    pack(&footer, &downloads, false);
-    pack(&footer, &menu, false);
-    footer.pack_end(&side_fold, false, false, 0);
-    pack(&body, &footer, false);
+    let side_spaces_footer = widget_box(gtk::Orientation::Horizontal, 4);
+    class(&side_spaces_footer, "space-footer");
+    side_spaces_footer.set_margin_start(12);
+    side_spaces_footer.set_margin_end(12);
+    side_spaces_footer.set_margin_top(4);
+    side_spaces_footer.set_margin_bottom(12);
+    side_spaces_footer.set_no_show_all(true);
+    side_spaces_footer.hide();
+    let side_spaces = widget_box(gtk::Orientation::Horizontal, 2);
+    class(&side_spaces, "space-dots");
+    side_spaces.set_halign(gtk::Align::Center);
+    let spaces_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    spaces_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    spaces_scroll.set_propagate_natural_width(false);
+    spaces_scroll.set_min_content_width(0);
+    spaces_scroll.set_hexpand(true);
+    spaces_scroll.add(&side_spaces);
+    pack(&side_spaces_footer, &spaces_scroll, true);
+    pack(&side_spaces_footer, &side_space_btn, false);
+    pack(&body, &side_spaces_footer, false);
 
-    // The column is the paned's first child itself, with no wrapper around
-    // it. `.side` draws the hairline as its own right border, so the line is
-    // exactly as tall as the widget; wrapped, the 23px strip above the column
-    // was outside that border and the line began at y=24 instead of at the
-    // band's edge. Unwrapped it runs from the band to the window's bottom.
     paned.pack1(&side, false, false);
     paned.set_position(plan.paned_at);
 
-    // The pages you kept, in one row, above the page and below the column's
-    // top band. Hidden unless it has something to show.
+    // ---- Bookmarks bar (hidden unless populated/requested) ----
     let bmarkbar = gtk::EventBox::new();
     crate::ui::class(&bmarkbar, "bmarkbar");
     bmarkbar.set_visible_window(true);
     bmarkbar.set_halign(gtk::Align::Fill);
-    let bmarks = widget_box(gtk::Orientation::Horizontal, 2);
-    bmarks.set_margin_start(10);
-    bmarks.set_margin_end(10);
-    bmarks.set_margin_top(3);
-    bmarks.set_margin_bottom(3);
+    let bmark_row = widget_box(gtk::Orientation::Horizontal, 8);
+    bmark_row.set_margin_start(8);
+    bmark_row.set_margin_end(8);
+    bmark_row.set_margin_top(0);
+    bmark_row.set_margin_bottom(4);
+    let bmarks = widget_box(gtk::Orientation::Horizontal, 4);
+    bmarks.set_hexpand(true);
+    bmarks.set_halign(gtk::Align::Start);
     let bmarks_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     bmarks_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    bmarks_scroll.set_shadow_type(gtk::ShadowType::None);
     bmarks_scroll.set_propagate_natural_height(true);
+    bmarks_scroll.set_propagate_natural_width(false);
+    bmarks_scroll.set_min_content_width(0);
+    bmarks_scroll.set_hexpand(true);
     bmarks_scroll.add(&bmarks);
-    bmarkbar.add(&bmarks_scroll);
-    // Hidden by default, and hidden again by hide() rather than by
-    // no_show_all: a widget marked no_show_all is skipped by show_all, which
-    // is how the pins disappeared once.
+    pack(&bmark_row, &bmarks_scroll, true);
+
+    let bmark_search_box = widget_box(gtk::Orientation::Horizontal, 6);
+    class(&bmark_search_box, "bmark-search");
+    bmark_search_box.set_valign(gtk::Align::Center);
+    bmark_search_box.set_halign(gtk::Align::End);
+    bmark_search_box.set_hexpand(false);
+    bmark_search_box.set_size_request(210, 24);
+    let bmark_search_icon = icons::area(Icon::Search, 12, palette.muted);
+    bmark_search_icon.set_valign(gtk::Align::Center);
+    pack(&bmark_search_box, &bmark_search_icon, false);
+    let bmark_search = gtk::Entry::new();
+    class(&bmark_search, "bmark-search-entry");
+    bmark_search.set_has_frame(false);
+    bmark_search.set_width_chars(1);
+    bmark_search.set_hexpand(true);
+    bmark_search.set_placeholder_text(Some("Filter bookmarks"));
+    label_a11y(&bmark_search, "Filter or autocomplete bookmarks", gtk::atk::Role::Text);
+    {
+        let box_focus = bmark_search_box.downgrade();
+        bmark_search.connect_focus_in_event(move |_, _| {
+            if let Some(b) = box_focus.upgrade() {
+                class(&b, "focused");
+            }
+            crate::gtkx::inh(false)
+        });
+        let box_blur = bmark_search_box.downgrade();
+        bmark_search.connect_focus_out_event(move |_, _| {
+            if let Some(b) = box_blur.upgrade() {
+                b.style_context().remove_class("focused");
+            }
+            crate::gtkx::inh(false)
+        });
+    }
+    pack(&bmark_search_box, &bmark_search, true);
+    pack(&bmark_row, &bmark_search_box, false);
+
+    let bmark_layer = crate::layer::Layer::new();
+    let bmark_card = widget_box(gtk::Orientation::Vertical, 0);
+    class(&bmark_card, "bmark-suggest-card");
+    bmark_card.set_size_request(360, -1);
+    let bmark_pop_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    bmark_pop_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    bmark_pop_scroll.set_shadow_type(gtk::ShadowType::None);
+    bmark_pop_scroll.set_propagate_natural_height(true);
+    bmark_pop_scroll.set_max_content_height(260);
+    bmark_pop_scroll.set_min_content_width(340);
+    let bmark_suggest = widget_box(gtk::Orientation::Vertical, 2);
+    class(&bmark_suggest, "suggest");
+    bmark_suggest.set_hexpand(true);
+    bmark_pop_scroll.add(&bmark_suggest);
+    bmark_card.pack_start(&bmark_pop_scroll, true, true, 0);
+    bmark_card.show_all();
+    bmark_layer.add(&bmark_card);
+    bmark_layer.root.set_no_show_all(true);
+    bmark_layer.root.hide();
+
+    bmarkbar.add(&bmark_row);
+    bmarkbar.set_no_show_all(true);
     bmarkbar.hide();
 
-    // The page, edge to edge.
+    // ---- Main page column: optional compact 38px toolbar + rounded viewport frame ----
     let card = widget_box(gtk::Orientation::Vertical, 0);
     card.set_hexpand(true);
     card.set_vexpand(true);
@@ -401,45 +634,50 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
 
     let toolbar = gtk::EventBox::new();
     class(&toolbar, "toolbar");
-    toolbar.set_size_request(-1, 72);
-    let tools = widget_box(gtk::Orientation::Horizontal, 6);
-    tools.set_margin_start(12);
-    tools.set_margin_end(14);
+    toolbar.set_size_request(-1, 38);
+    toolbar.set_no_show_all(true);
+    toolbar.set_visible(prefs.show_toolbar);
+    let tools = widget_box(gtk::Orientation::Horizontal, 4);
+    tools.set_margin_start(8);
+    tools.set_margin_end(8);
+    tools.set_margin_top(2);
+    tools.set_margin_bottom(4);
     toolbar.add(&tools);
-    let fold = icons::button(Icon::Sidebar, 18, palette.muted, "chrome-tool");
-    fold.set_valign(gtk::Align::Center);
-    label_a11y(&fold, "Toggle tab column (Ctrl S)", gtk::atk::Role::PushButton);
-    pack(&tools, &fold, false);
-    let helm = widget_box(gtk::Orientation::Horizontal, 0);
-    helm.set_valign(gtk::Align::Center);
-    class(&helm, "helm");
-    let back = icons::button(Icon::Back, 17, palette.muted, "chrome-tool");
+
+    let back = icons::button(Icon::Back, 14, palette.muted, "chrome-tool");
     label_a11y(&back, "Back (Alt Left)", gtk::atk::Role::PushButton);
-    let forward = icons::button(Icon::Forward, 17, palette.muted, "chrome-tool");
+    let forward = icons::button(Icon::Forward, 14, palette.muted, "chrome-tool");
     label_a11y(&forward, "Forward (Alt Right)", gtk::atk::Role::PushButton);
-    let reload = icons::button(Icon::Reload, 17, palette.muted, "chrome-tool");
+    let reload = gtk::Button::new();
+    reload.set_relief(gtk::ReliefStyle::None);
+    class(&reload, "mark");
+    class(&reload, "chrome-tool");
+    reload.add(&passthrough_icon(Icon::Reload, 14, palette.muted));
     label_a11y(&reload, "Reload (Ctrl R)", gtk::atk::Role::PushButton);
-    for button in [&fold, &back, &forward, &reload] {
+    let home = icons::button(Icon::Home, 14, palette.muted, "chrome-tool");
+    label_a11y(&home, "Home (Alt Home)", gtk::atk::Role::PushButton);
+    for button in [&back, &forward, &reload, &home] {
         button.set_can_focus(true);
         button.set_focus_on_click(false);
-    }
-    for button in [&forward, &reload] {
+        button.set_valign(gtk::Align::Center);
+        pack(&tools, button, false);
         button.show_all();
         button.set_no_show_all(true);
     }
-    pack(&helm, &back, false);
-    pack(&helm, &forward, false);
-    pack(&helm, &reload, false);
-    pack(&tools, &helm, false);
 
     let location = widget_box(gtk::Orientation::Horizontal, 0);
     class(&location, "location");
     location.set_valign(gtk::Align::Center);
-    location.set_margin_start(8);
-    location.set_margin_end(8);
-    let site_info = icons::button(Icon::Globe, 16, palette.muted, "site-info");
+    location.set_margin_start(4);
+    location.set_margin_end(4);
+    let site_info = gtk::Button::new();
+    site_info.set_relief(gtk::ReliefStyle::None);
+    class(&site_info, "mark");
+    class(&site_info, "site-info");
+    site_info.add(&passthrough_icon(Icon::Globe, 14, palette.muted));
     label_a11y(&site_info, "Site information (Ctrl I)", gtk::atk::Role::PushButton);
     site_info.set_can_focus(true);
+    site_info.set_focus_on_click(false);
     let address = gtk::Button::new();
     class(&address, "address-button");
     address.set_hexpand(true);
@@ -454,23 +692,17 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     let address_path = gtk::Label::new(Some(""));
     class(&address_path, "address-path");
     address_path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    address_path.set_max_width_chars(22);
+    address_path.set_max_width_chars(24);
     address_path.set_xalign(0.0);
-    pack(&address_content, &address_path, false);
-    let address_hint = gtk::Label::new(Some("Ctrl L"));
-    class(&address_hint, "address-hint");
-    address_hint.set_hexpand(true);
-    address_hint.set_halign(gtk::Align::End);
-    address_hint.set_margin_start(10);
-    pack(&address_content, &address_hint, true);
+    pack(&address_content, &address_path, true);
     address.add(&address_content);
     pack(&location, &site_info, false);
     pack(&location, &address, true);
     pack(&tools, &location, true);
 
-    let reader = icons::button(Icon::Book, 18, palette.muted, "chrome-tool");
+    let reader = icons::button(Icon::Book, 14, palette.muted, "chrome-tool");
     label_a11y(&reader, "Reading mode (Ctrl Shift R)", gtk::atk::Role::PushButton);
-    let bookmark = icons::button(Icon::Star, 18, palette.muted, "chrome-tool");
+    let bookmark = icons::button(Icon::Star, 14, palette.muted, "chrome-tool");
     label_a11y(&bookmark, "Keep this page (Ctrl D)", gtk::atk::Role::PushButton);
     for button in [&reader, &bookmark] {
         button.set_can_focus(true);
@@ -480,23 +712,15 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         button.show_all();
         button.set_no_show_all(true);
     }
-    address_hint.set_no_show_all(true);
-    let more = icons::button(Icon::Menu, 17, palette.muted, "chrome-tool");
-    more.set_valign(gtk::Align::Center);
-    more.set_can_focus(true);
-    label_a11y(&more, "Browser menu", gtk::atk::Role::PushButton);
-    pack(&tools, &more, false);
     pack(&card, &toolbar, false);
     pack(&card, &bmarkbar, false);
+
     let stack = gtk::Stack::new();
     stack.set_homogeneous(false);
     stack.set_hexpand(true);
     stack.set_vexpand(true);
     stack.set_vexpand_set(true);
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    // The page crossfade uses the shared MICRO role, the same as hover and
-    // fade-in, instead of its own 90ms. motion::enabled() is false under the
-    // bench and when the desktop turns animations off, so both get a cut.
     stack.set_transition_duration(if crate::motion::enabled() { crate::motion::dur::MICRO as u32 } else { 0 });
     let blank_holder = gtk::EventBox::new();
     crate::ui::class(&blank_holder, "blank");
@@ -505,11 +729,6 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     blank_holder.add(&start.root);
     stack.add_named(&blank_holder, "blank");
 
-    // A page that will not open is the browser's to explain, not the engine's
-    // to dump: the same quiet type, the reason, the address it tried, and one
-    // thing to do about it.
-    // Wrapped the way the blank page is wrapped: the same shape, so the click
-    // that opens the address field there can retry a load here.
     let error_holder = gtk::EventBox::new();
     crate::ui::class(&error_holder, "error-page");
     error_holder.set_visible_window(false);
@@ -542,7 +761,7 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     error_address.set_width_chars(1);
     error_address.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     error_address.set_max_width_chars(52);
-    let error_actions = widget_box(gtk::Orientation::Horizontal, 9);
+    let error_actions = widget_box(gtk::Orientation::Horizontal, 8);
     crate::ui::class(&error_actions, "error-actions");
     error_actions.set_halign(gtk::Align::Center);
     error_actions.set_margin_top(12);
@@ -550,8 +769,6 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     crate::ui::class(&error_retry, "act");
     class(&error_retry, "primary");
     error_retry.set_halign(gtk::Align::Center);
-    // A 4xx cannot be fixed by reloading: the primary button becomes Change
-    // address, and Back is the quiet second way out of the same dead end.
     let error_back = gtk::Button::with_label("Go back");
     crate::ui::class(&error_back, "act");
     error_back.set_halign(gtk::Align::Center);
@@ -563,12 +780,8 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
     pack(&errorpage, &error_address, false);
     pack(&errorpage, &error_actions, false);
     error_holder.add(&errorpage);
-    // The name stays "error": the browser and the bench both look the page up
-    // by it, and only the widget under the name changed.
     stack.add_named(&error_holder, "error");
 
-    // Overlay the page stack so the 3px load progress bar floats at the very top
-    // of the viewport without ever pushing page content down.
     let page_overlay = gtk::Overlay::new();
     class(&page_overlay, "viewport");
     page_overlay.set_hexpand(true);
@@ -600,93 +813,112 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         cr.set_source_rgba(rgba.red(), rgba.green(), rgba.blue(), rgba.alpha());
         cr.rectangle(0.0, 0.0, fill_w, h);
         let _ = cr.fill();
-        if fill_w > 4.0 {
-            let glow_w = 18.0_f64.min(fill_w);
-            let x0 = (fill_w - glow_w).max(0.0);
-            let grad = cairo::LinearGradient::new(x0, 0.0, fill_w, 0.0);
-            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0);
-            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.45);
-            let _ = cr.set_source(&grad);
-            cr.rectangle(x0, 0.0, glow_w, h);
-            let _ = cr.fill();
-        }
         crate::gtkx::inh(false)
     });
     page_overlay.add_overlay(&progress);
     page_overlay.set_overlay_pass_through(&progress, true);
-    pack(&card, &page_overlay, true);
 
-    // The page is the paned's second child itself: the band it used to begin
-    // with is the one strip above the paned now, and a wrapper here would buy
-    // a box with a single child in it.
+    // Live anti-aliased Cairo corner masks over the WebKitGTK viewport, matching
+    // `.viewport-frame`'s 16px outer radius (15px inner radius + 1px border).
+    // Four tiny 16x16 pass-through overlays avoid full-viewport redraw overhead
+    // while genuinely rounding the live WebView on both X11 and Wayland.
+    let viewport_corner_colors = std::rc::Rc::new(std::cell::Cell::new((palette.ground, palette.hairline)));
+    let viewport_corners = attach_corner_masks(
+        &page_overlay,
+        15.0,
+        true,
+        viewport_corner_colors.clone(),
+        "viewport-corner",
+    );
+
+    // Continuous 12px-rounded viewport container inset cleanly inside the
+    // ground shell, eliminating sharp 90° structural seams.
+    let viewport_frame = widget_box(gtk::Orientation::Vertical, 0);
+    class(&viewport_frame, "viewport-frame");
+    viewport_frame.set_hexpand(true);
+    viewport_frame.set_vexpand(true);
+    viewport_frame.set_margin_start(6);
+    viewport_frame.set_margin_end(6);
+    viewport_frame.set_margin_top(2);
+    viewport_frame.set_margin_bottom(6);
+    pack(&viewport_frame, &page_overlay, true);
+    pack(&card, &viewport_frame, true);
+
     paned.pack2(&card, true, true);
 
     let frame = widget_box(gtk::Orientation::Vertical, 0);
     crate::ui::class(&frame, "shell");
+    pack(&frame, &topbar, false);
     pack(&frame, &paned, true);
     overlay.add(&frame);
-
-    let folded_controls = widget_box(gtk::Orientation::Horizontal, 2);
-    class(&folded_controls, "folded-controls");
-    folded_controls.set_halign(gtk::Align::End);
-    folded_controls.set_valign(gtk::Align::Start);
-    folded_controls.set_margin_top(8);
-    folded_controls.set_margin_end(12);
-    let (folded_red, folded_amber, folded_green) = window_controls(palette);
-    pack(&folded_controls, &folded_amber, false);
-    pack(&folded_controls, &folded_green, false);
-    pack(&folded_controls, &folded_red, false);
-    folded_controls.set_no_show_all(true);
-    folded_controls.hide();
-    overlay.add_overlay(&folded_controls);
 
     Ui {
         window,
         overlay,
         shell: frame,
+        topbar,
+        top_lights_left,
+        top_lights_right,
+        top_more_slot,
+        top_space_btn,
+        top_space_label,
+        top_pins_holder,
+        top_pins,
+        top_tabs_scroll,
+        top_tabs,
+        top_drag,
         paned,
         side,
         strip,
         body,
         top,
+        side_lights_left,
+        side_lights_right,
+        side_more_slot,
+        side_space_btn,
+        side_space_label,
+        side_spaces_footer,
+        side_spaces,
+        side_tabs_heading,
         toolbar,
-        fold,
+        tools,
+        location,
+        viewport_frame,
+        viewport_corners,
+        viewport_corner_colors,
         side_fold,
+        side_newtab,
         address,
         address_label,
         address_path,
-        address_hint,
         site_info,
         reader,
         bookmark,
         more,
         newtab,
-        private_tab,
-        library,
-        history,
-        downloads,
         tab_count,
         start,
         light_red,
         light_amber,
         light_green,
-        folded_controls,
-        folded_red,
-        folded_amber,
-        folded_green,
         back,
         forward,
         reload,
+        home,
         pins,
         pins_holder,
         rows,
         rows_scroll,
-        menu,
         stack,
         progress,
         progress_frac,
         bmarkbar,
         bmarks,
+        bmark_search_box,
+        bmark_search,
+        bmark_layer,
+        bmark_card,
+        bmark_suggest,
         error_holder,
         errorpage,
         error_glyph,
@@ -703,15 +935,11 @@ fn window_controls(palette: Palette) -> (gtk::EventBox, gtk::EventBox, gtk::Even
         let e = gtk::EventBox::new();
         crate::ui::class(&e, "control");
         e.style_context().add_class(name);
-        e.set_size_request(28, 28);
+        e.set_size_request(26, 26);
         e.set_valign(gtk::Align::Center);
         e.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
-        // The mark is drawn, not typed: there is no text in this control for a
-        // screen reader to read, so the words have to be given to it. A
-        // button role says what it is; the tooltip and the accessible name say
-        // which.
         label_a11y(&e, tooltip, gtk::atk::Role::PushButton);
-        let mark = icons::area(kind, 15, palette.muted);
+        let mark = icons::area(kind, 12, palette.muted);
         mark.set_halign(gtk::Align::Center);
         mark.set_valign(gtk::Align::Center);
         e.add(&mark);
@@ -740,10 +968,38 @@ pub struct TabRow {
     pub close: gtk::Button,
 }
 
-/// A page's own mark, at the size the row has for it. GTK scales the surface;
-/// asking cairo for the pixels first would need to know the surface's type,
-/// and a 16px favicon is the size it was drawn at anyway.
+/// Scale a WebKit favicon `cairo::Surface` onto an exact `size × size`
+/// ARGB32 `cairo::ImageSurface` so favicons render crisply at 14–16px everywhere
+/// (tabs, bookmarks bar, start page chips, and autocomplete rows) and can be
+/// persisted to PNG without any extra crates.
+pub fn scale_favicon(surface: &cairo::Surface, size: i32) -> Option<cairo::ImageSurface> {
+    let size = size.max(1);
+    let out = cairo::ImageSurface::create(cairo::Format::ARgb32, size, size).ok()?;
+    let cr = cairo::Context::new(&out).ok()?;
+    let (sw, sh) = match cairo::ImageSurface::try_from(surface.clone()) {
+        Ok(img) if img.width() > 0 && img.height() > 0 => (img.width() as f64, img.height() as f64),
+        _ => (size as f64, size as f64),
+    };
+    let scale = (size as f64 / sw).min(size as f64 / sh);
+    let dx = (size as f64 - sw * scale) * 0.5;
+    let dy = (size as f64 - sh * scale) * 0.5;
+    cr.translate(dx, dy);
+    cr.scale(scale, scale);
+    cr.set_source_surface(surface, 0.0, 0.0).ok()?;
+    cr.source().set_filter(cairo::Filter::Best);
+    cr.paint().ok()?;
+    drop(cr);
+    out.flush();
+    Some(out)
+}
+
+/// A page's own mark, scaled cleanly to the exact pixel size requested.
 pub fn favicon(surface: &cairo::Surface, size: i32) -> gtk::Image {
+    if let Some(scaled) = scale_favicon(surface, size) {
+        let image = gtk::Image::from_surface(Some(&scaled));
+        image.set_size_request(size, size);
+        return image;
+    }
     let image = gtk::Image::from_surface(Some(surface));
     image.set_pixel_size(size);
     image
@@ -763,7 +1019,7 @@ pub fn mark_glyph(holder: &gtk::Box, glyph: Icon, surface: Option<&cairo::Surfac
             pack(holder, &image, false);
         }
         None => {
-            let mark = icons::area(glyph, size, color);
+            let mark = passthrough_icon(glyph, size, color);
             mark.set_valign(gtk::Align::Center);
             crate::ui::class(&mark, "rowmark");
             pack(holder, &mark, false);
@@ -1051,6 +1307,130 @@ pub fn tab_row(
     TabRow { event, title: label, subtitle, letter: letter_label, icon, close }
 }
 
+/// One compact horizontal top tab in the top tab strip.
+pub fn top_tab_chip(
+    title: &str,
+    palette: Palette,
+    letter: Option<char>,
+    live: bool,
+    state: TabState,
+) -> TabRow {
+    let event = gtk::EventBox::new();
+    crate::ui::class(&event, "toptab");
+    if live {
+        crate::ui::class(&event, "live");
+    }
+    if state.asleep {
+        crate::ui::class(&event, "asleep");
+    }
+    if state.private {
+        crate::ui::class(&event, "private");
+    }
+    event.set_size_request(144, 28);
+    event.set_hexpand(false);
+    event.set_halign(gtk::Align::Start);
+    event.set_valign(gtk::Align::Center);
+
+    let hbox = widget_box(gtk::Orientation::Horizontal, 6);
+    hbox.set_margin_start(8);
+    hbox.set_margin_end(4);
+    hbox.set_valign(gtk::Align::Center);
+
+    let icon = widget_box(gtk::Orientation::Horizontal, 0);
+    icon.set_size_request(16, 16);
+    icon.set_valign(gtk::Align::Center);
+    let letter_label = match letter {
+        Some(letter) => mark(&icon, letter, None, 14),
+        None => mark_glyph(&icon, Icon::Plus, None, 13, palette.faint),
+    };
+    if state.private {
+        for child in icon.children() {
+            icon.remove(&child);
+        }
+        mark_glyph(&icon, Icon::Mask, None, 13, palette.muted);
+    }
+    if state.loading && !state.private {
+        loading_mark(&icon, palette.muted);
+    }
+    pack(&hbox, &icon, false);
+
+    let label = gtk::Label::new(Some(title));
+    crate::ui::class(&label, "toptab-title");
+    if live {
+        crate::ui::class(&label, "liveword");
+    }
+    label.set_xalign(0.0);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_single_line_mode(true);
+    label.set_hexpand(false);
+    label.set_valign(gtk::Align::Center);
+    label.set_width_chars(8);
+    label.set_max_width_chars(15);
+    pack(&hbox, &label, true);
+
+    let subtitle = gtk::Label::new(None);
+    subtitle.set_no_show_all(true);
+    subtitle.hide();
+
+    let close = gtk::Button::new();
+    close.set_relief(gtk::ReliefStyle::None);
+    close.add(&icons::area(Icon::Close, 10, palette.muted.mix(palette.faint, 0.4)));
+    crate::ui::class(&close, "loupe");
+    crate::ui::class(&close, "close");
+    crate::ui::class(&close, "rowclose");
+    crate::ui::class(&close, "toptab-close");
+    close.set_opacity(close_opacity(live, false));
+    close.set_valign(gtk::Align::Center);
+    close.set_size_request(20, 20);
+    close.set_can_focus(false);
+    close.set_tooltip_text(Some("Close tab (Ctrl W)"));
+    {
+        use gtk::atk::prelude::AtkObjectExt;
+        if let Some(access) = close.accessible() {
+            access.set_name("Close this tab");
+            access.set_role(gtk::atk::Role::PushButton);
+        }
+    }
+    pack(&hbox, &close, false);
+
+    event.add(&hbox);
+    TabRow { event, title: label, subtitle, letter: letter_label, icon, close }
+}
+
+/// One compact Zen-style favicon-only pinned tab chip in the top tab strip.
+pub fn top_pin_chip(letter: &str, live: bool, private: bool, _palette: Palette) -> PinWidget {
+    let event = gtk::EventBox::new();
+    event.set_above_child(true);
+    crate::ui::class(&event, "toppin");
+    if live {
+        crate::ui::class(&event, "live");
+    }
+    if private {
+        crate::ui::class(&event, "private");
+    }
+    event.set_size_request(30, 30);
+    event.set_valign(gtk::Align::Center);
+    event.set_can_focus(true);
+    event.set_focus_on_click(false);
+    let label = gtk::Label::new(Some(&letter.to_uppercase()));
+    crate::ui::class(&label, "pinletter");
+    label.set_halign(gtk::Align::Center);
+    label.set_valign(gtk::Align::Center);
+    label.set_no_show_all(true);
+    label.show();
+    let stack = gtk::Overlay::new();
+    stack.add(&label);
+    let icon = widget_box(gtk::Orientation::Horizontal, 0);
+    icon.set_halign(gtk::Align::Center);
+    icon.set_valign(gtk::Align::Center);
+    icon.set_no_show_all(true);
+    icon.hide();
+    stack.add_overlay(&icon);
+    stack.set_overlay_pass_through(&icon, true);
+    event.add(&stack);
+    PinWidget { event, letter: label, icon }
+}
+
 /// A pinned page: one square, one letter, or its site's mark.
 pub struct PinWidget {
     pub event: gtk::EventBox,
@@ -1058,13 +1438,19 @@ pub struct PinWidget {
     pub icon: gtk::Box,
 }
 
-pub fn pin_tile(letter: &str, live: bool, _palette: Palette) -> PinWidget {
+pub fn pin_tile(letter: &str, live: bool, private: bool, _palette: Palette) -> PinWidget {
     let event = gtk::EventBox::new();
+    event.set_above_child(true);
     crate::ui::class(&event, "pin");
     if live {
         crate::ui::class(&event, "live");
     }
-    event.set_size_request(35, 35);
+    if private {
+        crate::ui::class(&event, "private");
+    }
+    event.set_size_request(36, 36);
+    event.set_can_focus(true);
+    event.set_focus_on_click(false);
     let label = gtk::Label::new(Some(&letter.to_uppercase()));
     crate::ui::class(&label, "pinletter");
     label.set_halign(gtk::Align::Center);
@@ -1074,22 +1460,15 @@ pub fn pin_tile(letter: &str, live: bool, _palette: Palette) -> PinWidget {
     // the letter back over the favicon the browser had just hidden it for.
     label.set_no_show_all(true);
     label.show();
-    // The mark sits over the letter: a page with an icon shows the icon there,
-    // a page without one shows its own initial. An empty globe for every site
-    // with no favicon was four identical grey circles telling nobody which pin
-    // was which, so nothing is drawn until the page offers something real.
     let stack = gtk::Overlay::new();
     stack.add(&label);
     let icon = widget_box(gtk::Orientation::Horizontal, 0);
     icon.set_halign(gtk::Align::Center);
     icon.set_valign(gtk::Align::Center);
-    // Empty and hidden while there is no favicon, so a pin draws its own
-    // letter and nothing else. `mark` shows this box and the image inside it by
-    // name when an icon arrives, which show_all cannot do for a box that opted
-    // out of it.
     icon.set_no_show_all(true);
     icon.hide();
     stack.add_overlay(&icon);
+    stack.set_overlay_pass_through(&icon, true);
     event.add(&stack);
     PinWidget { event, letter: label, icon }
 }
@@ -1137,11 +1516,137 @@ pub fn scrim_with_alpha(palette: &Palette) -> (gtk::DrawingArea, std::rc::Rc<std
     (area, alpha)
 }
 
-pub fn scrim(palette: &Palette) -> gtk::DrawingArea {
-    scrim_with_alpha(palette).0
+
+
+
+/// Attach four tiny pass-through Cairo corner overlays to `overlay` so a live
+/// child surface (such as `WebKitWebView`) is genuinely rounded at runtime on
+/// both X11 and Wayland without full-surface overdraw or blocking pointer input.
+///
+/// When `with_border` is true, each corner paints the exterior spandrel in
+/// `colors.0` (`ground`) and strokes a continuous 1px inner border arc at
+/// `inner_radius + 0.5` in `colors.1` (`hairline`) aligned with the enclosing
+/// 1px CSS frame. When `with_border` is false, it paints only the anti-aliased
+/// spandrel outside `inner_radius`.
+pub fn attach_corner_masks(
+    overlay: &gtk::Overlay,
+    inner_radius: f64,
+    with_border: bool,
+    colors: std::rc::Rc<std::cell::Cell<(Rgb, Rgb)>>,
+    class_name: &str,
+) -> [gtk::DrawingArea; 4] {
+    let size = inner_radius.ceil() as i32 + 1;
+    let specs = [
+        (gtk::Align::Start, gtk::Align::Start, false, false, "tl"),
+        (gtk::Align::End, gtk::Align::Start, true, false, "tr"),
+        (gtk::Align::Start, gtk::Align::End, false, true, "bl"),
+        (gtk::Align::End, gtk::Align::End, true, true, "br"),
+    ];
+    specs.map(|(halign, valign, flip_x, flip_y, tag)| {
+        let corner = gtk::DrawingArea::new();
+        corner.set_widget_name(&format!("{class_name}-{tag}"));
+        class(&corner, class_name);
+        corner.set_size_request(size, size);
+        corner.set_halign(halign);
+        corner.set_valign(valign);
+        corner.set_can_focus(false);
+        corner.set_no_show_all(true);
+        corner.show();
+        if let Some(access) = corner.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::RedundantObject);
+        }
+        let colors = colors.clone();
+        corner.connect_draw(move |widget, cr| {
+            let w = widget.allocated_width() as f64;
+            let h = widget.allocated_height() as f64;
+            if w <= 0.0 || h <= 0.0 {
+                return crate::gtkx::inh(false);
+            }
+            let (outer, border) = colors.get();
+            let _ = cr.save();
+            if flip_x {
+                cr.translate(w, 0.0);
+                cr.scale(-1.0, 1.0);
+            }
+            if flip_y {
+                cr.translate(0.0, h);
+                cr.scale(1.0, -1.0);
+            }
+            let center = inner_radius;
+            let spandrel_radius = if with_border { inner_radius + 0.5 } else { inner_radius };
+            cr.new_path();
+            cr.move_to(-1.0, -1.0);
+            cr.line_to(center, -1.0);
+            cr.arc_negative(
+                center,
+                center,
+                spandrel_radius,
+                -std::f64::consts::FRAC_PI_2,
+                std::f64::consts::PI,
+            );
+            cr.line_to(-1.0, center);
+            cr.close_path();
+            cr.set_source_rgb(
+                outer.0 as f64 / 255.0,
+                outer.1 as f64 / 255.0,
+                outer.2 as f64 / 255.0,
+            );
+            let _ = cr.fill();
+            if with_border {
+                cr.new_path();
+                cr.arc(
+                    center,
+                    center,
+                    inner_radius + 0.5,
+                    std::f64::consts::PI,
+                    1.5 * std::f64::consts::PI,
+                );
+                cr.set_source_rgb(
+                    border.0 as f64 / 255.0,
+                    border.1 as f64 / 255.0,
+                    border.2 as f64 / 255.0,
+                );
+                cr.set_line_width(1.0);
+                let _ = cr.stroke();
+            }
+            let _ = cr.restore();
+            crate::gtkx::inh(false)
+        });
+        overlay.add_overlay(&corner);
+        overlay.set_overlay_pass_through(&corner, true);
+        corner
+    })
 }
 
-
+/// Build an exact pixel-center rounded-rectangle `cairo::Region` for shaping
+/// non-composited X11 popup windows (such as `GtkMenu` toplevels) so rounded
+/// menus never show rectangular outer backing corners when no compositor runs.
+pub fn rounded_rect_region(width: i32, height: i32, radius: i32) -> cairo::Region {
+    if width <= 0 || height <= 0 {
+        return cairo::Region::create();
+    }
+    let r = radius.min(width / 2).min(height / 2).max(0);
+    if r == 0 {
+        return cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, width, height));
+    }
+    let region = cairo::Region::create();
+    let mid_h = height - 2 * r;
+    if mid_h > 0 {
+        let _ = region.union_rectangle(&cairo::RectangleInt::new(0, r, width, mid_h));
+    }
+    let rf = r as f64;
+    for y in 0..r {
+        let dy = rf - (y as f64 + 0.5);
+        let dx = (rf * rf - dy * dy).max(0.0).sqrt();
+        let inset = (rf - dx - 0.5).ceil().max(0.0) as i32;
+        let span = (width - 2 * inset).max(0);
+        if span > 0 {
+            let _ = region.union_rectangle(&cairo::RectangleInt::new(inset, y, span, 1));
+            let _ = region.union_rectangle(&cairo::RectangleInt::new(inset, height - 1 - y, span, 1));
+        }
+    }
+    region
+}
 
 #[cfg(test)]
 mod tests {
@@ -1171,8 +1676,14 @@ mod tests {
 
     #[test]
     fn no_sidebar_means_no_column_whatever_the_fold() {
-        assert_eq!(column_plan(true, false, false, 260).width, 0);
-        assert!(!column_plan(true, false, false, 260).strip);
+        for folded in [false, true] {
+            let plan = column_plan(folded, false, false, 260);
+            assert_eq!(plan.width, 0);
+            assert_eq!(plan.paned_at, 0);
+            assert!(!plan.strip);
+            assert!(!plan.body, "disabled sidebar must hide body (folded={folded})");
+            assert!(plan.side_shown);
+        }
     }
 
     #[test]
@@ -1184,5 +1695,49 @@ mod tests {
         assert_eq!(close_opacity(true, true), 1.0);
         assert_eq!(close_opacity(true, false), 0.6);
         assert_eq!(close_opacity(false, false), 0.0);
+    }
+
+    #[test]
+    fn rounded_rect_region_excludes_outer_corners_and_includes_interior() {
+        let region = rounded_rect_region(160, 200, 12);
+        // All four extreme corners outside the 12px arc are excluded.
+        for (x, y) in [(0, 0), (1, 1), (2, 2), (159, 0), (0, 199), (159, 199)] {
+            assert!(!region.contains_point(x, y), "corner ({x},{y}) must be clipped out");
+        }
+        // Straight edges past the radius and interior remain included.
+        for (x, y) in [(12, 0), (147, 0), (0, 12), (159, 12), (80, 100), (12, 199)] {
+            assert!(region.contains_point(x, y), "interior/edge ({x},{y}) must stay inside");
+        }
+    }
+
+    #[test]
+    fn scale_favicon_produces_exact_square_image_surface() {
+        let src = cairo::ImageSurface::create(cairo::Format::ARgb32, 32, 32).expect("src");
+        let cr = cairo::Context::new(&src).expect("ctx");
+        cr.set_source_rgb(0.2, 0.5, 0.8);
+        let _ = cr.paint();
+        drop(cr);
+        let base: &cairo::Surface = &src;
+        let scaled = scale_favicon(base, 16).expect("scaled");
+        assert_eq!((scaled.width(), scaled.height()), (16, 16));
+    }
+
+    #[test]
+    fn tab_layout_plan_is_strictly_exclusive_outside_fullscreen() {
+        let top = tab_layout_plan(false, false, false);
+        assert_eq!(top, TabLayoutPlan { show_topbar: true, show_sidebar: false });
+
+        let vertical = tab_layout_plan(true, false, false);
+        assert_eq!(vertical, TabLayoutPlan { show_topbar: false, show_sidebar: true });
+
+        // Folded legacy sidebar state falls back to topbar so chrome is never lost.
+        let folded = tab_layout_plan(true, true, false);
+        assert_eq!(folded, TabLayoutPlan { show_topbar: true, show_sidebar: false });
+
+        // Fullscreen hides BOTH layouts unconditionally.
+        for (sidebar, folded) in [(false, false), (true, false), (true, true)] {
+            let full = tab_layout_plan(sidebar, folded, true);
+            assert_eq!(full, TabLayoutPlan { show_topbar: false, show_sidebar: false });
+        }
     }
 }

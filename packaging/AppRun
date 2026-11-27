@@ -27,6 +27,6 @@ export GST_PLUGIN_SYSTEM_PATH="$HERE/usr/lib/gstreamer-1.0"
 export GST_PLUGIN_SCANNER="$HERE/usr/lib/gstreamer-1.0/gst-plugin-scanner"
 export LIBGL_DRIVERS_PATH="$HERE/usr/lib/dri${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
 export LIBVA_DRIVERS_PATH="$HERE/usr/lib/dri${LIBVA_DRIVERS_PATH:+:$LIBVA_DRIVERS_PATH}"
-export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
 # A bundled fontconfig must never load a second fontconfig from /usr/lib.
 exec "$HERE/usr/bin/search" "$@"

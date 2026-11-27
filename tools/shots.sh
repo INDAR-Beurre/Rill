@@ -354,6 +354,8 @@ def open_page(path, wait=True, tries=2):
             time.sleep(0.5)
     raise SystemExit(f"could not load {path}: {last}")
 
+settings_scroll_info = None
+sitecard_inset_info = None
 try:
     # Waiting for the socket is inside the try so a browser that never came up
     # still leaves a manifest and still goes through the cleanup trap.
@@ -365,6 +367,17 @@ try:
     if os.environ.get("SHOT_DARK") == "1":
         bench.must("setdark on")
         time.sleep(0.8)
+
+    # 0. true fresh empty-profile start page, captured BEFORE any navigation
+    # or seeded bookmarks/history so the curated Explore links are directly seen.
+    bench.must("settle")
+    fresh_probe = bench.probe()
+    fresh_start = bench.must("starttext").get("text", "")
+    if fresh_probe.get("visibleChild") != "blank" or "Explore" not in fresh_start or "No recent pages" not in fresh_start:
+        raise SystemExit(
+            f"08a-start-fresh must show fresh empty start page: visibleChild={fresh_probe.get('visibleChild')!r}, text={fresh_start[:200]!r}"
+        )
+    shot("08a-start-fresh", "fresh empty-profile start page with curated Explore links")
 
     # 1. the quiet default: one page, tabs down the side
     # A --fresh start already has one blank tab. bench `open` always adds a
@@ -454,7 +467,10 @@ try:
     time.sleep(0.2)
     bench.must("omnitext office")
     time.sleep(0.4)
-    shot("04c-omni-ranking", "exact path match over other tabs")
+    omni_rank = bench.must("debug").get("omni", {})
+    if omni_rank.get("chipVisible") or omni_rank.get("chipKind") != "none":
+        raise SystemExit(f"plain search query must not show a host/security chip: {omni_rank}")
+    shot("04c-omni-ranking", "exact path match over other tabs (no search-engine lock chip)")
     bench.must("escape")
 
     # 5. the panels, every one of them: the sheet of keys and the truth about
@@ -486,7 +502,7 @@ try:
             # Clearing the filter changes the viewport height; settle first so
             # panelscroll sees the restored upper bound, not the filtered one.
             bench.must("settle")
-            bench.must("panelscroll 10000")
+            settings_scroll_info = bench.must("panelscroll 10000")
             time.sleep(0.4)
             shot("05-panel-settings-scrolled", "the bottom of Settings, including the last switch")
         bench.must("key closepanel")
@@ -537,15 +553,15 @@ try:
     bench.must("key reader")
     time.sleep(1.2)
     shot("07-reading", "reading mode")
-    bench.must("js window.__searchReaderFont(-4)")
+    bench.must('js document.querySelector("#__search_reader_font button[aria-label=\\"Smaller reading text\\"]").click()')
     time.sleep(0.4)
     shot("07-reading-small", "reading mode with 14px type")
     bench.must("pagefont 14")
     time.sleep(0.4)
     assert bench.must("pagefont").get("value") == "14px", "reader font did not reach 14px"
-    bench.must("js window.__searchReaderFont(4)")
+    bench.must('js document.querySelector("#__search_reader_font button[aria-label=\\"Larger reading text\\"]").click()')
     time.sleep(0.4)
-    bench.must("js window.__searchReaderFont(4)")
+    bench.must('js document.querySelector("#__search_reader_font button[aria-label=\\"Larger reading text\\"]").click()')
     time.sleep(0.4)
     shot("07-reading-large", "reading mode with 22px type")
     bench.must("pagefont")
@@ -563,10 +579,10 @@ try:
     time.sleep(1.2)
     shot("07b-reading-structure", "reading mode with headings, lists and code")
     # 7d. the reading-size controls and their effect on a structured page.
-    bench.must("js window.__searchReaderFont(4)")
+    bench.must('js document.querySelector("#__search_reader_font button[aria-label=\\"Larger reading text\\"]").click()')
     time.sleep(0.5)
     shot("07d-reading-large", "reading mode with larger type")
-    bench.must("js window.__searchReaderFont(-4)")
+    bench.must('js document.querySelector("#__search_reader_font button[aria-label=\\"Smaller reading text\\"]").click()')
     bench.must("key reload")
 
     # 7c. find while reading. The reader's exit pill and the find bar share the
@@ -584,12 +600,12 @@ try:
     bench.must("escape")
     bench.must("key reload")
 
-    # 8. empty tab. closeall leaves exactly one fresh tab behind (closing the last
-    # tab makes a new one), so asking for another here would put two "New tab"
-    # rows in a picture that is meant to show one.
+    # 8. populated start page (after bookmarks and visits accumulated above).
+    # closeall leaves exactly one tab behind showing the start page with kept
+    # bookmarks and recent history, complementing 08a-start-fresh.
     bench.must("closeall")
     time.sleep(0.6)
-    shot("08-empty", "an empty tab")
+    shot("08-empty", "populated start page with bookmarks and recent visits")
     bench.must("escape")
 
     # 9. a page that fails
@@ -618,6 +634,18 @@ try:
         time.sleep(0.5)
         shot(f"09-{kind}", note)
         bench.must("errorgeometry")
+        if kind == "tls":
+            bench.must("key omni")
+            time.sleep(0.25)
+            tls_omni = bench.must("debug").get("omni", {})
+            if (
+                not tls_omni.get("chipVisible")
+                or tls_omni.get("chipHost") != "expired.badssl.com"
+                or tls_omni.get("chipKind") != "insecure"
+            ):
+                raise SystemExit(f"failed HTTPS omnibox must show insecure chip, not lock: {tls_omni}")
+            shot("04d-omni-tls-failed", "omnibox on failed HTTPS page showing insecure shield, not lock")
+            bench.must("escape")
         if kind == "missing":
             bench.must("showerror The site broke while answering (503).")
 
@@ -631,7 +659,7 @@ try:
     bench.must("settle")
     time.sleep(0.3)
     shot("16-sitecard", "site card")
-    bench.must("cards")
+    sitecard_inset_info = bench.must("cards")
     bench.must("escape")
     settle()
 
@@ -769,10 +797,37 @@ if (out / "05-panel-settings.png").exists():
     else:
         diff = ImageChops.difference(image, scrolled)
         changed = sum(1 for pixel in diff.getdata() if max(pixel) > 18)
-    ok = changed > 20_000
-    note = f"{changed} pixels changed between Settings and scrolled Settings"
+    scroll_val = float(settings_scroll_info.get("value", 0.0)) if settings_scroll_info else 0.0
+    scroll_upper = float(settings_scroll_info.get("upper", 0.0)) if settings_scroll_info else 0.0
+    scroll_page = float(settings_scroll_info.get("page", 0.0)) if settings_scroll_info else 0.0
+    reached_bottom = (
+        settings_scroll_info is not None
+        and scroll_upper >= scroll_page + 300.0
+        and scroll_val >= scroll_upper - scroll_page - 2.0
+        and scroll_val >= 300.0
+    )
+    ok = changed > 20_000 and reached_bottom
+    note = (
+        f"{changed} pixels changed; scroll value={scroll_val:.0f}, "
+        f"upper={scroll_upper:.0f}, page={scroll_page:.0f} "
+        f"(bottom_target={max(0.0, scroll_upper - scroll_page):.0f})"
+    )
     manifest.append({"name": "pixel settings scroll", "ok": ok, "note": note})
     print(("  ok   " if ok else "  FAIL ") + "pixel settings scroll — " + note)
+
+if sitecard_inset_info is not None:
+    overlay_w = sitecard_inset_info.get("overlay", [0, 0])[0]
+    sc_card = next((c for c in sitecard_inset_info.get("cards", []) if c.get("name") == "site-card"), None)
+    sc_scrim = next((c for c in sitecard_inset_info.get("cards", []) if c.get("name") == "site-card-scrim"), None)
+    if sc_card is not None and overlay_w > 0:
+        right_gap = overlay_w - (sc_card["at"][0] + sc_card["size"][0])
+        ok = right_gap >= 16 and sc_scrim is not None
+        note = f"right_gap={right_gap}px (overlay={overlay_w}, card_at={sc_card['at']}, size={sc_card['size']}), scrim={sc_scrim is not None}"
+    else:
+        ok = False
+        note = f"missing site-card in cards probe: {sitecard_inset_info}"
+    manifest.append({"name": "sitecard inset", "ok": ok, "note": note})
+    print(("  ok   " if ok else "  FAIL ") + "sitecard inset — " + note)
 
 # Write the manifest again now that the pixel checks have run. The copy written
 # in the finally block above only covers the captures, so a round that failed a

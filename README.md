@@ -1,147 +1,121 @@
-<div align="center">
+# Rill
 
-![Search for Linux: go somewhere interesting](docs/hero.svg)
+A small, quiet, native WebKit browser for Linux written in Rust with GTK 3 and WebKitGTK 4.1.
 
-### A small, quiet, native WebKit browser for Linux.
+No Electron, no bundled Chromium, and no account. Choose top tabs or a vertical sidebar, organize them into spaces, and keep the navigation controls you use. Rill uses your system's shared WebKitGTK engine.
 
-**Editorial start page · Vertical tabs · Native navigation · Local-first · Shared WebKitGTK engine**
+![Rill start page, Work space, and favicon-only pinned tabs in light mode](docs/screenshots/rill-f48/top-tabs-light.png)
+*Unedited X11 capture of the current candidate (`1200×800`). The default **System** window-controls mode uses Openbox's native titlebar, outside the captured client area.*
 
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-38bdf8?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
-[![WebKitGTK](https://img.shields.io/badge/WebKitGTK-4.1-14b8a6?style=flat-square)](docs/ARCHITECTURE.md)
-[![Rust tests: 303 passed, 1 ignored (304 total)](https://img.shields.io/badge/Tests-304%20passed%20%C2%B7%201%20ignored-22c55e?style=flat-square)](#testing)
-[![License](https://img.shields.io/badge/MIT-license-a5b4fc?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/Linux-Wayland%20%2F%20X11-818cf8?style=flat-square&logo=linux&logoColor=white)](#build-from-source)
+> **Local preview build (unreleased).** The current candidate is `build/rill-spaces-f48`. No new GitHub release or Rill AppImage has been published; older `1.0.2` / `F39` AppImages in `build/` are historical artifacts from earlier builds.
 
-[Highlights](#highlights) · [Screenshots](#screenshots) · [AppImage](#appimage) · [Build](#build-from-source) · [Shortcuts](#keyboard-shortcuts) · [Architecture](#architecture) · [Testing](#testing)
+## What Rill includes
 
-</div>
-
----
-
-**Search** is an independent Linux implementation of [Office Commun's Search](https://github.com/driceroland/Search), written in Rust with GTK 3 and WebKitGTK 4.1. No Electron, no bundled Chromium, and no account. A warm editorial start page, an organized column of vertical tabs, and permanently visible navigation make the real browser approachable with a mouse or keyboard.
-
-> **Local, unreleased makeover.** This README describes the working checkout. Released `1.0.2` AppImages still contain the earlier interface. Memory, timing, and binary-size figures below are historical `1.0.2` measurements, not new measurements of the redesign.
-
-## Highlights
-
-- **A distinct native interface**: Warm paper and charcoal/olive themes, oversized editorial typography, custom orbital artwork, and purposeful native controls—not an embedded dashboard or an HTML theme.
-- **An actually useful start page**: Search directly, open saved bookmarks, and return to recent pages. A first-run profile shows clearly labeled curated links; private tabs hide personal records.
-- **Discoverable navigation**: Persistent address display, back/forward, reload/stop, site information, reader, bookmark, and menu controls. A foldable vertical tab column (`Ctrl S`) keeps title/host pairs and pinned pages readable.
-- **A proper settings workspace**: Larger rail navigation, organized ruled sections, visual theme selectors, honest empty states, and compact-window reflow.
-- **Fluid native motion**: Driven by a custom VSync `gdk::FrameClock` engine (`src/motion.rs`) and GTK CSS transitions — one shared set of motion roles (120 ms small changes, 180 ms entrances, 130 ms exits, 220 ms layout moves, 8 px travel), cancellable and reversible sidebar folding, and a 3 px top page-load progress bar.
-- **Built for the real web**: Persistent SQLite cookies in normal tabs (strictly isolated ephemeral storage in private tabs), WebRTC, `prefers-color-scheme` sync, locale-derived `Accept-Language` and spellcheck, clipboard permission prompts, and server-suggested download filenames.
-- **Engine-level privacy**: EasyList and EasyPrivacy compiled into **15,775 WebKit content-blocker rules** across 3 lists (`network`, global cosmetic, and domain-scoped `if-domain` rules) enforced inside WebKit before requests leave the browser.
-- **Fast and lazy by default**: Restored background tabs stay asleep with zero web process until selected. Historical tab-switch timings are listed under [Memory, honestly](#memory-honestly).
-- **Power features without bloat**: `Shift` + click link peek cards, `Ctrl I` site security/zoom/permissions/data card, sanitized reading mode (`Ctrl Shift R`), persistent element hiding in an isolated script world (`Ctrl Shift H`), closed-tab stack (`Ctrl Shift T`), `.crx`/`.xpi`/unpacked content-script extensions, and 6-browser import (Firefox, Chromium, Chrome, Brave, Edge, Vivaldi).
-
-> **Explicit scope & limits.** Search has no cloud sync, user accounts, built-in password manager, multi-window mode, or DRM/EME playback. Read [differences from the original](docs/DIFFERENCES.md) and [technical limits](docs/LIMITS.md).
+- **Native GTK 3 interface**: Warm paper light mode and charcoal dark mode with terracotta accents, compact browser controls, rounded live viewport corners, and an 8×8 Bayer ordered-dither start page.
+- **Mouse-first chrome you can trim down**: Switch between top tabs and a vertical sidebar (`Ctrl S`), with one tab rail visible at a time, favicon-only pins, and pointer drag-reorder. Back/Forward/Reload/Stop/Home, inline menu zoom, and individual toolbar toggles stay within reach.
+- **Spaces for different tasks**: Start with Default; create, rename, or delete additional spaces in Settings. Each space remembers its tabs and selection. Deleting a space moves its tabs to Default. Spaces share cookies, bookmarks, and history; they are not isolated containers.
+- **Full-tab first-run setup**: Use defaults immediately or choose appearance, tab layout, search engine, live suggestions, and optional starter shortcuts. Setup appears only until completed or skipped.
+- **Appearance and layout controls**: Minimal, Standard, and Full presets; independent toolbar buttons and ordering; adjustable tab and sidebar widths; compact or roomy density; and validated appearance/layout JSON import and export. Fresh profiles use Minimal.
+- **Customizable start page**: Direct search/URL input, optional bookmark shortcuts with a configurable count and display style, and Off/Subtle/Full background dither. Cached real site favicons identify your bookmarks.
+- **Fast omnibox (`Ctrl L`)**: Searches open tabs, bookmarks, history, keyword shortcuts, and optional live search-engine suggestions (Startpage default; Ecosia, DuckDuckGo, Google, Bing, and Brave supported) with honest TLS/HTTP security chips.
+- **Engine-level blocking & privacy**: **15,775** compiled EasyList + EasyPrivacy rules enforced inside WebKitGTK, persistent per-site element hiding (`Ctrl Shift H`) in an isolated script world, and strictly ephemeral private tabs (`Ctrl Shift N`) that hide regular bookmarks and history.
+- **Built for daily reading**: Sanitized isolated-world Reading Mode (`Ctrl Shift R`), `Shift` + click floating Peek link cards, `Ctrl I` site security/permissions/zoom/data card, per-tab sleep after 10 idle minutes (exempting audio), and bookmark/history import from Firefox, Chromium, Chrome, Brave, Edge, and Vivaldi.
 
 ## Screenshots
 
-These are real captures of the GTK browser, taken by `tools/shots.sh` in round 76
-(22 November) at 1500x917 from the build whose sha256 is recorded in
-`council/round-76/manifest.json`. They are not mockups. The light and dark start
-pages, omnibox, pins, reading mode, History and Settings are the `01-default`,
-`04-omni`, `02-pins`, `07-reading`, `05-panel-history` and `05-panel-settings`
-states from `council/round-76/` (dark: `council/round-76-dark/`).
-The pixel checks in `tools/shots.sh` were rebaselined to the warm palette and
-now pass in both themes.
+These images in `docs/screenshots/rill-f48/` are unedited external X11 captures of `build/rill-spaces-f48`. Site icons were cached while visiting the real Rust, Python, and Debian websites. Generated design concepts are kept outside the product gallery.
 
 <table>
   <tr>
-    <td width="50%"><strong>Paper</strong><br><sub>An editorial start page and warm, precise native chrome.</sub></td>
-    <td width="50%"><strong>Charcoal</strong><br><sub>The same interface, thoughtfully resolved for dark browsing.</sub></td>
+    <td width="50%"><img src="docs/screenshots/rill-f48/introduction-light.png" alt="Full-tab Welcome to Rill introduction"></td>
+    <td width="50%"><img src="docs/screenshots/rill-f48/sidebar-dark.png" alt="Vertical tabs, favicon-only pins, and Work space in dark mode"></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/light.png" alt="Search in light mode with vertical tabs"></td>
-    <td><img src="docs/screenshots/dark.png" alt="Search in dark mode with vertical tabs"></td>
+    <td><strong>First run</strong> — A full-tab introduction with immediate defaults or optional setup.</td>
+    <td><strong>Vertical tabs &amp; spaces</strong> — Compact favicon pins above the current space's tabs, with no duplicate top strip.</td>
   </tr>
   <tr>
-    <td><strong>Omnibox</strong> (<code>Ctrl L</code>)<br><sub>Addresses, search suggestions, history, bookmarks, and open tabs in one place.</sub></td>
-    <td><strong>Pinned pages</strong><br><sub>Daily sites stay compact at the top of the column.</sub></td>
+    <td><img src="docs/screenshots/rill-f48/autocomplete.png" alt="Rill local autocomplete with a real cached site favicon"></td>
+    <td><img src="docs/screenshots/rill-f48/settings-spaces.png" alt="Settings controls for managing spaces"></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/omnibox.png" alt="Address field with suggestions"></td>
-    <td><img src="docs/screenshots/pins.png" alt="Pinned pages and vertical tabs"></td>
+    <td><strong>Omnibox (<code>Ctrl L</code>)</strong> — Local tab completion with a cached favicon; optional engine suggestions are disabled in this capture.</td>
+    <td><strong>Manage spaces</strong> — Create, rename, switch, and delete groups in Settings. Default cannot be deleted.</td>
+  </tr>
+</table>
+
+Setup uses flat choices with colored icons and an understated selection rule. Theme and tab layout preview immediately; skipping setup reverts the preview.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/rill-f48/setup-appearance-light.png" alt="Flat appearance and tab layout choices with colored icons"></td>
+    <td width="50%"><img src="docs/screenshots/rill-f48/setup-shortcuts-light.png" alt="Live suggestions switch and optional starter shortcuts with individual colored icons"></td>
   </tr>
 </table>
 
 <details>
-<summary><strong>More screenshots: Reading mode, History, and Settings</strong></summary>
+<summary>More screenshots: dark introduction, top tabs, and compact icons-only shortcuts</summary>
 <br>
 <table>
   <tr>
-    <td><img src="docs/screenshots/reading.png" alt="Article in reading mode"></td>
-    <td><img src="docs/screenshots/history.png" alt="History panel"></td>
+    <td width="50%"><img src="docs/screenshots/rill-f48/introduction-dark.png" alt="Full-tab introduction with dark browser chrome"></td>
+    <td width="50%"><img src="docs/screenshots/rill-f48/top-tabs-dark.png" alt="Top tabs with favicon pins in dark mode"></td>
   </tr>
   <tr>
-    <td align="center"><strong>Reading mode</strong> (<code>Ctrl Shift R</code>)<br><sub>Sanitized article typography without page clutter.</sub></td>
-    <td align="center"><strong>History</strong> (<code>Ctrl H</code> / <code>Ctrl Y</code>)<br><sub>Local, fast, and searchable.</sub></td>
+    <td><strong>Dark introduction</strong> — The same full-tab setup with dark chrome.</td>
+    <td><strong>Top tabs</strong> — Choose the horizontal layout and keep pins as compact icons.</td>
   </tr>
 </table>
 
-![Settings panel with appearance, privacy and memory options](docs/screenshots/settings.png)
+![Compact sidebar with circular icons-only homepage shortcuts](docs/screenshots/rill-f48/sidebar-icons-900.png)
+*900px layout with icons-only homepage shortcuts; full titles and addresses remain available in tooltips and accessible names.*
 
 </details>
 
-## AppImage
-
-An **x86_64 / AMD64** AppImage bundles Search, WebKitGTK 4.1, its process helpers, GStreamer plugins, fonts, and the GTK 3 runtime. No installation or root access required.
-
-```sh
-chmod +x Search-1.0.2-x86_64.AppImage
-./Search-1.0.2-x86_64.AppImage
-```
-
-For the local makeover, use a separate output path when rebuilding:
-
-```sh
-APPIMAGE_OUT="$PWD/build/Search-redesign-x86_64.AppImage" tools/appimage.sh
-```
-
-The packager supports `APPIMAGE_OUT`. The planned
-`build/Search-redesign-x86_64.AppImage` is a local, unreleased artifact; do not
-overwrite the released `Search-1.0.2-x86_64.AppImage` or its checksum.
-
-See [packaging/README.md](packaging/README.md) for verification, font licenses
-(including Liberation Serif), desktop-entry installation, and glibc compatibility
-notes.
-
-## Build from source
+## Run locally or build from source
 
 ### Requirements
 
-- **Rust 1.75+**
+- **Current stable Rust** (the locked `rusqlite` dependency requires at least Rust 1.89)
 - **GTK 3** and **WebKitGTK 4.1** (`webkit2gtk-4.1` on Arch, `libwebkit2gtk-4.1-dev` on Debian/Ubuntu)
-- A Wayland or X11 session
+- **GStreamer media plugins**: `gst-plugins-good` supplies audio output, VP9, and common containers; `gst-libav` adds H.264 decoding on Arch/Artix. Debian/Ubuntu equivalents are `gstreamer1.0-plugins-good` and `gstreamer1.0-libav`. Actual codec support depends on the installed plugins.
+- An X11 or Wayland desktop session
+
+### Build from source
+
+The Cargo crate and binary target keep their legacy internal name `search` for profile and script compatibility. Building into a dedicated target directory avoids touching any archived release binary:
 
 ```sh
-cargo build --release
-./target/release/search
+CARGO_TARGET_DIR=target/rill cargo build --release --bin search
+./target/rill/release/search
 ```
 
-No Node, no JS bundler, no submodules. The stripped `1.0.2` release binary was
-**~3.8 MB**; the local makeover has not been remeasured.
+If you already have the local preview binary built in this workspace:
+
+```sh
+./build/rill-spaces-f48
+```
+
+### Internal names & profile compatibility
+
+Rill preserves existing profile directories and environment variables so upgrading from earlier `search` builds keeps all preferences, bookmarks, history, and onboarding state without migration:
+
+- **Config / Data / Cache**: `$XDG_CONFIG_HOME/search`, `$XDG_DATA_HOME/search`, `$XDG_CACHE_HOME/search`
+- **Environment variables**: `SEARCH_LOW_MEMORY`, `SEARCH_ENABLE_DMABUF`, `SEARCH_BENCH`, `SEARCH_BINARY`, etc.
+- **Window identity**: Display title is `Rill`; `WM_CLASS` stays `search` to match the desktop entry and avoid duplicate taskbar icons.
 
 <details>
-<summary><strong>Install desktop launcher &amp; handle HTTP/HTTPS links</strong></summary>
+<summary>Install a local desktop launcher</summary>
+
+Copy the binary onto your `PATH` (for example `~/.local/bin/search`) and install the desktop file from [`packaging/Search.desktop`](packaging/Search.desktop):
 
 ```sh
-cargo install --path . --root ~/.local
-mkdir -p ~/.local/share/applications
-cat > ~/.local/share/applications/search.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Search
-Comment=A small, fast, quiet browser
-Exec=search %u
-Terminal=false
-Categories=Network;WebBrowser;
-MimeType=x-scheme-handler/http;x-scheme-handler/https;
-EOF
-xdg-mime default search.desktop x-scheme-handler/https
-xdg-mime default search.desktop x-scheme-handler/http
+install -Dm755 target/rill/release/search ~/.local/bin/search
+install -Dm644 packaging/Search.desktop ~/.local/share/applications/Search.desktop
+install -Dm644 packaging/search.png ~/.local/share/icons/hicolor/512x512/apps/search.png
 ```
+
+`packaging/Search.desktop` sets `Name=Rill`, `StartupWMClass=search`, and `Exec=search --url %u` so clicking HTTP/HTTPS links opens them directly. See [packaging/README.md](packaging/README.md) for AppImage build instructions and historic release notes.
 
 </details>
 
@@ -152,71 +126,30 @@ xdg-mime default search.desktop x-scheme-handler/http
 | Address / search field | `Ctrl L` | Find in page | `Ctrl F` |
 | New tab / Private tab | `Ctrl T` / `Ctrl Shift N` | Reading mode | `Ctrl Shift R` |
 | Close / Reopen tab | `Ctrl W` / `Ctrl Shift T` | Site info, zoom & permissions | `Ctrl I` |
-| Next / Previous tab | `Ctrl Tab` / `Ctrl Shift Tab` | Peek link in floating card | `Shift` + click |
-| Switch tab by typing | `Ctrl K` | Bookmark page | `Ctrl D` |
-| Duplicate tab | `Ctrl Shift K` | History / Downloads | `Ctrl H` (`Ctrl Y`) / `Ctrl J` |
-| Fold / unfold tab column | `Ctrl S` | Hide element / Restore hidden | `Ctrl Shift H` / `Ctrl Shift U` |
-| Settings / All shortcuts | `Ctrl ,` / `Ctrl /` | Dismiss current overlay | `Escape` |
+| Back / Forward / Home | `Alt ←` / `Alt →` / `Alt Home` | Peek link in floating card | `Shift` + click |
+| Switch tab / Move tab | `Ctrl Tab` / `Ctrl Shift PgUp/PgDn` | Bookmark page | `Ctrl D` |
+| Toggle tab sidebar | `Ctrl S` | Bookmarks / History / Downloads | `Ctrl Shift B` / `Ctrl H` / `Ctrl J` |
+| Show / hide navigation bar | `Ctrl Shift S` | Hide element / Restore hidden | `Ctrl Shift H` / `Ctrl Shift U` |
+| Settings / All shortcuts | `Ctrl ,` / `Ctrl /` | Fullscreen / Dismiss overlay | `F11` / `Escape` |
 
-## Architecture
+## Honest limits
 
-```text
-┌─────────────────────── Search (Rust + GTK 3) ───────────────────────┐
-│ app.rs · ui.rs · startpage.rs · motion.rs · omnibox.rs · panels.rs   │
-│ web.rs · sitecard.rs · peek.rs · curtain.rs · extensions.rs          │
-│ store.rs · reader.rs                                                │
-└──────────────────────────────────┬──────────────────────────────────┘
-                                   │ distribution WebKitGTK 4.1
-┌──────────────────────────────────▼──────────────────────────────────┐
-│ WebKitWebView · WebKitNetworkProcess · UserContentFilterStore       │
-└─────────────────────────────────────────────────────────────────────┘
-```
+- **Extensions & add-ons**: Rill is **not** a full WebExtensions browser. WebKitGTK has no background service workers, `chrome.*`/`browser.*` storage or messaging APIs, `webRequestBlocking`, toolbar popups, or `nativeMessaging`. Only content scripts, CSS, and `options_ui` can execute. Password-manager extensions (**Bitwarden**, **1Password**, **KeePassXC-Browser**) and built-in autofill do **not** work here. The F47 audit of **110 real SHA-verified AMO `.xpi` packages** (distinct from 108 synthetic loader fixtures) found **4** installer rejections and **106** installations with local-page smoke only (**22** unsupported, **83** partial, **1** content-capable — not 106 functioning products). In-app AMO search is HTTPS-bounded and user-initiated; compatibility badges estimate capability and are not certified support. See [docs/EXTENSIONS.md](docs/EXTENSIONS.md).
+- **Memory**: The original **~100 MB total-PSS target is unmet**. No new memory total is claimed for this build; the last archived full stress measurement (historical Design F39, `docs/benchmarks/stress-report-f39.json`) recorded **182.9 MB warm total PSS** (**94.5 MB** own anonymous PSS, **441.9 MB** RSS across 3 processes) for one idle tab against WebKitGTK's 230 MB floor. See [docs/LIMITS.md](docs/LIMITS.md).
+- **Linux desktop coverage**: Window decoration negotiation (`System` / `Browser` / `Hidden` in Settings) has been runtime-verified on **X11 Openbox** and **headless Wayland Sway**. KDE/KWin, Hyprland, and Omarchy were not installed in this environment and are not claimed runtime-verified.
+- **Out of scope**: No accounts or cloud sync, no built-in password manager or passkeys, no multi-window mode, no DRM/EME playback, no cross-app picture-in-picture, and no certificate revocation checks (OCSP/CRL).
 
-- **Key directories**:
-  - `src/` — Browser state (`app.rs`), WebKit integration (`web.rs`), GTK shell (`ui.rs`), native start page (`startpage.rs`), VSync motion (`motion.rs`), overlays (`omnibox.rs`, `panels.rs`, `peek.rs`, `sitecard.rs`, `find.rs`, `dialogs.rs`, `permissions.rs`), privacy/blocking (`shield.rs`, `curtain.rs`, `extensions.rs`), and test socket (`bench.rs`).
-  - `assets/` — Sanitized reading mode (`reader.js`) and compiled content-blocker lists (`shield/network.json`, `shield/hide-0.json`, `shield/hide-sites.json`).
-  - `tools/` — Current GTK visual/behavior walkthrough (`test_ui.py`), stress & memory suite (`stress.py`), legacy screenshot harness (`shots.sh`), shield compiler & checker (`build_shield.py`, `check_shield.py`), extension tests (`extensions.py`), AppImage packager (`appimage.sh`), and figure checker (`report_figures.py`).
-  - `docs/` — [Architecture](docs/ARCHITECTURE.md), [Technical Limits](docs/LIMITS.md), [Testing](docs/TESTING.md), and [Differences](docs/DIFFERENCES.md).
+## Documentation
 
-## Testing
-
-```sh
-cargo test --release                     # 304 passed, 1 ignored (305 total)
-python3 tools/test_ui.py                 # Current real GTK walkthrough and captures
-python3 tools/stress.py                  # End-to-end behavior and memory checks
-GDK_BACKEND=wayland python3 tools/extensions.py
-python3 tools/check_shield.py            # Compile the generated WebKit filter lists
-python3 tools/report_figures.py --check  # Compare docs with the saved stress report
-```
-
-The Rust tally is **304 passing tests and 1 ignored (305 total)** (final round). `tools/test_ui.py` uses an
-isolated profile and real GTK widgets for light/dark appearances, responsive
-sizes, actual URL entry, normal/private data separation, settings, navigation
-overflow, and screenshot palette review. See [docs/TESTING.md](docs/TESTING.md)
-for coverage, capture provenance, and remaining manual checks.
-
-The **117/117 stress checks** and `council/round-47` / `council/round-47-dark`
-screenshots are historical `1.0.2` evidence. The old hardcoded pixel assertions
-in `tools/shots.sh` do not establish a redesign pass. Reading a saved stress
-report with `tools/report_figures.py` is not a new measurement or UI check.
-
-## Memory, honestly
-
-**The original ~100 MB total-RAM request is not met.** The final round measured
-**203.6 MB resident** for one idle tab, including **98.2 MB of the browser's own
-memory**; the archived round-75 sample measured 218.6 MB total PSS / 96.0 MB anonymous PSS.
-Because WebKitGTK's three processes have a higher floor (216-219 MB measured
-over rounds 62-75), the stress suite now enforces a documented **230 MB floor**;
-this is a re-baselining, not a claim the original request was achieved. It also recorded tab switches at **1.0 ms mean**, **1.7 ms
-p95**, and **6.5 ms worst** over 300 switches. These are not new measurements of
-the local UI makeover. Total memory varies with WebKit, graphics initialization,
-page content, and host state; see [docs/LIMITS.md](docs/LIMITS.md) for memory
-definitions and limits.
-
-The suite records `target_pss_mb: 230` and `target_met: true` for that floor rather than reporting anonymous memory as total RAM. Settings → **Use less memory** applies at the next launch. It turns off the page cache, switches WebKit to its document-viewer cache model, skips spellcheck and turns off the compositing path (`WEBKIT_DISABLE_COMPOSITING_MODE=1`), so pages may animate less smoothly. The earlier four-run measurement in [docs/LIMITS.md](docs/LIMITS.md) found the browser's own memory lowest with all of these together. Turning compositing off by itself used more memory, not less. The archived round-76 baseline was 218.6 MB total PSS / 96.0 MB own for one idle tab; the final round's 203.6 MB resident / 98.2 MB own is reported separately because the harness records resident memory, not PSS.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Rust module map, WebKitGTK integration, and frame layout
+- [docs/EXTENSIONS.md](docs/EXTENSIONS.md) — Add-on capabilities, AMO catalog guards, and the 110 real-package test report
+- [docs/LIMITS.md](docs/LIMITS.md) — Detailed technical limits and archived memory/stress figures
+- [docs/DIFFERENCES.md](docs/DIFFERENCES.md) — How Rill differs from macOS Search
+- [docs/TESTING.md](docs/TESTING.md) — Unit tests, GTK UI walkthrough, bench socket, and stress harnesses
+- [packaging/README.md](packaging/README.md) — AppImage build preflight, font/plugin licenses, and historical artifacts
 
 ## Origin and license
 
-Search was created for macOS by [Office Commun](https://officecommun.com) ([driceroland/Search](https://github.com/driceroland/Search)). This is an independent Linux implementation in Rust using GTK 3 and WebKitGTK 4.1.
+Rill began as an independent Linux implementation of [Office Commun's Search](https://github.com/driceroland/Search) ([officecommun.com](https://officecommun.com)), built from scratch in Rust with GTK 3 and WebKitGTK 4.1.
 
 Licensed under [MIT](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).

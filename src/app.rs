@@ -138,6 +138,7 @@ pub fn current() -> Option<AppRef> {
 
 pub struct Tab {
     pub id: TabId,
+    pub space_id: String,
     pub url: String,
     pub title: String,
     pub pinned: bool,
@@ -150,6 +151,8 @@ pub struct Tab {
     pub asleep: bool,
     pub row: Option<TabRow>,
     pub pin: Option<ui::PinWidget>,
+    pub top_tab: Option<TabRow>,
+    pub top_pin: Option<ui::PinWidget>,
     pub last_seen: u64,
     /// Last time the page was making sound. Runtime only, never saved.
     pub last_audible: Option<std::time::Instant>,
@@ -158,6 +161,9 @@ pub struct Tab {
     /// The window was already full screen (F11) when the page asked, so leaving
     /// the page's full screen can give the window back as it was.
     pub window_was_full: bool,
+    /// Monotonic per-tab navigation counter so delayed callbacks bound to an
+    /// earlier document (such as element-hide clicks) cancel safely on navigation.
+    pub nav_epoch: u64,
 }
 
 impl Tab {
@@ -214,6 +220,7 @@ impl Tab {
     pub fn new(id: TabId) -> Tab {
         Tab {
             id,
+            space_id: crate::spaces::default_space_id(),
             url: String::new(),
             title: String::new(),
             pinned: false,
@@ -226,10 +233,13 @@ impl Tab {
             asleep: false,
             row: None,
             pin: None,
+            top_tab: None,
+            top_pin: None,
             last_seen: crate::store::now_secs(),
             last_audible: None,
             page_full: false,
             window_was_full: false,
+            nav_epoch: 0,
         }
     }
 }
@@ -383,6 +393,7 @@ pub const CLOSED_TAB_LIMIT: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClosedTab {
+    pub space_id: String,
     pub url: String,
     pub title: String,
     pub pinned: bool,
@@ -397,6 +408,7 @@ pub fn push_closed_tab(stack: &mut Vec<ClosedTab>, tab: &Tab, index: usize) {
         stack.remove(0);
     }
     stack.push(ClosedTab {
+        space_id: tab.space_id.clone(),
         url: tab.url.clone(),
         title: tab.title.clone(),
         pinned: tab.pinned,
@@ -408,6 +420,11 @@ pub fn restore_closed_tab(tabs: &mut Vec<Tab>, next_id: &mut TabId, closed: Clos
     let id = *next_id;
     *next_id += 1;
     let mut tab = Tab::new(id);
+    tab.space_id = if closed.space_id.trim().is_empty() {
+        crate::spaces::default_space_id()
+    } else {
+        closed.space_id
+    };
     tab.url = closed.url;
     tab.title = closed.title;
     tab.pinned = closed.pinned;
@@ -418,6 +435,8 @@ pub fn restore_closed_tab(tabs: &mut Vec<Tab>, next_id: &mut TabId, closed: Clos
 }
 
 pub struct State {
+    pub spaces: crate::spaces::SpaceStore,
+    pub space_active_tabs: BTreeMap<String, TabId>,
     pub tabs: Vec<Tab>,
     pub errors: BTreeMap<TabId, ErrorPage>,
     pub active: TabId,
@@ -427,12 +446,17 @@ pub struct State {
     pub hidden: BTreeMap<String, Vec<String>>,
     pub downloads: Vec<DownloadRec>,
     pub hide_mode: bool,
+    /// Originating tab/host/manager identity for an armed element-hide session.
+    pub(crate) hide_origin: Option<crate::curtain::HideOrigin>,
     /// The last window each tab asked for and was refused, for its card.
     pub blocked: BTreeMap<TabId, BlockedPopup>,
     pub closed_tabs: Vec<ClosedTab>,
 }
 
 impl State {
+    pub fn active_space_id(&self) -> &str {
+        self.spaces.active_space.as_str()
+    }
     pub fn position(&self, id: TabId) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
     }
@@ -444,6 +468,34 @@ impl State {
     }
     pub fn active_tab(&self) -> Option<&Tab> {
         self.tab(self.active)
+    }
+    /// Visual order of tabs in `space_id`: pinned partition first, then unpinned partition.
+    pub fn space_tab_ids_visual(&self, space_id: &str) -> Vec<TabId> {
+        let mut ids: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| t.space_id == space_id && t.pinned)
+            .map(|t| t.id)
+            .collect();
+        ids.extend(
+            self.tabs
+                .iter()
+                .filter(|t| t.space_id == space_id && !t.pinned)
+                .map(|t| t.id),
+        );
+        ids
+    }
+    pub fn last_active_in_space(&self, space_id: &str) -> Option<TabId> {
+        if self.active_space_id() == space_id
+            && self.tab(self.active).is_some_and(|t| t.space_id == space_id)
+        {
+            return Some(self.active);
+        }
+        self.space_active_tabs
+            .get(space_id)
+            .copied()
+            .filter(|id| self.tab(*id).is_some_and(|t| t.space_id == space_id))
+            .or_else(|| self.tabs.iter().find(|t| t.space_id == space_id).map(|t| t.id))
     }
 }
 
@@ -469,9 +521,18 @@ pub struct App {
     /// asked for during a redraw: a redraw happens while the rows are being
     /// rebuilt, and the view may not exist yet.
     pub icons: RefCell<std::collections::BTreeMap<TabId, cairo::Surface>>,
-    /// What the bookmarks bar currently shows, so it is rebuilt on a change to
-    /// the bookmarks rather than on every repaint.
-    bmarks_shown: RefCell<Vec<(String, String)>>,
+    /// Persistent-backed site favicon cache keyed by URL and `"host:<host>"`.
+    /// Populated only from non-private HTTP(S) tabs so bookmarks and
+    /// autocomplete rows retain each URL's real site icon.
+    pub url_icons: RefCell<std::collections::HashMap<String, cairo::Surface>>,
+    /// Monotonically bumped whenever a URL/host favicon is stored in `url_icons`.
+    pub icon_gen: Cell<u64>,
+    /// What the bookmarks bar currently shows `(icon_gen, filter, items)`.
+    bmarks_shown: RefCell<(u64, String, Vec<(String, String)>)>,
+    /// Live bookmarks-bar autocomplete suggestions and highlighted row index.
+    pub bmark_offers: RefCell<Vec<crate::store::Bookmark>>,
+    bmark_rows: RefCell<Vec<gtk::EventBox>>,
+    pub bmark_picked: Cell<i32>,
     /// The modifiers the last key carried, for the one shortcut whose meaning
     /// depends on a modifier the entry cannot report (Shift Return in find).
     pub last_modifiers: std::cell::Cell<gtk::gdk::ModifierType>,
@@ -486,18 +547,26 @@ pub struct App {
     pub zoom_by_host: RefCell<BTreeMap<String, f64>>,
     /// Temporary view-source files keyed by tab id, unlinked on tab close or quit.
     pub source_files: RefCell<BTreeMap<TabId, std::path::PathBuf>>,
+    /// Active Firefox-familiar browser menu popover, if open.
+    pub menu_popover: RefCell<Option<gtk::Popover>>,
+    /// Active Space switcher popover, if open.
+    pub space_popover: RefCell<Option<gtk::Popover>>,
+    /// Latest allocated toolbar width for responsive button layout.
+    pub toolbar_width: Cell<i32>,
+    /// Active Linux window decoration plan (native vs browser CSD vs hidden).
+    pub decor_plan: RefCell<crate::decor::DecorationPlan>,
     /// Last computed pin column count, so divider drags only rebuild pins on change.
     pub last_pin_across: Cell<usize>,
-    /// What the pin strip was last built from: the column count and, for each
-    /// pinned tab, its id, letter and title. render() runs on every tab event
-    /// (title, load, select), and the strip used to be torn down and rebuilt
-    /// each time, which made new widgets, tooltips, ATK names and click
-    /// handlers even when no pin had changed (Gemini R60 perf). The active tab
-    /// is not stored here: a tab switch recolours the existing tiles.
-    /// A favicon or theme change clears the signature.
-    pub pin_signature: RefCell<Option<(usize, Vec<(TabId, String, String)>)>>,
+    /// What the sidebar pin rail was last built from: `(active_space, dark, columns, icon_gen, [(id, mark, title, private, has_icon)])`.
+    pub pin_signature: RefCell<Option<(String, bool, usize, u64, Vec<(TabId, String, String, bool, bool)>)>>,
+    /// What the top pin rail was last built from: `(active_space, dark, icon_gen, [(id, mark, title, private, has_icon)])`.
+    pub top_pin_signature: RefCell<Option<(String, bool, u64, Vec<(TabId, String, String, bool, bool)>)>>,
     /// True while a column fold/unfold animation is driving the paned position.
     pub folding_anim: Cell<bool>,
+    /// Per-private-tab ephemeral hidden-element overrides keyed by `(TabId, host)`.
+    /// Never persisted to `hidden.json`; cleared when the private tab closes.
+    pub private_hidden:
+        RefCell<std::collections::HashMap<TabId, std::collections::HashMap<String, Vec<String>>>>,
 }
 
 /// The zoom after one step, kept between 40% and 300%.
@@ -726,9 +795,11 @@ fn remembered_size(window: &gtk::Window) -> Option<(i32, i32)> {
     Some((width, height))
 }
 
+pub const APP_NAME: &str = "Rill";
+
 pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
-    window.set_title("Search");
+    window.set_title(APP_NAME);
     // Decode the window icon with cairo's own PNG reader (cairo-rs is built
     // with the png feature), then turn the surface into a pixbuf for GTK.
     // Pixbuf::from_read goes through the gdk-pixbuf loader. On this system that
@@ -742,18 +813,12 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
             window.set_icon(Some(&icon));
         }
     }
-    window.set_decorated(true);
-    // Client-side decorations, with a title bar of no height at all: the
-    // window draws itself, and the desktop's own bar never appears.
-    let bar = gtk::HeaderBar::new();
-    bar.set_show_close_button(false);
-    bar.set_has_subtitle(false);
-    crate::ui::class(&bar, "nobar");
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_size_request(-1, 0);
-    bar.set_custom_title(Some(&spacer));
-    bar.set_size_request(-1, 0);
-    window.set_titlebar(Some(&bar));
+    let initial_decor = crate::decor::live_plan(prefs.window_controls);
+    // Honor native OS/window-manager decorations rather than forcing a
+    // zero-height HeaderBar CSD hack: on X11 with a decorating WM (Openbox,
+    // KWin, etc.) the desktop draws the single native titlebar frame, while
+    // Browser and Hidden modes disable the native frame cleanly and live.
+    window.set_decorated(initial_decor.native_decorated);
     window.set_resizable(true);
     window.set_default_size(prefs.window_size.0, prefs.window_size.1);
     window.set_position(gtk::WindowPosition::Center);
@@ -800,37 +865,55 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         );
     }
 
+    let spaces = Records::load_spaces();
+    let active_space = spaces.active_space.clone();
+    let mut space_active_tabs: BTreeMap<String, TabId> = BTreeMap::new();
     let mut tabs: Vec<Tab> = Vec::new();
     let mut next_id: TabId = 1;
     // The tab that was on top when the session was saved. A session file
-    // written before records carried `active`, or one where the active tab
-    // fell past the cap, has none, and the first tab is shown as before.
+    // written before records carried `active` or `space_id` migrates cleanly
+    // into Default, and per-space active tabs are remembered across restarts.
     let mut restored_active: Option<TabId> = None;
     if prefs.restore_session && !prefs.skip_restore {
         // Restore obeys the same cap as opening new tabs, so an oversized
         // or hand-edited session file can't start the browser with more
         // tabs than it would ever let you open.
         for record in Records::load_session().into_iter().take(TAB_LIMIT) {
+            let space_id = spaces.resolve_space_id(&record.space_id);
             let mut tab = Tab::new(next_id);
+            tab.space_id = space_id.clone();
             tab.url = record.url;
             tab.title = record.title;
             tab.pinned = record.pinned;
-            tab.asleep = true;
-            // A hand-edited file may mark more than one tab; the first wins.
-            if record.active && restored_active.is_none() {
+            tab.asleep = !tab.url.is_empty();
+            if record.space_active && !space_active_tabs.contains_key(&space_id) {
+                space_active_tabs.insert(space_id.clone(), next_id);
+            }
+            // A hand-edited file may mark more than one tab; the first in the
+            // active space wins (or first overall as legacy fallback).
+            if record.active && space_id == active_space && restored_active.is_none() {
                 restored_active = Some(next_id);
+                space_active_tabs.insert(space_id.clone(), next_id);
             }
             tabs.push(tab);
             next_id += 1;
         }
     }
-    if tabs.is_empty() {
-        tabs.push(Tab::new(next_id));
+    if !tabs.iter().any(|t| t.space_id == active_space) {
+        let mut blank = Tab::new(next_id);
+        blank.space_id = active_space.clone();
+        tabs.push(blank);
         next_id += 1;
     }
-    let active = restored_active.unwrap_or(tabs[0].id);
+    let active = restored_active
+        .or_else(|| space_active_tabs.get(&active_space).copied())
+        .or_else(|| tabs.iter().find(|t| t.space_id == active_space).map(|t| t.id))
+        .unwrap_or(tabs[0].id);
+    space_active_tabs.insert(active_space.clone(), active);
 
     let state = State {
+        spaces,
+        space_active_tabs,
         errors: BTreeMap::new(),
         tabs,
         active,
@@ -840,6 +923,7 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         hidden: Records::load_hidden(),
         downloads: Records::load_downloads(),
         hide_mode: false,
+        hide_origin: None,
         blocked: BTreeMap::new(),
         closed_tabs: Vec::new(),
     };
@@ -847,13 +931,16 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     let omni = Omnibox::new(&palette);
     let panels = Panels::new(&palette);
     let find = FindBar::new(&palette);
+    ui.overlay.add_overlay(&ui.bmark_layer.root);
     ui.overlay.add_overlay(&omni.holder);
     ui.overlay.add_overlay(&find.holder);
     ui.overlay.add_overlay(&panels.holder);
+    ui.bmark_layer.root.hide();
     omni.holder.hide();
     find.holder.hide();
     panels.holder.hide();
 
+    let initial_width = prefs.window_size.0;
     let app = Rc::new(App {
         ui,
         prefs: RefCell::new(prefs),
@@ -865,15 +952,26 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         private_ctx: RefCell::new(None),
         palette: RefCell::new(palette),
         icons: RefCell::new(std::collections::BTreeMap::new()),
-        bmarks_shown: RefCell::new(Vec::new()),
+        url_icons: RefCell::new(std::collections::HashMap::new()),
+        icon_gen: Cell::new(0),
+        bmarks_shown: RefCell::new((0, String::new(), Vec::new())),
+        bmark_offers: RefCell::new(Vec::new()),
+        bmark_rows: RefCell::new(Vec::new()),
+        bmark_picked: Cell::new(-1),
         last_modifiers: std::cell::Cell::new(gtk::gdk::ModifierType::empty()),
         fullscreen: std::cell::Cell::new(false),
         window_full: std::cell::Cell::new(false),
         zoom_by_host: RefCell::new(BTreeMap::new()),
         source_files: RefCell::new(BTreeMap::new()),
+        menu_popover: RefCell::new(None),
+        space_popover: RefCell::new(None),
+        toolbar_width: Cell::new(initial_width),
+        decor_plan: RefCell::new(initial_decor),
         last_pin_across: Cell::new(0),
         pin_signature: RefCell::new(None),
+        top_pin_signature: RefCell::new(None),
         folding_anim: Cell::new(false),
+        private_hidden: RefCell::new(std::collections::HashMap::new()),
         last_layout: RefCell::new((0, 0)),
         reading: std::cell::Cell::new(false),
         reading_tabs: RefCell::new(std::collections::BTreeSet::new()),
@@ -883,7 +981,8 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     // this slot. Wired first and installed after, all of them got an empty
     // handle: clicks, keys on the controls and the drag did nothing at all.
     install_self(&app);
-    app.apply_column(false);
+    app.sync_tab_layout();
+    app.sync_toolbar_items();
     app.ui.strip.connect_button_press_event({
         let weak = app.weak();
         move |_, event| {
@@ -958,9 +1057,8 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     }
     app.wire();
     app.apply_style();
+    app.sync_tab_layout();
     app.render();
-    // Apply a saved toolbar preference before the first mapped frame.
-    app.sync_toolbar();
     // A restored session comes back asleep, which is right for every tab but
     // the one in front: nothing made its view, so the window opened on the
     // blank page while the column highlighted a tab with an address. Waking
@@ -1033,7 +1131,23 @@ impl App {
             widget.style_context().remove_class("dark");
             widget.style_context().remove_class("light");
             widget.style_context().add_class(if self.dark() { "dark" } else { "light" });
+            if self.prefs.borrow().roomy_tabs {
+                widget.style_context().add_class("density-roomy");
+            } else {
+                widget.style_context().remove_class("density-roomy");
+            }
         }
+        let roomy = self.prefs.borrow().roomy_tabs;
+        self.ui.topbar.set_size_request(-1, if roomy { 42 } else { 38 });
+        self.ui.toolbar.set_size_request(-1, if roomy { 42 } else { 38 });
+        let palette = *self.palette.borrow();
+        self.ui
+            .viewport_corner_colors
+            .set((palette.ground, palette.hairline));
+        for corner in &self.ui.viewport_corners {
+            corner.queue_draw();
+        }
+        self.ui.start.queue_dither_redraw();
     }
 
     /// Re-read the desktop's answer, for the look that follows it. Called when
@@ -1056,6 +1170,7 @@ impl App {
         *self.palette.borrow_mut() =
             crate::palette::Palette::for_look(crate::store::Look::System, dark_desktop);
         self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
         self.apply_style();
         self.apply_page_tone();
         let canvas = self.page_canvas();
@@ -1066,6 +1181,10 @@ impl App {
             }
         }
         self.render();
+        let open_panel = self.panels.try_borrow().ok().and_then(|p| p.open.clone());
+        if let Some(kind) = open_panel {
+            self.open_panel(kind);
+        }
     }
 
     pub fn switch_look(&self, look: crate::store::Look) {
@@ -1077,6 +1196,7 @@ impl App {
         let palette = Palette::for_look(look, self.prefs.borrow().desktop_dark);
         *self.palette.borrow_mut() = palette;
         self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
         self.apply_style();
         self.apply_page_tone();
         // A page already open keeps the background it was made with unless it
@@ -1089,6 +1209,10 @@ impl App {
             }
         }
         self.render();
+        let open_panel = self.panels.try_borrow().ok().and_then(|p| p.open.clone());
+        if let Some(kind) = open_panel {
+            self.open_panel(kind);
+        }
     }
 
     pub fn private_context(&self) -> webkit2gtk::WebContext {
@@ -1107,6 +1231,18 @@ impl App {
     }
 
     pub fn new_tab(&self, url: Option<&str>, private: bool, background: bool) -> TabId {
+        self.new_tab_in_space(url, private, background, None)
+    }
+
+    /// Create a tab inside `opener`'s space when provided, else the active space.
+    /// Background opens never yank the active space or active tab.
+    pub fn new_tab_in_space(
+        &self,
+        url: Option<&str>,
+        private: bool,
+        background: bool,
+        opener: Option<TabId>,
+    ) -> TabId {
         // Every tab is a web process. A page that opens tabs in a loop, or a
         // person holding Ctrl+T, would otherwise keep forking until the system
         // kills something — and what it kills is not necessarily this browser.
@@ -1123,7 +1259,12 @@ impl App {
             let mut state = self.state.borrow_mut();
             let id = state.next_id;
             state.next_id += 1;
+            let anchor_id = opener.filter(|oid| state.position(*oid).is_some()).unwrap_or(state.active);
+            let target_space = opener
+                .and_then(|oid| state.tab(oid).map(|t| t.space_id.clone()))
+                .unwrap_or_else(|| state.spaces.active_space.clone());
             let mut tab = Tab::new(id);
+            tab.space_id = target_space.clone();
             tab.private = private;
             // A foreground tab with an address starts out blank. If it had
             // the URL, select() below would build its view and load the page,
@@ -1133,7 +1274,11 @@ impl App {
             // row title until navigate() replaces it with the resolved one.
             tab.url = if background { url.unwrap_or("").to_string() } else { String::new() };
             tab.asleep = url.is_none();
-            let at = state.position(state.active).map(|p| p + 1).unwrap_or(state.tabs.len());
+            let at = state
+                .position(anchor_id)
+                .filter(|&p| state.tabs[p].space_id == target_space)
+                .map(|p| p + 1)
+                .unwrap_or(state.tabs.len());
             state.tabs.insert(at, tab);
             id
         };
@@ -1158,7 +1303,8 @@ impl App {
 
     /// A window a page opened, taken as a tab around the view WebKit was handed
     /// back (web::related_view). WebKit loads the request into that view itself,
-    /// so this does not navigate. Opened in the background, after the opener.
+    /// so this does not navigate. Opened in the background, after the opener,
+    /// inheriting the opener's space.
     pub fn adopt_tab(&self, url: &str, private: bool, view: &webkit2gtk::WebView) -> Option<TabId> {
         if self.state.borrow().tabs.len() >= TAB_LIMIT {
             self.flash_error("That is as many tabs as this browser will hold");
@@ -1168,7 +1314,12 @@ impl App {
             let mut state = self.state.borrow_mut();
             let id = state.next_id;
             state.next_id += 1;
+            let opener_space = state
+                .active_tab()
+                .map(|t| t.space_id.clone())
+                .unwrap_or_else(|| state.spaces.active_space.clone());
             let mut tab = Tab::new(id);
+            tab.space_id = opener_space;
             tab.private = private;
             tab.url = url.to_string();
             let at = state.position(state.active).map(|p| p + 1).unwrap_or(state.tabs.len());
@@ -1228,7 +1379,7 @@ impl App {
                     app.ui.overlay.remove(&card_for_click);
                 }
                 forget_blocked(&app, tab, &shown);
-                app.new_tab(Some(&url), private, true);
+                app.new_tab_in_space(Some(&url), private, true, Some(tab));
             } else {
                 card_for_click.hide();
             }
@@ -1346,13 +1497,41 @@ impl App {
             return;
         }
         let old = self.active_id();
+        if old != id && self.state.borrow().hide_mode {
+            self.cancel_hide_mode();
+        }
         if old != id && self.state.borrow().tab(old).is_some_and(|t| t.page_full) {
             // A video full screen belongs to the tab that asked. Leaving it on
             // the old tab would hide the new tab's column too.
             self.exit_page_fullscreen(old);
             self.page_fullscreen(false);
         }
-        self.state.borrow_mut().active = id;
+        if old != id {
+            crate::suggest::stop();
+        }
+        let selected_space = {
+            let mut state = self.state.borrow_mut();
+            let space_id = state
+                .tab(id)
+                .map(|t| t.space_id.clone())
+                .unwrap_or_else(|| state.spaces.active_space.clone());
+            let switched_space = state.spaces.active_space != space_id;
+            if switched_space {
+                let prev_space = state.spaces.active_space.clone();
+                if state.tab(old).is_some_and(|t| t.space_id == prev_space) {
+                    state.space_active_tabs.insert(prev_space, old);
+                }
+                state.spaces.set_active(&space_id);
+            }
+            state.active = id;
+            state.space_active_tabs.insert(space_id.clone(), id);
+            switched_space.then(|| state.spaces.clone())
+        };
+        if let Some(spaces) = selected_space {
+            self.pin_signature.replace(None);
+            self.top_pin_signature.replace(None);
+            Records::save_spaces(&spaces);
+        }
         self.reading.set(self.tab_reading(id));
         self.ensure_view(id);
         // A blank tab has no page child now. render() below switches the
@@ -1458,21 +1637,41 @@ impl App {
     /// highlight off-screen, which reads as "nothing happened".
     fn scroll_active_into_view(&self) {
         let active = self.state.borrow().active;
-        let row = self.state.borrow().tab(active).and_then(|tab| tab.row.as_ref().map(|row| row.event.clone()));
-        let Some(row) = row else { return };
-        let adjust = self.ui.rows_scroll.vadjustment();
-        let Some((_, y)) = row.translate_coordinates(&self.ui.rows, 0, 0) else { return };
-        let height = row.allocated_height().max(1);
-        let top = adjust.value();
-        let page = adjust.page_size();
-        let wanted = if (y as f64) < top {
-            y as f64
-        } else if (y + height) as f64 > top + page {
-            (y + height) as f64 - page
-        } else {
-            return;
+        let (row, top_tab) = {
+            let state = self.state.borrow();
+            (
+                state.tab(active).and_then(|tab| tab.row.as_ref().map(|row| row.event.clone())),
+                state.tab(active).and_then(|tab| tab.top_tab.as_ref().map(|tab| tab.event.clone())),
+            )
         };
-        adjust.set_value(wanted.clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+        if let Some(row) = row {
+            let adjust = self.ui.rows_scroll.vadjustment();
+            if let Some((_, y)) = row.translate_coordinates(&self.ui.rows, 0, 0) {
+                let height = row.allocated_height().max(1);
+                let top = adjust.value();
+                let page = adjust.page_size();
+                if (y as f64) < top {
+                    adjust.set_value((y as f64).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                } else if (y + height) as f64 > top + page {
+                    adjust.set_value(((y + height) as f64 - page).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                }
+            }
+        }
+        if let Some(chip) = top_tab {
+            let adjust = self.ui.top_tabs_scroll.hadjustment();
+            if let Some((x, _)) = chip.translate_coordinates(&self.ui.top_tabs, 0, 0) {
+                let width = chip.allocated_width().max(1);
+                let left = adjust.value();
+                let page = adjust.page_size();
+                if page > 1.0 {
+                    if (x as f64) < left {
+                        adjust.set_value((x as f64).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                    } else if (x + width) as f64 > left + page {
+                        adjust.set_value(((x + width) as f64 - page).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                    }
+                }
+            }
+        }
     }
 
     /// How many views the stack is still holding for tabs that no longer
@@ -1505,14 +1704,32 @@ impl App {
         // A closed tab's refused window is nothing to offer any more, and a
         // later tab reusing nothing of it must not inherit its card.
         self.state.borrow_mut().blocked.remove(&id);
-        let (index, was_active) = {
+        let (index, was_active, was_private, closed_space) = {
             let state = self.state.borrow();
             match state.position(id) {
-                Some(index) => (index, state.active == id),
+                Some(index) => (
+                    index,
+                    state.active == id,
+                    state.tabs[index].private,
+                    state.tabs[index].space_id.clone(),
+                ),
                 None => return,
             }
         };
+        {
+            let mut state = self.state.borrow_mut();
+            if state.hide_origin.as_ref().is_some_and(|o| o.tab_id == id) {
+                state.hide_mode = false;
+                state.hide_origin = None;
+            }
+        }
+        self.private_hidden.borrow_mut().remove(&id);
         if let Some(view) = self.view(id) {
+            if was_private {
+                if let Some(manager) = view.user_content_manager() {
+                    curtain::forget_manager(&manager);
+                }
+            }
             // Removing it from the stack is not enough: the view is still a
             // child of the window and keeps its process, its page and its
             // rendering alive. It has to be destroyed.
@@ -1527,6 +1744,7 @@ impl App {
         self.icons.borrow_mut().remove(&id);
         // A pin tile built while the favicon existed would keep showing it.
         self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
         self.state.borrow_mut().errors.remove(&id);
         let is_source_file = self.source_files.borrow_mut().remove(&id);
         if let Some(path) = is_source_file.as_ref() {
@@ -1534,17 +1752,30 @@ impl App {
         }
         let next_active = {
             let mut state = self.state.borrow_mut();
+            let visual_before = state.space_tab_ids_visual(&closed_space);
+            let visual_pos = visual_before.iter().position(|&tid| tid == id).unwrap_or(0);
             let removed = state.tabs.remove(index);
             if is_source_file.is_none() {
                 push_closed_tab(&mut state.closed_tabs, &removed, index);
             }
-            if state.tabs.is_empty() {
+            let remaining_in_space = state.space_tab_ids_visual(&closed_space);
+            if remaining_in_space.is_empty() && closed_space == state.spaces.active_space {
                 let next = state.next_id;
                 state.next_id += 1;
-                state.tabs.push(Tab::new(next));
+                let mut fresh = Tab::new(next);
+                fresh.space_id = closed_space.clone();
+                state.tabs.push(fresh);
             }
-            if was_active {
-                state.active = state.tabs[index.min(state.tabs.len() - 1)].id;
+            let space_after = state.space_tab_ids_visual(&closed_space);
+            if let Some(&replacement) = space_after.get(visual_pos.min(space_after.len().saturating_sub(1))) {
+                if state.space_active_tabs.get(&closed_space) == Some(&id) {
+                    state.space_active_tabs.insert(closed_space.clone(), replacement);
+                }
+                if was_active {
+                    state.active = replacement;
+                }
+            } else {
+                state.space_active_tabs.remove(&closed_space);
             }
             state.active
         };
@@ -1704,6 +1935,12 @@ impl App {
     pub fn rebuild_view(&self, id: TabId) {
         let name = format!("tab-{id}");
         if let Some(view) = self.view(id) {
+            let private = self.state.borrow().tab(id).is_some_and(|t| t.private);
+            if private {
+                if let Some(manager) = view.user_content_manager() {
+                    curtain::forget_manager(&manager);
+                }
+            }
             self.retire_page_layers(id);
             // Removing it from the stack is not enough: the view is still a
             // child of the window and keeps its process, its page and its
@@ -1728,41 +1965,63 @@ impl App {
         }
     }
 
-    /// The bookmarks bar: one chip per kept page, in the order they were kept.
-    ///
-    /// Rebuilt only when the set changes, because a row of buttons rebuilt on
-    /// every title is a row of buttons that flickers while a page loads.
+    /// The bookmarks bar: one chip per kept page (with its real URL favicon),
+    /// filtered live by the inline bookmarks autocomplete field.
     pub fn render_bmarks(&self) {
+        let query = self.ui.bmark_search.text().trim().to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
         let (items, wanted): (Vec<(String, String)>, bool) = {
             let prefs = self.prefs.borrow();
             let state = self.state.borrow();
             let items: Vec<(String, String)> = state
                 .bookmarks
                 .iter()
+                .filter(|b| {
+                    words.is_empty()
+                        || crate::fuzzy::score(
+                            &words,
+                            &format!("{} {}", b.title, b.url).to_lowercase(),
+                        )
+                        .is_some()
+                })
                 .map(|b| (b.title.clone(), b.url.clone()))
                 .collect();
-            // The switch has to mean what it says. `||` here meant that
-            // turning "Show the bookmarks bar" off did nothing at all as soon
-            // as one page had been kept.
             let on_page = state.active_tab().is_some_and(|tab| !tab.url.is_empty());
             (items, on_page && prefs.show_bookmarks_bar && !state.bookmarks.is_empty())
         };
-        let built = self.bmarks_shown.borrow().clone();
-        if built != items {
+        let gen = self.icon_gen.get();
+        let sig = (gen, query.clone(), items.clone());
+        let same = *self.bmarks_shown.borrow() == sig;
+        if !same {
             for child in self.ui.bmarks.children() {
                 self.ui.bmarks.remove(&child);
             }
+            let muted = self.palette.borrow().muted;
             for (title, url) in &items {
-                let chip = gtk::Button::with_label(&short_title(title));
+                let chip = gtk::Button::new();
                 crate::ui::class(&chip, "bmark");
                 chip.set_tooltip_text(Some(url));
                 chip.set_relief(gtk::ReliefStyle::None);
+                let inner = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                inner.set_valign(gtk::Align::Center);
+                if let Some(surface) = self.favicon_for_url(url) {
+                    let img = crate::ui::favicon(&surface, 14);
+                    crate::ui::class(&img, "favicon");
+                    img.set_valign(gtk::Align::Center);
+                    ui::pack(&inner, &img, false);
+                } else {
+                    let glyph = crate::icons::area(crate::icons::Icon::Globe, 13, muted);
+                    glyph.set_valign(gtk::Align::Center);
+                    ui::pack(&inner, &glyph, false);
+                }
+                let text = gtk::Label::new(Some(&short_title(title)));
+                text.set_single_line_mode(true);
+                ui::pack(&inner, &text, false);
+                chip.add(&inner);
                 let target = url.clone();
                 let weak = self.weak();
                 chip.connect_clicked(move |_| {
                     if let Some(app) = weak.upgrade() {
-                        // A kept page opens in the tab you are in, which is
-                        // what a bookmarks bar does everywhere else.
                         let id = app.active_id();
                         if app.state.borrow().tab(id).map(|t| t.url.is_empty()).unwrap_or(false) {
                             app.navigate(id, &target);
@@ -1774,47 +2033,224 @@ impl App {
                 self.ui.bmarks.add(&chip);
             }
             self.ui.bmarks.show_all();
-            *self.bmarks_shown.borrow_mut() = items;
+            *self.bmarks_shown.borrow_mut() = sig;
         }
         if wanted {
             self.ui.bmarkbar.show_all();
+            self.ui.bmarkbar.show();
         } else {
+            self.ui.bmark_layer.root.hide();
             self.ui.bmarkbar.hide();
         }
     }
 
+    pub fn layout_bmark_autocomplete(&self) {
+        if !self.ui.bmark_layer.root.is_visible() {
+            return;
+        }
+        let overlay_w = self.ui.overlay.allocated_width().max(self.ui.window.allocated_width()).max(380);
+        let card_w = 360.min((overlay_w - 24).max(240));
+        let (bx, by) = self
+            .ui
+            .bmark_search_box
+            .translate_coordinates(&self.ui.overlay, 0, 0)
+            .unwrap_or((overlay_w - card_w - 12, 68));
+        let bw = self.ui.bmark_search_box.allocated_width().max(210);
+        let bh = self.ui.bmark_search_box.allocated_height().max(24);
+        let x = (bx + bw - card_w).clamp(12, (overlay_w - card_w - 12).max(12));
+        let y = by + bh + 4;
+        self.ui.bmark_suggest.set_size_request((card_w - 12).max(200), -1);
+        let wanted_h = (self.ui.bmark_suggest.preferred_height_for_width(card_w).1 + 12).clamp(48, 268);
+        self.ui.bmark_card.set_size_request(card_w, wanted_h);
+        self.ui.bmark_layer.place(&self.ui.bmark_card, x, y, card_w, wanted_h);
+    }
+
+    pub fn refresh_bmark_autocomplete(&self) {
+        let raw = self.ui.bmark_search.text().to_string();
+        let query = raw.trim().to_lowercase();
+        self.render_bmarks();
+        for child in self.ui.bmark_suggest.children() {
+            self.ui.bmark_suggest.remove(&child);
+        }
+        self.bmark_rows.borrow_mut().clear();
+        self.bmark_offers.borrow_mut().clear();
+        self.bmark_picked.set(-1);
+        if query.is_empty() || !self.ui.bmarkbar.is_visible() {
+            self.ui.bmark_layer.root.hide();
+            return;
+        }
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let matches: Vec<crate::store::Bookmark> = self
+            .state
+            .borrow()
+            .bookmarks
+            .iter()
+            .filter(|b| {
+                crate::fuzzy::score(&words, &format!("{} {}", b.title, b.url).to_lowercase()).is_some()
+            })
+            .take(8)
+            .cloned()
+            .collect();
+        if matches.is_empty() {
+            self.ui.bmark_layer.root.hide();
+            return;
+        }
+        *self.bmark_offers.borrow_mut() = matches.clone();
+        self.bmark_picked.set(0);
+        let tint = self.palette.borrow().faint;
+        for (idx, bookmark) in matches.into_iter().enumerate() {
+            let row = gtk::EventBox::new();
+            crate::ui::class(&row, "sgrow");
+            crate::ui::class(&row, "bmark-sgrow");
+            if idx == 0 {
+                crate::ui::class(&row, "picked");
+            }
+            row.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+            let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            hbox.set_margin_start(8);
+            hbox.set_margin_end(8);
+            hbox.set_margin_top(6);
+            hbox.set_margin_bottom(6);
+            let icon = crate::omnibox::build_offer_icon(self, &bookmark.url, "Bookmark", tint);
+            ui::pack(&hbox, &icon, false);
+            let texts = gtk::Box::new(gtk::Orientation::Vertical, 1);
+            texts.set_hexpand(true);
+            let title = gtk::Label::new(Some(&bookmark.title));
+            crate::ui::class(&title, "sgtitle");
+            title.set_xalign(0.0);
+            title.set_width_chars(1);
+            title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            let url_line = crate::omnibox::build_offer_url_box(&bookmark.url);
+            texts.add(&title);
+            texts.add(&url_line);
+            ui::pack(&hbox, &texts, true);
+            row.add(&hbox);
+            let weak = self.weak();
+            let target = bookmark.url.clone();
+            row.connect_button_press_event(move |_, _| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_bmark_target(&target);
+                }
+                crate::gtkx::inh(true)
+            });
+            self.bmark_rows.borrow_mut().push(row.clone());
+            self.ui.bmark_suggest.add(&row);
+        }
+        self.ui.bmark_layer.root.set_no_show_all(false);
+        self.ui.bmark_layer.show();
+        self.ui.bmark_card.show_all();
+        self.layout_bmark_autocomplete();
+    }
+
+    fn open_bmark_target(&self, target: &str) {
+        self.close_bmark_autocomplete(true);
+        let id = self.active_id();
+        if self.state.borrow().tab(id).map(|t| t.url.is_empty()).unwrap_or(false) {
+            self.navigate(id, target);
+        } else {
+            self.new_tab(Some(target), false, false);
+        }
+    }
+
+    pub fn close_bmark_autocomplete(&self, clear_entry: bool) {
+        self.ui.bmark_layer.root.hide();
+        self.bmark_picked.set(-1);
+        if clear_entry && !self.ui.bmark_search.text().is_empty() {
+            self.ui.bmark_search.set_text("");
+        }
+    }
+
+    pub fn step_bmark_suggest(&self, delta: i32) {
+        let rows = self.bmark_rows.borrow();
+        let count = rows.len() as i32;
+        if count == 0 {
+            self.bmark_picked.set(-1);
+            return;
+        }
+        let next = (self.bmark_picked.get() + delta).clamp(0, count - 1);
+        self.bmark_picked.set(next);
+        for (idx, row) in rows.iter().enumerate() {
+            let ctx = row.style_context();
+            if idx as i32 == next {
+                ctx.add_class("picked");
+            } else {
+                ctx.remove_class("picked");
+            }
+        }
+    }
+
+    pub fn complete_bmark_suggest(&self) -> bool {
+        let offers = self.bmark_offers.borrow();
+        if offers.is_empty() {
+            return false;
+        }
+        let idx = self.bmark_picked.get().clamp(0, offers.len() as i32 - 1) as usize;
+        let title = offers[idx].title.clone();
+        drop(offers);
+        self.ui.bmark_search.set_text(&title);
+        self.ui.bmark_search.set_position(-1);
+        true
+    }
+
+    pub fn commit_bmark_suggest(&self) -> bool {
+        let offers = self.bmark_offers.borrow();
+        if offers.is_empty() {
+            return false;
+        }
+        let idx = self.bmark_picked.get().clamp(0, offers.len() as i32 - 1) as usize;
+        let target = offers[idx].url.clone();
+        drop(offers);
+        self.open_bmark_target(&target);
+        true
+    }
+
     pub fn render(&self) {
+        self.render_space_controls();
+        self.render_top_pins();
+        self.render_top_tabs();
         self.render_pins();
         self.render_bmarks();
         self.render_rows();
         self.refresh_helm();
-        let (blank, has_error) = {
+        let (blank, has_error, active_private) = {
             let state = self.state.borrow();
             (
                 state.active_tab().map(|t| t.url.is_empty()).unwrap_or(true),
                 state.errors.contains_key(&state.active),
+                state.active_tab().is_some_and(|t| t.private),
             )
         };
         if has_error {
             let active = self.state.borrow().active;
-            if let Some(error) = self.state.borrow().errors.get(&active) {
-                let (title, action) = error_copy(&error.reason);
-                self.ui.error_title.set_text(title);
-                self.ui.error_reason.set_text(&error.reason);
-                self.ui.error_address.set_text(&error.url);
-                self.ui.error_retry.set_label(action);
+            let error = self
+                .state
+                .borrow()
+                .errors
+                .get(&active)
+                .map(|e| (e.reason.clone(), e.url.clone()));
+            if let Some((reason, url)) = error {
+                self.render_error_page(&reason, &url);
             }
             self.ui.errorpage.show_all();
             self.ui.stack.set_visible_child_name("error");
+        } else if blank && !active_private && crate::welcome::is_open(self) {
+            if let Some(child) = self.ui.stack.child_by_name("welcome") {
+                child.show();
+                self.ui.stack.set_visible_child_name("welcome");
+            }
         } else if blank {
             let state = self.state.borrow();
             let prefs = self.prefs.borrow();
             self.ui.start.refresh(
                 &state.bookmarks,
                 &state.history,
-                state.active_tab().is_some_and(|tab| tab.private),
+                active_private,
                 prefs.shield,
                 &prefs.search_engine,
+                prefs.show_start_shortcuts,
+                prefs.start_shortcuts_count,
+                prefs.start_bookmarks_mode,
+                prefs.start_dither,
             );
             if let Some(child) = self.ui.stack.child_by_name("blank") { child.show_all(); }
             self.ui.stack.set_visible_child_name("blank");
@@ -1830,30 +2266,173 @@ impl App {
         }
     }
 
-    /// Rebuild the tab column only when the tabs have actually changed shape.
-    /// A title arriving used to empty and refill the whole column, which is the
-    /// moment a tab switch felt like a redraw instead of a repaint.
+    fn render_space_controls(&self) {
+        let (spaces, active_id, active_name) = {
+            let state = self.state.borrow();
+            (
+                state.spaces.spaces.clone(),
+                state.spaces.active_space.clone(),
+                state.spaces.active().name.clone(),
+            )
+        };
+        let has_multi = spaces.len() > 1;
+        let tip = format!("Space: {active_name} (click to switch)");
+        let atk_name = format!("Active space: {active_name}");
+        for (btn, label) in [
+            (&self.ui.top_space_btn, &self.ui.top_space_label),
+            (&self.ui.side_space_btn, &self.ui.side_space_label),
+        ] {
+            label.set_text(&active_name);
+            btn.set_tooltip_text(Some(&tip));
+            if let Some(access) = btn.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, &atk_name);
+            }
+            if has_multi {
+                btn.set_no_show_all(false);
+                btn.show_all();
+                btn.set_no_show_all(true);
+            } else {
+                btn.hide();
+                btn.set_no_show_all(true);
+            }
+        }
+        self.ui.side_tabs_heading.hide();
+        thread_local! {
+            static UPDATING_SPACE_DOTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        struct SpaceDotGuard;
+        impl Drop for SpaceDotGuard {
+            fn drop(&mut self) {
+                UPDATING_SPACE_DOTS.with(|flag| flag.set(false));
+            }
+        }
+        let current = self.ui.side_spaces.children();
+        let same = current.len() == spaces.len()
+            && current.iter().zip(&spaces).all(|(button, space)| {
+                button.widget_name().as_str() == format!("space-dot-{}", space.id)
+            });
+        if !same {
+            for child in current {
+                self.ui.side_spaces.remove(&child);
+            }
+            for space in &spaces {
+                let button = gtk::ToggleButton::new();
+                crate::ui::class(&button, "space-dot");
+                button.set_widget_name(&format!("space-dot-{}", space.id));
+                button.set_relief(gtk::ReliefStyle::None);
+                button.set_focus_on_click(false);
+                let dot = gtk::DrawingArea::new();
+                dot.set_size_request(12, 12);
+                dot.set_halign(gtk::Align::Center);
+                dot.set_valign(gtk::Align::Center);
+                dot.connect_realize(|widget| {
+                    if let Some(window) = widget.window() {
+                        window.set_pass_through(true);
+                    }
+                });
+                let weak_button = button.downgrade();
+                dot.connect_draw(move |area, context| {
+                    if let Some(button) = weak_button.upgrade() {
+                        let color = button.style_context().color(button.state_flags());
+                        context.set_source_rgba(color.red(), color.green(), color.blue(), color.alpha());
+                        context.arc(
+                            area.allocated_width() as f64 / 2.0,
+                            area.allocated_height() as f64 / 2.0,
+                            if button.is_active() { 3.5 } else { 2.5 },
+                            0.0,
+                            std::f64::consts::TAU,
+                        );
+                        if button.is_active() {
+                            let _ = context.fill();
+                        } else {
+                            context.set_line_width(1.2);
+                            let _ = context.stroke();
+                        }
+                    }
+                    glib::Propagation::Proceed
+                });
+                button.add(&dot);
+                let target = space.id.clone();
+                let weak = self.weak();
+                button.connect_clicked(move |_| {
+                    if UPDATING_SPACE_DOTS.with(|flag| flag.get()) {
+                        return;
+                    }
+                    if let Some(app) = weak.upgrade() {
+                        app.switch_space(&target);
+                        app.render_space_controls();
+                    }
+                });
+                self.ui.side_spaces.pack_start(&button, false, false, 0);
+            }
+        }
+        UPDATING_SPACE_DOTS.with(|flag| flag.set(true));
+        let _space_dot_guard = SpaceDotGuard;
+        for (widget, space) in self.ui.side_spaces.children().iter().zip(&spaces) {
+            let active = space.id == active_id;
+            if let Some(button) = widget.downcast_ref::<gtk::ToggleButton>() {
+                if button.is_active() != active {
+                    button.set_active(active);
+                }
+                if active {
+                    button.style_context().add_class("active");
+                } else {
+                    button.style_context().remove_class("active");
+                }
+                button.set_tooltip_text(Some(&space.name));
+                let name = if active {
+                    format!("{} (current space)", space.name)
+                } else {
+                    format!("Switch to {} space", space.name)
+                };
+                if let Some(access) = button.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
+                }
+                button.queue_draw();
+            }
+        }
+        drop(_space_dot_guard);
+        if has_multi {
+            self.ui.side_spaces_footer.set_no_show_all(false);
+            self.ui.side_spaces_footer.show_all();
+            self.ui.side_spaces_footer.set_no_show_all(true);
+        } else {
+            self.ui.side_spaces_footer.hide();
+            self.ui.side_spaces_footer.set_no_show_all(true);
+        }
+    }
+
+    /// Rebuild the tab column only when the active space's tabs have changed shape.
     fn render_rows(&self) {
         let same = {
             let state = self.state.borrow();
+            let space_id = state.active_space_id();
             let expected: Vec<gtk::Widget> = state
                 .tabs
                 .iter()
-                .filter(|tab| !tab.pinned)
+                .filter(|tab| !tab.pinned && tab.space_id == space_id)
                 .filter_map(|tab| tab.row.as_ref().map(|row| row.event.clone().upcast()))
                 .collect();
-            expected.len() == state.tabs.iter().filter(|tab| !tab.pinned).count()
+            expected.len()
+                == state
+                    .tabs
+                    .iter()
+                    .filter(|tab| !tab.pinned && tab.space_id == space_id)
+                    .count()
                 && self.ui.rows.children() == expected
         };
+        let height = self.prefs.borrow().row_height();
         if same {
-            // The column is already the right shape, so only what has changed
-            // is repainted: the titles, and which row is the one you are on.
-            // Collected first: update_row_title borrows the state for writing,
-            // and a borrow held across that is how this panicked at launch.
             let (ids, active): (Vec<TabId>, TabId) = {
                 let state = self.state.borrow();
+                let space_id = state.active_space_id();
                 (
-                    state.tabs.iter().filter(|t| !t.pinned).map(|t| t.id).collect(),
+                    state
+                        .tabs
+                        .iter()
+                        .filter(|t| !t.pinned && t.space_id == space_id)
+                        .map(|t| t.id)
+                        .collect(),
                     state.active,
                 )
             };
@@ -1862,10 +2441,12 @@ impl App {
                 let info = {
                     let state = self.state.borrow();
                     state.tab(id).and_then(|t| {
-                        t.row.as_ref().map(|row| (row.event.clone(), row.title.clone(), row.close.clone(), t.asleep))
+                        t.row.as_ref().map(|row| (row.event.clone(), row.title.clone(), row.subtitle.clone(), row.close.clone(), t.asleep))
                     })
                 };
-                if let Some((event, title, close, asleep)) = info {
+                if let Some((event, title, subtitle, close, asleep)) = info {
+                    event.set_size_request(-1, height);
+                    subtitle.set_visible(height >= 44);
                     let context = event.style_context();
                     if id == active {
                         context.add_class("live");
@@ -1883,23 +2464,12 @@ impl App {
                     } else {
                         title_ctx.remove_class("liveword");
                     }
-                    // Set in code, not styled: see ui::close_opacity. A row
-                    // under the pointer keeps its x at full strength while the
-                    // active tab changes.
-                    // The close button can be hovered even when the pointer
-                    // is no longer reported as over the row (the button is a
-                    // child with its own window). Ask both widgets so the x
-                    // does not blink out under the pointer on a keyboard
-                    // tab switch.
                     let prelit = |w: &gtk::Widget| w.state_flags().contains(gtk::StateFlags::PRELIGHT);
                     let hovered = prelit(event.upcast_ref::<gtk::Widget>())
                         || close.parent().as_ref().map(prelit).unwrap_or(false);
                     close.set_opacity(ui::close_opacity(id == active, hovered));
                 }
             }
-            // The column was already built, so nothing moved it: a tab that
-            // became active without a click on its row (Ctrl Tab, Ctrl 1..9,
-            // a launcher hand-off) still has to be brought into view.
             self.scroll_active_into_view();
             return;
         }
@@ -1909,18 +2479,16 @@ impl App {
         for tab in &mut self.state.borrow_mut().tabs {
             tab.row = None;
         }
-        // The old rows are gone with their geometry, so the adjustment still
-        // holds last frame's values: carrying them over would leave a freshly
-        // built column scrolled to a place that no longer means anything.
-        // Re-anchoring below costs one pass and is what keeps the live row
-        // visible after a rebuild.
         let (tabs, active) = {
             let state = self.state.borrow();
+            let space_id = state.active_space_id();
             let tabs: Vec<Tab> = state
                 .tabs
                 .iter()
+                .filter(|t| !t.pinned && t.space_id == space_id)
                 .map(|t| Tab {
                     id: t.id,
+                    space_id: t.space_id.clone(),
                     url: t.url.clone(),
                     title: t.title.clone(),
                     pinned: t.pinned,
@@ -1933,16 +2501,24 @@ impl App {
                     asleep: t.asleep,
                     row: None,
                     pin: None,
+                    top_tab: None,
+                    top_pin: None,
                     last_seen: t.last_seen,
                     last_audible: t.last_audible,
                     page_full: t.page_full,
                     window_was_full: t.window_was_full,
+                    nav_epoch: t.nav_epoch,
                 })
                 .collect();
             (tabs, state.active)
         };
         let height = self.prefs.borrow().row_height();
-        for tab in tabs.iter().filter(|t| !t.pinned) {
+        let dnd_target = [gtk::TargetEntry::new(
+            "application/x-search-tab-id",
+            gtk::TargetFlags::SAME_APP,
+            0,
+        )];
+        for tab in tabs.iter() {
             let title = if tab.title.is_empty() {
                 if tab.url.is_empty() {
                     "New tab".to_string()
@@ -1961,41 +2537,87 @@ impl App {
                 ui::TabState { asleep: tab.asleep, loading: tab.loading, private: tab.private },
             );
             row.subtitle.set_text(&tab_subtitle(&tab.url, tab.private, tab.asleep));
-            // A page with its own mark shows it; one without keeps its letter.
-            let icon = self.icons.borrow().get(&tab.id).cloned();
+            let icon = self.tab_favicon_surface(tab.id, &tab.url, tab.private);
             if let Some(surface) = icon.as_ref() {
-                // The mask and the spinner outrank the site's own mark: what
-                // the tab is doing matters more than whose page it is.
                 if !tab.private && !tab.loading {
                     ui::mark(&row.icon, tab.letter(), Some(surface), 16);
                 }
             }
             let tip = if tab.url.is_empty() {
-                "New tab".to_string()
+                if tab.private { "Private tab".to_string() } else { "New tab".to_string() }
             } else {
                 format!("{}\n{}", if title.is_empty() { "Untitled" } else { title.as_str() }, tab.url)
             };
             row.event.set_tooltip_text(Some(&tip));
-            // A row is a tab, not a picture of one: the mark is drawn and the
-            // title may be a host name, so a screen reader gets the same words
-            // the pointer gets. No focus is taken: the page keeps the keyboard.
             if let Some(access) = row.event.accessible() {
-                // Fully qualified: gtk's prelude brings several traits with a
-                // `set_name`, and this one is atk's.
                 gtk::atk::prelude::AtkObjectExt::set_name(&access, &tip);
                 gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
             }
-            // Tab and Shift+Tab can reach a row, so the tab list works without
-            // a pointer. A click still leaves focus where it was, so the page
-            // keeps the keyboard when you pick a tab with the mouse. A focused
-            // row selects on Enter or Space and closes on Delete, the same
-            // actions a left click and a middle click give.
             row.event.set_can_focus(true);
             row.event.set_focus_on_click(false);
-            row.event.add_events(gtk::gdk::EventMask::KEY_PRESS_MASK);
+            row.event.add_events(
+                gtk::gdk::EventMask::KEY_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_RELEASE_MASK
+                    | gtk::gdk::EventMask::POINTER_MOTION_MASK,
+            );
+            let id = tab.id;
+            row.event.drag_source_set(
+                gtk::gdk::ModifierType::BUTTON1_MASK,
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            row.event.drag_dest_set(
+                gtk::DestDefaults::empty(),
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            row.event.connect_drag_begin(|w, _| {
+                w.style_context().add_class("dragging");
+            });
+            row.event.connect_drag_end(|w, _| {
+                w.style_context().remove_class("dragging");
+            });
+            row.event.connect_drag_data_get(move |_, _, data, _, _| {
+                data.set(&gtk::gdk::Atom::intern("application/x-search-tab-id"), 8, &id.to_le_bytes());
+            });
+            row.event.connect_drag_motion(|w, ctx, _, _, time| {
+                if w.drag_dest_find_target(ctx, None).is_some() {
+                    ctx.drag_status(gtk::gdk::DragAction::MOVE, time);
+                    w.style_context().add_class("drag-over");
+                    true
+                } else {
+                    ctx.drag_status(gtk::gdk::DragAction::empty(), time);
+                    false
+                }
+            });
+            row.event.connect_drag_leave(|w, _, _| {
+                w.style_context().remove_class("drag-over");
+            });
+            row.event.connect_drag_drop(|w, ctx, _, _, time| {
+                if let Some(target) = w.drag_dest_find_target(ctx, None) {
+                    w.drag_get_data(ctx, &target, time);
+                    true
+                } else {
+                    false
+                }
+            });
             {
                 let weak = self.weak();
-                let id = tab.id;
+                row.event.connect_drag_data_received(move |w, ctx, _, _, data, _, time| {
+                    w.style_context().remove_class("drag-over");
+                    let raw = data.data();
+                    let source_id = (raw.len() == 8)
+                        .then(|| u64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8])));
+                    let accepted = source_id.is_some_and(|src| src != id);
+                    ctx.drag_finish(accepted, false, time);
+                    if let (Some(source_id), Some(app)) = (source_id, weak.upgrade()) {
+                        app.reorder_tab(source_id, id);
+                    }
+                });
+            }
+            {
+                let weak = self.weak();
                 row.event.connect_key_press_event(move |_, event| {
                     use gtk::gdk::keys::constants as key;
                     let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
@@ -2022,14 +2644,29 @@ impl App {
             }
             {
                 let weak = self.weak();
-                let id = tab.id;
                 row.event.connect_button_press_event(move |_, event| {
                     let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
                     if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
+                        let single = button.event_type() == gtk::gdk::EventType::ButtonPress;
                         match button.button() {
-                            1 => app.select(id),
-                            2 => app.close_tab(id),
-                            3 => app.tab_menu(id, event),
+                            1 => {
+                                if single {
+                                    app.select(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            2 => {
+                                if single {
+                                    app.close_tab(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            3 => {
+                                if single {
+                                    app.tab_menu(id, event);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
                             _ => {}
                         }
                     }
@@ -2102,28 +2739,44 @@ impl App {
     }
 
     fn render_pins_with_width(&self, usable_override: Option<i32>) {
-        // Each pin carries its own words and whether it is the tab you are
-        // on. A pinned tab with no title and no address used to produce an
-        // empty tooltip: the fallback the rows use gives it something to say.
-        let pinned: Vec<(TabId, String, String, bool)> = {
+        // Zen-style favicon-only pinned tab rail for the active space.
+        let (active_space, pinned): (String, Vec<(TabId, String, String, String, bool, bool, bool)>) = {
             let state = self.state.borrow();
-            state
+            let space_id = state.active_space_id().to_string();
+            let list = state
                 .tabs
                 .iter()
-                .filter(|t| t.pinned)
+                .filter(|t| t.pinned && t.space_id == space_id)
                 .map(|t| {
                     let title = if t.title.is_empty() {
-                        if t.url.is_empty() { "New tab".to_string() } else { t.url.clone() }
+                        if t.url.is_empty() {
+                            if t.private { "Private tab".to_string() } else { "New tab".to_string() }
+                        } else {
+                            crate::shield::host_of(&t.url)
+                        }
                     } else {
                         t.title.clone()
                     };
-                    (t.id, t.pin_mark(), title, t.id == state.active)
+                    let has_icon = self.tab_favicon_surface(t.id, &t.url, t.private).is_some();
+                    (
+                        t.id,
+                        t.pin_mark(),
+                        title,
+                        t.url.clone(),
+                        t.id == state.active,
+                        t.private,
+                        has_icon,
+                    )
                 })
-                .collect()
+                .collect();
+            (space_id, list)
         };
         if pinned.is_empty() {
             for child in self.ui.pins.children() {
                 self.ui.pins.remove(&child);
+            }
+            for tab in &mut self.state.borrow_mut().tabs {
+                tab.pin = None;
             }
             self.pin_signature.replace(None);
             self.last_pin_across.set(0);
@@ -2131,13 +2784,9 @@ impl App {
             self.ui.pins_holder.set_no_show_all(true);
             return;
         }
-        // A widget that opts out of show_all is not shown by it, even when it
-        // is the one being asked: the flag comes off first.
         self.ui.pins_holder.set_no_show_all(false);
         self.ui.pins_holder.show_all();
-        // Four pins stay in one row at the reference width. `pins` only
-        // allocates as wide as its children, so the holder/side measurement
-        // is the column width that actually decides wrapping.
+        self.ui.pins_holder.set_no_show_all(true);
         let across = {
             let usable = match usable_override {
                 Some(w) if w > 40 => w,
@@ -2146,29 +2795,30 @@ impl App {
                         .ui
                         .pins_holder
                         .allocated_width()
-                        .max(self.ui.side.allocated_width());
+                        .max(self.ui.side.allocated_width() - 16);
                     if measured > 40 { measured } else { self.prefs.borrow().side_width as i32 - 20 }
                 }
             };
-            ((usable / 34) as usize).clamp(1, 6).max(1)
+            ((usable / 42) as usize).clamp(1, 6).max(1)
         };
         self.last_pin_across.set(across);
-        // Same pins, same order, same words and same column count: the tiles
-        // already on screen are what a rebuild would make, so they stay. The
-        // active tab is deliberately not in the signature: a tab switch must
-        // recolour a tile, not throw the whole strip away.
         let signature = (
+            active_space,
+            self.dark(),
             across,
-            pinned.iter().map(|(id, letter, title, _)| (*id, letter.clone(), title.clone())).collect::<Vec<_>>(),
+            self.icon_gen.get(),
+            pinned
+                .iter()
+                .map(|(id, letter, title, _, _, private, has_icon)| {
+                    (*id, letter.clone(), title.clone(), *private, *has_icon)
+                })
+                .collect::<Vec<_>>(),
         );
         if self.pin_signature.borrow().as_ref() == Some(&signature)
             && self.ui.pins.children().len() == pinned.len()
         {
-            // CSS paints `.pin.live` and its letter, so the class on the
-            // event box is the whole visual change. Words and ATK name follow
-            // the same live flag.
             let state = self.state.borrow();
-            for (id, _, title, live) in &pinned {
+            for (id, _, title, _, live, _, _) in &pinned {
                 let Some(tile) = state.tab(*id).and_then(|tab| tab.pin.as_ref()) else { continue };
                 let context = tile.event.style_context();
                 if *live {
@@ -2187,42 +2837,148 @@ impl App {
         for child in self.ui.pins.children() {
             self.ui.pins.remove(&child);
         }
+        for tab in &mut self.state.borrow_mut().tabs {
+            tab.pin = None;
+        }
         self.pin_signature.replace(Some(signature));
-        for (index, (id, letter, title, live)) in pinned.iter().enumerate() {
-            let tile = ui::pin_tile(letter, *live, *self.palette.borrow());
-            tile.event.set_size_request(32, 32);
-            // A page that offers a mark shows it and drops the letter; a page
-            // with neither keeps the letter, which is at least its own.
-            if let Some(surface) = self.icons.borrow().get(id).cloned() {
-                ui::mark(&tile.icon, letter.chars().next().unwrap_or('?'), Some(&surface), 22);
+        let dnd_target = [gtk::TargetEntry::new(
+            "application/x-search-pin-id",
+            gtk::TargetFlags::SAME_APP,
+            0,
+        )];
+        for (index, (id, letter, title, url, live, private, _)) in pinned.iter().enumerate() {
+            let id = *id;
+            let live = *live;
+            let private = *private;
+            let tile = ui::pin_tile(letter, live, private, *self.palette.borrow());
+            if private {
+                ui::mark_glyph(&tile.icon, crate::icons::Icon::Mask, None, 16, self.palette.borrow().muted);
+                tile.icon.set_no_show_all(false);
+                tile.icon.show_all();
+                tile.letter.hide();
+            } else if let Some(surface) = self.tab_favicon_surface(id, url, false) {
+                ui::mark(&tile.icon, letter.chars().next().unwrap_or('?'), Some(&surface), 18);
                 tile.icon.set_no_show_all(false);
                 tile.icon.show_all();
                 tile.letter.hide();
             }
-            // The tooltip alone said what the page was, so the pin you were
-            // on read exactly like the other three. It now says which one is
-            // live, and the tile - a letter or a favicon, with no text inside
-            // - gets the same words as an accessible name under a tab role,
-            // because a screen reader cannot read the letter at all.
-            let (tip, name) = Self::pin_words(title, *live);
+            let (tip, name) = Self::pin_words(title, live);
             tile.event.set_tooltip_text(Some(&tip));
             if let Some(access) = tile.event.accessible() {
                 gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
                 gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
             }
+            tile.event.add_events(
+                gtk::gdk::EventMask::KEY_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_RELEASE_MASK
+                    | gtk::gdk::EventMask::POINTER_MOTION_MASK,
+            );
+            tile.event.drag_source_set(
+                gtk::gdk::ModifierType::BUTTON1_MASK,
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            tile.event.drag_dest_set(
+                gtk::DestDefaults::empty(),
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            tile.event.connect_drag_begin(|w, _| {
+                w.style_context().add_class("dragging");
+            });
+            tile.event.connect_drag_end(|w, _| {
+                w.style_context().remove_class("dragging");
+            });
+            tile.event.connect_drag_data_get(move |_, _, data, _, _| {
+                data.set(&gtk::gdk::Atom::intern("application/x-search-pin-id"), 8, &id.to_le_bytes());
+            });
+            tile.event.connect_drag_motion(|w, ctx, _, _, time| {
+                if w.drag_dest_find_target(ctx, None).is_some() {
+                    ctx.drag_status(gtk::gdk::DragAction::MOVE, time);
+                    w.style_context().add_class("drag-over");
+                    true
+                } else {
+                    ctx.drag_status(gtk::gdk::DragAction::empty(), time);
+                    false
+                }
+            });
+            tile.event.connect_drag_leave(|w, _, _| {
+                w.style_context().remove_class("drag-over");
+            });
+            tile.event.connect_drag_drop(|w, ctx, _, _, time| {
+                if let Some(target) = w.drag_dest_find_target(ctx, None) {
+                    w.drag_get_data(ctx, &target, time);
+                    true
+                } else {
+                    false
+                }
+            });
             {
                 let weak = self.weak();
-                let id = *id;
+                tile.event.connect_drag_data_received(move |w, ctx, _, _, data, _, time| {
+                    w.style_context().remove_class("drag-over");
+                    let raw = data.data();
+                    let source_id = (raw.len() == 8)
+                        .then(|| u64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8])));
+                    let accepted = source_id.is_some_and(|src| src != id);
+                    ctx.drag_finish(accepted, false, time);
+                    if let (Some(source_id), Some(app)) = (source_id, weak.upgrade()) {
+                        app.reorder_tab(source_id, id);
+                    }
+                });
+            }
+            {
+                let weak = self.weak();
+                tile.event.connect_key_press_event(move |_, event| {
+                    use gtk::gdk::keys::constants as key;
+                    let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                    let state = event.state();
+                    let modified = state.intersects(
+                        gtk::gdk::ModifierType::CONTROL_MASK
+                            | gtk::gdk::ModifierType::MOD1_MASK
+                            | gtk::gdk::ModifierType::SHIFT_MASK,
+                    );
+                    if modified {
+                        return crate::gtkx::inh(false);
+                    }
+                    let keyval = event.keyval();
+                    if keyval == key::Return || keyval == key::KP_Enter || keyval == key::space {
+                        app.select(id);
+                        crate::gtkx::inh(true)
+                    } else if keyval == key::Delete || keyval == key::KP_Delete {
+                        app.close_tab(id);
+                        crate::gtkx::inh(true)
+                    } else {
+                        crate::gtkx::inh(false)
+                    }
+                });
+            }
+            {
+                let weak = self.weak();
                 tile.event.connect_button_press_event(move |_, event| {
                     let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
                     if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
+                        let single = button.event_type() == gtk::gdk::EventType::ButtonPress;
                         match button.button() {
-                            1 => app.select(id),
-                            2 => app.close_tab(id),
-                            // Pinned tabs are not in the rows, so the row's
-                            // menu is the only place "Unpin" lived: pinning
-                            // was a one-way door.
-                            3 => app.tab_menu(id, event),
+                            1 => {
+                                if single {
+                                    app.select(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            2 => {
+                                if single {
+                                    app.close_tab(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            3 => {
+                                if single {
+                                    app.tab_menu(id, event);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
                             _ => {}
                         }
                     }
@@ -2230,22 +2986,573 @@ impl App {
                 });
             }
             self.ui.pins.attach(&tile.event, (index % across) as i32, (index / across) as i32, 1, 1);
-            if let Some(slot) = self.state.borrow_mut().tab_mut(*id) {
+            if let Some(slot) = self.state.borrow_mut().tab_mut(id) {
                 slot.pin = Some(tile);
             }
         }
         self.ui.pins.show_all();
     }
 
+    /// Reorder `source_id` to the position of `target_id` within the same
+    /// pinned/unpinned partition. Used by top-tab drag-and-drop and bench tests.
+    pub fn reorder_tab(&self, source_id: TabId, target_id: TabId) -> bool {
+        let moved = {
+            let mut state = self.state.borrow_mut();
+            reorder_tab_in_slice(&mut state.tabs, source_id, target_id)
+        };
+        if moved {
+            self.render();
+            self.schedule_session();
+        }
+        moved
+    }
+
+    /// Move `id` one slot left (`delta = -1`) or right (`delta = 1`) within its
+    /// pinned/unpinned partition.
+    pub fn move_tab_by(&self, id: TabId, delta: isize) -> bool {
+        let moved = {
+            let mut state = self.state.borrow_mut();
+            move_tab_slot_in_slice(&mut state.tabs, id, delta)
+        };
+        if moved {
+            self.render();
+            self.schedule_session();
+        }
+        moved
+    }
+
+    pub fn move_active_tab(&self, delta: isize) {
+        let active = self.active_id();
+        let _ = self.move_tab_by(active, delta);
+    }
+
+    fn render_top_pins(&self) {
+        let (active_space, pinned): (String, Vec<(TabId, String, String, String, bool, bool, bool)>) = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id().to_string();
+            let list = state
+                .tabs
+                .iter()
+                .filter(|t| t.pinned && t.space_id == space_id)
+                .map(|t| {
+                    let title = if t.title.is_empty() {
+                        if t.url.is_empty() {
+                            if t.private { "Private tab".to_string() } else { "New tab".to_string() }
+                        } else {
+                            crate::shield::host_of(&t.url)
+                        }
+                    } else {
+                        t.title.clone()
+                    };
+                    let has_icon = self.tab_favicon_surface(t.id, &t.url, t.private).is_some();
+                    (
+                        t.id,
+                        t.pin_mark(),
+                        title,
+                        t.url.clone(),
+                        t.id == state.active,
+                        t.private,
+                        has_icon,
+                    )
+                })
+                .collect();
+            (space_id, list)
+        };
+        if pinned.is_empty() {
+            for child in self.ui.top_pins.children() {
+                self.ui.top_pins.remove(&child);
+            }
+            for tab in &mut self.state.borrow_mut().tabs {
+                tab.top_pin = None;
+            }
+            self.top_pin_signature.replace(None);
+            self.ui.top_pins_holder.hide();
+            self.ui.top_pins_holder.set_no_show_all(true);
+            return;
+        }
+        self.ui.top_pins_holder.set_no_show_all(false);
+        self.ui.top_pins_holder.show_all();
+        self.ui.top_pins_holder.set_no_show_all(true);
+        let signature = (
+            active_space,
+            self.dark(),
+            self.icon_gen.get(),
+            pinned
+                .iter()
+                .map(|(id, letter, title, _, _, private, has_icon)| {
+                    (*id, letter.clone(), title.clone(), *private, *has_icon)
+                })
+                .collect::<Vec<_>>(),
+        );
+        if self.top_pin_signature.borrow().as_ref() == Some(&signature)
+            && self.ui.top_pins.children().len() == pinned.len()
+        {
+            let state = self.state.borrow();
+            for (id, _, title, _, live, _, _) in &pinned {
+                let Some(tile) = state.tab(*id).and_then(|tab| tab.top_pin.as_ref()) else { continue };
+                let context = tile.event.style_context();
+                if *live { context.add_class("live"); } else { context.remove_class("live"); }
+                let (tip, name) = Self::pin_words(title, *live);
+                tile.event.set_tooltip_text(Some(&tip));
+                if let Some(access) = tile.event.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
+                }
+            }
+            return;
+        }
+        for child in self.ui.top_pins.children() {
+            self.ui.top_pins.remove(&child);
+        }
+        for tab in &mut self.state.borrow_mut().tabs {
+            tab.top_pin = None;
+        }
+        self.top_pin_signature.replace(Some(signature));
+        let dnd_target = [gtk::TargetEntry::new(
+            "application/x-search-pin-id",
+            gtk::TargetFlags::SAME_APP,
+            0,
+        )];
+        for (id, letter, title, url, live, private, _) in pinned {
+            let tile = ui::top_pin_chip(&letter, live, private, *self.palette.borrow());
+            if private {
+                ui::mark_glyph(&tile.icon, crate::icons::Icon::Mask, None, 15, self.palette.borrow().muted);
+                tile.icon.set_no_show_all(false);
+                tile.icon.show_all();
+                tile.letter.hide();
+            } else if let Some(surface) = self.tab_favicon_surface(id, &url, false) {
+                ui::mark(&tile.icon, letter.chars().next().unwrap_or('?'), Some(&surface), 16);
+                tile.icon.set_no_show_all(false);
+                tile.icon.show_all();
+                tile.letter.hide();
+            }
+            let (tip, name) = Self::pin_words(&title, live);
+            tile.event.set_tooltip_text(Some(&tip));
+            if let Some(access) = tile.event.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
+                gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
+            }
+            tile.event.add_events(
+                gtk::gdk::EventMask::KEY_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_RELEASE_MASK
+                    | gtk::gdk::EventMask::POINTER_MOTION_MASK,
+            );
+            tile.event.drag_source_set(
+                gtk::gdk::ModifierType::BUTTON1_MASK,
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            tile.event.drag_dest_set(
+                gtk::DestDefaults::empty(),
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            tile.event.connect_drag_begin(|w, _| {
+                w.style_context().add_class("dragging");
+            });
+            tile.event.connect_drag_end(|w, _| {
+                w.style_context().remove_class("dragging");
+            });
+            tile.event.connect_drag_data_get(move |_, _, data, _, _| {
+                data.set(&gtk::gdk::Atom::intern("application/x-search-pin-id"), 8, &id.to_le_bytes());
+            });
+            tile.event.connect_drag_motion(|w, ctx, _, _, time| {
+                if w.drag_dest_find_target(ctx, None).is_some() {
+                    ctx.drag_status(gtk::gdk::DragAction::MOVE, time);
+                    w.style_context().add_class("drag-over");
+                    true
+                } else {
+                    ctx.drag_status(gtk::gdk::DragAction::empty(), time);
+                    false
+                }
+            });
+            tile.event.connect_drag_leave(|w, _, _| {
+                w.style_context().remove_class("drag-over");
+            });
+            tile.event.connect_drag_drop(|w, ctx, _, _, time| {
+                if let Some(target) = w.drag_dest_find_target(ctx, None) {
+                    w.drag_get_data(ctx, &target, time);
+                    true
+                } else {
+                    false
+                }
+            });
+            {
+                let weak = self.weak();
+                tile.event.connect_drag_data_received(move |w, ctx, _, _, data, _, time| {
+                    w.style_context().remove_class("drag-over");
+                    let raw = data.data();
+                    let source_id = (raw.len() == 8)
+                        .then(|| u64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8])));
+                    let accepted = source_id.is_some_and(|src| src != id);
+                    ctx.drag_finish(accepted, false, time);
+                    if let (Some(source_id), Some(app)) = (source_id, weak.upgrade()) {
+                        app.reorder_tab(source_id, id);
+                    }
+                });
+            }
+            {
+                let weak = self.weak();
+                tile.event.connect_key_press_event(move |_, event| {
+                    use gtk::gdk::keys::constants as key;
+                    let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                    let state = event.state();
+                    let modified = state.intersects(
+                        gtk::gdk::ModifierType::CONTROL_MASK
+                            | gtk::gdk::ModifierType::MOD1_MASK
+                            | gtk::gdk::ModifierType::SHIFT_MASK,
+                    );
+                    if modified {
+                        return crate::gtkx::inh(false);
+                    }
+                    let keyval = event.keyval();
+                    if keyval == key::Return || keyval == key::KP_Enter || keyval == key::space {
+                        app.select(id);
+                        crate::gtkx::inh(true)
+                    } else if keyval == key::Delete || keyval == key::KP_Delete {
+                        app.close_tab(id);
+                        crate::gtkx::inh(true)
+                    } else {
+                        crate::gtkx::inh(false)
+                    }
+                });
+            }
+            {
+                let weak = self.weak();
+                tile.event.connect_button_press_event(move |_, event| {
+                    let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                    if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
+                        let single = button.event_type() == gtk::gdk::EventType::ButtonPress;
+                        match button.button() {
+                            1 => {
+                                if single {
+                                    app.select(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            2 => {
+                                if single {
+                                    app.close_tab(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            3 => {
+                                if single {
+                                    app.tab_menu(id, event);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            _ => {}
+                        }
+                    }
+                    crate::gtkx::inh(false)
+                });
+            }
+            ui::pack(&self.ui.top_pins, &tile.event, false);
+            if let Some(slot) = self.state.borrow_mut().tab_mut(id) {
+                slot.top_pin = Some(tile);
+            }
+        }
+        self.ui.top_pins.show_all();
+    }
+
+    fn render_top_tabs(&self) {
+        let top_tab_width = self.prefs.borrow().top_tab_width;
+        let tab_height = if self.prefs.borrow().roomy_tabs { 32 } else { 28 };
+        let same = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id();
+            let expected: Vec<gtk::Widget> = state
+                .tabs
+                .iter()
+                .filter(|tab| !tab.pinned && tab.space_id == space_id)
+                .filter_map(|tab| tab.top_tab.as_ref().map(|t| t.event.clone().upcast()))
+                .collect();
+            expected.len()
+                == state
+                    .tabs
+                    .iter()
+                    .filter(|tab| !tab.pinned && tab.space_id == space_id)
+                    .count()
+                && self.ui.top_tabs.children() == expected
+        };
+        if same {
+            let (ids, active): (Vec<TabId>, TabId) = {
+                let state = self.state.borrow();
+                let space_id = state.active_space_id();
+                (
+                    state
+                        .tabs
+                        .iter()
+                        .filter(|t| !t.pinned && t.space_id == space_id)
+                        .map(|t| t.id)
+                        .collect(),
+                    state.active,
+                )
+            };
+            for id in ids {
+                self.update_row_title(id);
+                let info = {
+                    let state = self.state.borrow();
+                    state.tab(id).and_then(|t| {
+                        t.top_tab.as_ref().map(|row| (row.event.clone(), row.title.clone(), row.close.clone(), t.asleep))
+                    })
+                };
+                if let Some((event, title, close, asleep)) = info {
+                    event.set_size_request(top_tab_width, tab_height);
+                    let context = event.style_context();
+                    if id == active { context.add_class("live"); } else { context.remove_class("live"); }
+                    if asleep { context.add_class("asleep"); } else { context.remove_class("asleep"); }
+                    let title_ctx = title.style_context();
+                    if id == active { title_ctx.add_class("liveword"); } else { title_ctx.remove_class("liveword"); }
+                    let prelit = |w: &gtk::Widget| w.state_flags().contains(gtk::StateFlags::PRELIGHT);
+                    let hovered = prelit(event.upcast_ref::<gtk::Widget>())
+                        || close.parent().as_ref().map(prelit).unwrap_or(false);
+                    close.set_opacity(ui::close_opacity(id == active, hovered));
+                }
+            }
+            self.scroll_active_into_view();
+            return;
+        }
+        for child in self.ui.top_tabs.children() {
+            self.ui.top_tabs.remove(&child);
+        }
+        for tab in &mut self.state.borrow_mut().tabs {
+            tab.top_tab = None;
+        }
+        let (tabs, active) = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id();
+            let list: Vec<(TabId, String, String, char, bool, bool, bool)> = state
+                .tabs
+                .iter()
+                .filter(|t| !t.pinned && t.space_id == space_id)
+                .map(|t| {
+                    let title = if t.title.is_empty() {
+                        if t.url.is_empty() {
+                            "New tab".to_string()
+                        } else {
+                            crate::shield::host_of(&t.url)
+                        }
+                    } else {
+                        t.title.clone()
+                    };
+                    (t.id, title, t.url.clone(), t.letter(), t.asleep, t.loading, t.private)
+                })
+                .collect();
+            (list, state.active)
+        };
+        let dnd_target = [gtk::TargetEntry::new(
+            "application/x-search-tab-id",
+            gtk::TargetFlags::SAME_APP,
+            0,
+        )];
+        for (id, title, url, letter, asleep, loading, private) in tabs {
+            let chip = ui::top_tab_chip(
+                &title,
+                *self.palette.borrow(),
+                Some(letter),
+                id == active,
+                ui::TabState { asleep, loading, private },
+            );
+            chip.event.set_size_request(top_tab_width, tab_height);
+            let icon = self.tab_favicon_surface(id, &url, private);
+            if let Some(surface) = icon.as_ref() {
+                if !private && !loading {
+                    ui::mark(&chip.icon, letter, Some(surface), 14);
+                }
+            }
+            let tip = if url.is_empty() {
+                if private { "Private tab".to_string() } else { "New tab".to_string() }
+            } else {
+                format!("{}\n{}", if title.is_empty() { "Untitled" } else { title.as_str() }, url)
+            };
+            chip.event.set_tooltip_text(Some(&tip));
+            if let Some(access) = chip.event.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, &tip);
+                gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::PageTab);
+            }
+            chip.event.set_can_focus(true);
+            chip.event.set_focus_on_click(false);
+            chip.event.add_events(
+                gtk::gdk::EventMask::KEY_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_PRESS_MASK
+                    | gtk::gdk::EventMask::BUTTON_RELEASE_MASK
+                    | gtk::gdk::EventMask::POINTER_MOTION_MASK
+                    | gtk::gdk::EventMask::ENTER_NOTIFY_MASK
+                    | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK,
+            );
+            chip.event.drag_source_set(
+                gtk::gdk::ModifierType::BUTTON1_MASK,
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            chip.event.drag_dest_set(
+                gtk::DestDefaults::empty(),
+                &dnd_target,
+                gtk::gdk::DragAction::MOVE,
+            );
+            chip.event.connect_drag_begin(|w, _| {
+                w.style_context().add_class("dragging");
+            });
+            chip.event.connect_drag_end(|w, _| {
+                w.style_context().remove_class("dragging");
+            });
+            chip.event.connect_drag_data_get(move |_, _, data, _, _| {
+                data.set(&gtk::gdk::Atom::intern("application/x-search-tab-id"), 8, &id.to_le_bytes());
+            });
+            chip.event.connect_drag_motion(|w, ctx, _, _, time| {
+                if w.drag_dest_find_target(ctx, None).is_some() {
+                    ctx.drag_status(gtk::gdk::DragAction::MOVE, time);
+                    w.style_context().add_class("drag-over");
+                    true
+                } else {
+                    ctx.drag_status(gtk::gdk::DragAction::empty(), time);
+                    false
+                }
+            });
+            chip.event.connect_drag_leave(|w, _, _| {
+                w.style_context().remove_class("drag-over");
+            });
+            chip.event.connect_drag_drop(|w, ctx, _, _, time| {
+                if let Some(target) = w.drag_dest_find_target(ctx, None) {
+                    w.drag_get_data(ctx, &target, time);
+                    true
+                } else {
+                    false
+                }
+            });
+            {
+                let weak = self.weak();
+                chip.event.connect_drag_data_received(move |w, ctx, _, _, data, _, time| {
+                    w.style_context().remove_class("drag-over");
+                    let raw = data.data();
+                    let source_id = (raw.len() == 8)
+                        .then(|| u64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8])));
+                    let accepted = source_id.is_some_and(|src| src != id);
+                    ctx.drag_finish(accepted, false, time);
+                    if let (Some(source_id), Some(app)) = (source_id, weak.upgrade()) {
+                        app.reorder_tab(source_id, id);
+                    }
+                });
+            }
+            {
+                let weak = self.weak();
+                chip.event.connect_key_press_event(move |_, event| {
+                    use gtk::gdk::keys::constants as key;
+                    let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                    let state = event.state();
+                    let modified = state.intersects(
+                        gtk::gdk::ModifierType::CONTROL_MASK
+                            | gtk::gdk::ModifierType::MOD1_MASK
+                            | gtk::gdk::ModifierType::SHIFT_MASK,
+                    );
+                    if modified {
+                        return crate::gtkx::inh(false);
+                    }
+                    let keyval = event.keyval();
+                    if keyval == key::Return || keyval == key::KP_Enter || keyval == key::space {
+                        app.select(id);
+                        crate::gtkx::inh(true)
+                    } else if keyval == key::Delete || keyval == key::KP_Delete {
+                        app.close_tab(id);
+                        crate::gtkx::inh(true)
+                    } else {
+                        crate::gtkx::inh(false)
+                    }
+                });
+            }
+            {
+                let weak = self.weak();
+                chip.event.connect_button_press_event(move |_, event| {
+                    let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                    if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
+                        let single = button.event_type() == gtk::gdk::EventType::ButtonPress;
+                        match button.button() {
+                            1 => {
+                                if single {
+                                    app.select(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            2 => {
+                                if single {
+                                    app.close_tab(id);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            3 => {
+                                if single {
+                                    app.tab_menu(id, event);
+                                }
+                                return crate::gtkx::inh(true);
+                            }
+                            _ => {}
+                        }
+                    }
+                    crate::gtkx::inh(false)
+                });
+            }
+            {
+                let weak = self.weak();
+                let close = chip.close.clone();
+                chip.event.connect_enter_notify_event(move |_, _| {
+                    if let Some(app) = weak.upgrade() {
+                        close.set_opacity(ui::close_opacity(app.active_id() == id, true));
+                    }
+                    crate::gtkx::inh(false)
+                });
+                let weak = self.weak();
+                let close = chip.close.clone();
+                chip.event.connect_leave_notify_event(move |_, event| {
+                    if event.detail() == gtk::gdk::NotifyType::Inferior {
+                        return crate::gtkx::inh(false);
+                    }
+                    if let Some(app) = weak.upgrade() {
+                        close.set_opacity(ui::close_opacity(app.active_id() == id, false));
+                    }
+                    crate::gtkx::inh(false)
+                });
+            }
+            {
+                let weak = self.weak();
+                chip.close.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        app.close_tab(id);
+                    }
+                });
+            }
+            ui::pack(&self.ui.top_tabs, &chip.event, false);
+            if let Some(slot) = self.state.borrow_mut().tab_mut(id) {
+                slot.top_tab = Some(chip);
+            }
+        }
+        self.ui.top_tabs.show_all();
+        self.scroll_active_into_view();
+    }
+
     pub fn refresh_helm(&self) {
         let (back, forward, url, loading, private, kept, count) = {
             let state = self.state.borrow();
+            let space_id = state.active_space_id();
             let (back, forward, url, loading, private) = state
                 .active_tab()
                 .map(|tab| (tab.can_back, tab.can_forward, tab.url.clone(), tab.loading, tab.private))
                 .unwrap_or_default();
             let kept = state.bookmarks.iter().any(|bookmark| bookmark.url == url);
-            (back, forward, url, loading, private, kept, state.tabs.iter().filter(|tab| !tab.pinned).count())
+            (
+                back,
+                forward,
+                url,
+                loading,
+                private,
+                kept,
+                state
+                    .tabs
+                    .iter()
+                    .filter(|tab| !tab.pinned && tab.space_id == space_id)
+                    .count(),
+            )
         };
         self.ui.back.set_sensitive(back);
         self.ui.forward.set_sensitive(forward);
@@ -2259,7 +3566,7 @@ impl App {
         let path = crate::shield::location_of(&url);
         self.ui.address_path.set_text(if path == "/" { "" } else { &path });
         self.ui.address.set_tooltip_text(Some(if url.is_empty() { "Search or enter an address (Ctrl L)" } else { "Open the full address or search (Ctrl L)" }));
-        self.ui.tab_count.set_text(&format!("{count:02}"));
+        self.ui.tab_count.set_text(&count.to_string());
         // The accent shield means two things: the blocker is on for this page,
         // and the page came over a secure connection. Gemini R59 fix 7 found
         // plain http pages getting the accent shield too, because
@@ -2292,11 +3599,13 @@ impl App {
         if let Some(child) = self.ui.site_info.child() {
             self.ui.site_info.remove(&child);
         }
-        self.ui.site_info.add(&crate::icons::area(
+        let site_icon_glyph = crate::ui::passthrough_icon(
             site_glyph,
-            16,
+            14,
             if protected { self.palette.borrow().accent() } else { self.palette.borrow().muted },
-        ));
+        );
+        self.ui.site_info.add(&site_icon_glyph);
+        site_icon_glyph.show();
         let context = self.ui.site_info.style_context();
         if protected { context.add_class("protected"); } else { context.remove_class("protected"); }
         self.ui.site_info.set_tooltip_text(Some(if url.is_empty() {
@@ -2315,9 +3624,9 @@ impl App {
             if let Some(child) = self.ui.reload.child() {
                 self.ui.reload.remove(&child);
             }
-            let glyph = crate::icons::area(
+            let glyph = crate::ui::passthrough_icon(
                 if loading { crate::icons::Icon::Stop } else { crate::icons::Icon::Reload },
-                17,
+                14,
                 self.palette.borrow().muted,
             );
             self.ui.reload.add(&glyph);
@@ -2339,19 +3648,22 @@ impl App {
             match state.tab_mut(id) {
                 Some(tab) if tab.title != title => {
                     tab.title = title.to_string();
-                    true
+                    Some((tab.url.clone(), tab.private))
                 }
-                _ => false,
+                _ => None,
             }
         };
-        if changed {
+        if let Some((url, private)) = changed {
             self.update_row_title(id);
-            let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
-            if !url.is_empty() {
+            // A private tab must never overwrite persisted history titles or
+            // dirty/flush history.json or session.json.
+            let should_flush = {
                 let mut state = self.state.borrow_mut();
-                Records::name_visit(&mut state.history, &url, title);
+                record_title_for_history(&mut state.history, private, &url, title)
+            };
+            if should_flush {
+                self.schedule_flush();
             }
-            self.schedule_flush();
             if id == self.active_id() { self.refresh_helm(); }
         }
     }
@@ -2374,10 +3686,15 @@ impl App {
                 .row
                 .as_ref()
                 .map(|row| (row.title.clone(), row.letter.clone(), row.subtitle.clone()));
+            let top_tab = tab
+                .top_tab
+                .as_ref()
+                .map(|row| (row.title.clone(), row.letter.clone()));
             let pin_letter = tab.pin.as_ref().map(|pin| pin.letter.clone());
-            (title, letter, row, pin_letter, tab_subtitle(&tab.url, tab.private, tab.asleep))
+            let top_pin_letter = tab.top_pin.as_ref().map(|pin| pin.letter.clone());
+            (title, letter, row, top_tab, pin_letter, top_pin_letter, tab_subtitle(&tab.url, tab.private, tab.asleep))
         };
-        let (title, letter, row, pin_letter, subtitle) = info;
+        let (title, letter, row, top_tab, pin_letter, top_pin_letter, subtitle) = info;
         if let Some((row_title, row_letter, row_subtitle)) = row {
             row_title.set_text(&title);
             row_subtitle.set_text(&subtitle);
@@ -2385,9 +3702,123 @@ impl App {
                 label.set_text(&letter);
             }
         }
+        if let Some((top_title, top_letter)) = top_tab {
+            top_title.set_text(&title);
+            if let Some(label) = top_letter {
+                label.set_text(&letter);
+            }
+        }
         if let Some(label) = pin_letter {
             label.set_text(&letter);
         }
+        if let Some(label) = top_pin_letter {
+            label.set_text(&letter);
+        }
+    }
+
+    /// Stable 64-bit FNV-1a hex key for caching non-private site favicons on disk.
+    fn favicon_key(input: &str) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in input.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
+
+    fn favicon_file(key: &str) -> std::path::PathBuf {
+        crate::files::path_in(&crate::files::data_dir().join("favicons"), &format!("{}.png", Self::favicon_key(key)))
+    }
+
+    /// Cache a non-private HTTP(S) page's favicon by exact URL and host in memory
+    /// and on disk (PNG) so bookmarks and autocomplete rows retain the URL icon.
+    pub fn cache_favicon(&self, url: &str, surface: &cairo::Surface) {
+        let lower = url.trim().to_ascii_lowercase();
+        if !lower.starts_with("http://") && !lower.starts_with("https://") {
+            return;
+        }
+        let Some(scaled) = crate::ui::scale_favicon(surface, 16) else {
+            return;
+        };
+        let host = crate::shield::host_of(url);
+        let dir = crate::files::data_dir().join("favicons");
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+        }
+        let keys: Vec<String> = if host.is_empty() {
+            vec![url.to_string()]
+        } else {
+            vec![url.to_string(), format!("host:{host}")]
+        };
+        let mut cache = self.url_icons.borrow_mut();
+        for key in &keys {
+            let path = Self::favicon_file(key);
+            if let Ok(mut file) = std::fs::File::create(&path) {
+                let _ = scaled.write_to_png(&mut file);
+            }
+            let surf: &cairo::Surface = &scaled;
+            cache.insert(key.clone(), surf.clone());
+        }
+        drop(cache);
+        self.icon_gen.set(self.icon_gen.get().wrapping_add(1));
+    }
+
+    /// Look up the real site favicon for `url` (exact URL, live non-private tab,
+    /// host cache, or persisted PNG cache). Never falls back to a letter.
+    pub fn favicon_for_url(&self, url: &str) -> Option<cairo::Surface> {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(surface) = self.url_icons.borrow().get(trimmed).cloned() {
+            return Some(surface);
+        }
+        // Check live non-private tabs holding this URL.
+        let live_id = {
+            let state = self.state.borrow();
+            state
+                .tabs
+                .iter()
+                .find(|t| !t.private && t.url == trimmed)
+                .map(|t| t.id)
+        };
+        if let Some(id) = live_id {
+            if let Some(surface) = self.icons.borrow().get(&id).cloned() {
+                return Some(surface);
+            }
+        }
+        let host = crate::shield::host_of(trimmed);
+        let host_key = if host.is_empty() { None } else { Some(format!("host:{host}")) };
+        if let Some(ref hk) = host_key {
+            if let Some(surface) = self.url_icons.borrow().get(hk).cloned() {
+                return Some(surface);
+            }
+        }
+        for key in std::iter::once(trimmed.to_string()).chain(host_key.into_iter()) {
+            let path = Self::favicon_file(&key);
+            if let Ok(mut file) = std::fs::File::open(&path) {
+                if let Ok(img) = cairo::ImageSurface::create_from_png(&mut file) {
+                    let surf_ref: &cairo::Surface = &img;
+                    let surf = surf_ref.clone();
+                    self.url_icons.borrow_mut().insert(key, surf.clone());
+                    return Some(surf);
+                }
+            }
+        }
+        None
+    }
+
+    /// Best available real favicon for a tab: live WebKit icon first, then
+    /// persisted URL/host cache for asleep/restored non-private tabs.
+    fn tab_favicon_surface(&self, id: TabId, url: &str, private: bool) -> Option<cairo::Surface> {
+        if private {
+            return None;
+        }
+        if let Some(surface) = self.icons.borrow().get(&id).cloned() {
+            return Some(surface);
+        }
+        self.favicon_for_url(url)
     }
 
     /// The engine found a page icon. Store it and put it where the letter was.
@@ -2395,13 +3826,6 @@ impl App {
         let changed = {
             let mut icons = self.icons.borrow_mut();
             match surface {
-                // A new favicon always counts as a change, including one that
-                // replaces an older favicon. The old check counted only the first
-                // icon (insert(..).is_none()), so when a site later swapped its
-                // favicon (a different page on the same tab, or an unread badge),
-                // the cache stored the new surface but the row and pin kept
-                // drawing the old one (Gemini R60 craft fix 2). Redrawing costs a
-                // single mark() call per favicon event.
                 Some(surface) => {
                     icons.insert(id, surface);
                     true
@@ -2416,52 +3840,85 @@ impl App {
             let state = self.state.borrow();
             state.tab(id).map(|tab| {
                 (
+                    tab.url.clone(),
                     tab.letter(),
                     tab.row.as_ref().map(|row| row.icon.clone()),
                     tab.pin.as_ref().map(|pin| pin.icon.clone()),
+                    tab.top_tab.as_ref().map(|row| row.icon.clone()),
+                    tab.top_pin.as_ref().map(|pin| pin.icon.clone()),
                     tab.private,
                     tab.loading,
                 )
             })
         };
-        let Some((letter, row_icon, pin_icon, private, loading)) = targets else {
+        let Some((url, letter, row_icon, pin_icon, top_tab_icon, top_pin_icon, private, loading)) = targets else {
             return;
         };
         let icon = self.icons.borrow().get(&id).cloned();
+        if !private {
+            if let Some(ref surf) = icon {
+                self.cache_favicon(&url, surf);
+                self.render_bmarks();
+            }
+        }
         if let Some(holder) = row_icon {
             if !private && !loading {
-                // When a favicon arrives, the letter label leaves the screen and
-                // mark returns None. When the icon goes away, mark builds a new
-                // tile. In both cases row.letter must hold what is on screen now.
                 let label = crate::ui::mark(&holder, letter, icon.as_ref(), 16);
                 if let Some(row) = self.state.borrow_mut().tab_mut(id).and_then(|tab| tab.row.as_mut()) {
                     row.letter = label;
                 }
             }
         }
+        if let Some(holder) = top_tab_icon {
+            if !private && !loading {
+                let label = crate::ui::mark(&holder, letter, icon.as_ref(), 14);
+                if let Some(row) = self.state.borrow_mut().tab_mut(id).and_then(|tab| tab.top_tab.as_mut()) {
+                    row.letter = label;
+                }
+            }
+        }
         if let Some(holder) = pin_icon {
             if !private {
-                crate::ui::mark(&holder, letter, icon.as_ref(), 22);
+                crate::ui::mark(&holder, letter, icon.as_ref(), 18);
+            }
+        }
+        if let Some(holder) = top_pin_icon {
+            if !private {
+                crate::ui::mark(&holder, letter, icon.as_ref(), 16);
             }
         }
     }
 
     pub fn set_uri(&self, id: TabId, uri: &str) {
-        let changed = {
+        let (changed, doc_changed) = {
             let mut state = self.state.borrow_mut();
             match state.tab_mut(id) {
                 // A tab that is showing a failure keeps the address it failed
                 // on: the engine's document never changed, and reporting the
                 // old page over the new address is what made a 404 tab claim
                 // to be the site you came from.
-                Some(tab) if tab.failed && tab.url != uri => false,
+                Some(tab) if tab.failed && tab.url != uri => (false, false),
                 Some(tab) if tab.url != uri => {
+                    let doc_changed = tab.url.split('#').next() != uri.split('#').next();
                     tab.url = uri.to_string();
-                    true
+                    if doc_changed {
+                        tab.nav_epoch = tab.nav_epoch.wrapping_add(1);
+                    }
+                    (true, doc_changed)
                 }
-                _ => false,
+                _ => (false, false),
             }
         };
+        if doc_changed
+            && self
+                .state
+                .borrow()
+                .hide_origin
+                .as_ref()
+                .is_some_and(|o| o.tab_id == id)
+        {
+            self.cancel_hide_mode();
+        }
         if changed {
             curtain::apply_for_tab(self, id);
             self.update_row_title(id);
@@ -2475,28 +3932,45 @@ impl App {
         }
         let view = {
             let state = self.state.borrow();
-            state.tab(id).and_then(|tab| tab.row.as_ref().map(|row| (row.event.clone(), row.icon.clone(), tab.private, tab.letter())))
+            state.tab(id).map(|tab| {
+                (
+                    tab.row.as_ref().map(|row| (row.event.clone(), row.icon.clone())),
+                    tab.top_tab.as_ref().map(|row| (row.event.clone(), row.icon.clone())),
+                    tab.private,
+                    tab.letter(),
+                )
+            })
         };
-        if let Some((row, icon, private, letter)) = view {
-            let context = row.style_context();
-            if loading { context.add_class("loading"); } else { context.remove_class("loading"); }
-            // Update the existing row. Rebuilding it here would restart the
-            // spinner and recreate its close button on every engine signal.
-            if !private {
-                let surface = self.icons.borrow().get(&id).cloned();
-                // ui::mark builds a new tile with a new label each time. Keep
-                // the label the row now shows in row.letter, so update_row_title
-                // renames the label on screen. Before this, the tile kept the
-                // letter from the first title it had, e.g. "1" (Gemini R59 fix 3).
-                // The spinner has no letter, so the row has none while loading.
-                let label = if loading {
-                    crate::ui::loading_mark(&icon, self.palette.borrow().muted);
-                    None
-                } else {
-                    crate::ui::mark(&icon, letter, surface.as_ref(), 16)
-                };
-                if let Some(row) = self.state.borrow_mut().tab_mut(id).and_then(|tab| tab.row.as_mut()) {
-                    row.letter = label;
+        if let Some((row_pair, top_pair, private, letter)) = view {
+            let surface = self.icons.borrow().get(&id).cloned();
+            if let Some((row, icon)) = row_pair {
+                let context = row.style_context();
+                if loading { context.add_class("loading"); } else { context.remove_class("loading"); }
+                if !private {
+                    let label = if loading {
+                        crate::ui::loading_mark(&icon, self.palette.borrow().muted);
+                        None
+                    } else {
+                        crate::ui::mark(&icon, letter, surface.as_ref(), 16)
+                    };
+                    if let Some(row) = self.state.borrow_mut().tab_mut(id).and_then(|tab| tab.row.as_mut()) {
+                        row.letter = label;
+                    }
+                }
+            }
+            if let Some((chip, icon)) = top_pair {
+                let context = chip.style_context();
+                if loading { context.add_class("loading"); } else { context.remove_class("loading"); }
+                if !private {
+                    let label = if loading {
+                        crate::ui::loading_mark(&icon, self.palette.borrow().muted);
+                        None
+                    } else {
+                        crate::ui::mark(&icon, letter, surface.as_ref(), 14)
+                    };
+                    if let Some(row) = self.state.borrow_mut().tab_mut(id).and_then(|tab| tab.top_tab.as_mut()) {
+                        row.letter = label;
+                    }
                 }
             }
         }
@@ -2718,9 +4192,19 @@ impl App {
         // is about to load, not the empty tab it was a moment ago. The view is
         // built without loading, and the load below then runs once, after the
         // shield is applied.
+        if self
+            .state
+            .borrow()
+            .hide_origin
+            .as_ref()
+            .is_some_and(|o| o.tab_id == id)
+        {
+            self.cancel_hide_mode();
+        }
         if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
             tab.url = url.clone();
             tab.asleep = false;
+            tab.nav_epoch = tab.nav_epoch.wrapping_add(1);
         }
         self.create_view(id, false);
         curtain::apply_for_tab(self, id);
@@ -2753,7 +4237,26 @@ impl App {
     }
 
     pub fn go_back(&self) {
-        if let Some(view) = self.view(self.active_id()) {
+        let active = self.active_id();
+        let on_home = self
+            .state
+            .borrow()
+            .tab(active)
+            .is_some_and(|tab| tab.url.is_empty());
+        if let Some(view) = self.view(active) {
+            if on_home {
+                if let Some(uri) = view.uri().map(|u| u.to_string()).filter(|u| !u.is_empty() && u != "about:blank") {
+                    if let Some(tab) = self.state.borrow_mut().tab_mut(active) {
+                        tab.url = uri;
+                        tab.title = view.title().map(|t| t.to_string()).unwrap_or_default();
+                        tab.can_back = view.can_go_back();
+                        tab.can_forward = view.can_go_forward();
+                    }
+                    self.render();
+                    self.schedule_session();
+                    return;
+                }
+            }
             view.go_back();
         }
     }
@@ -2762,6 +4265,44 @@ impl App {
         if let Some(view) = self.view(self.active_id()) {
             view.go_forward();
         }
+    }
+
+    /// Navigate the active tab to the minimal Start Page while preserving
+    /// private/regular tab isolation.
+    pub fn go_home(&self) {
+        let active = self.active_id();
+        if self.reading.get() {
+            self.reader();
+        }
+        let has_prev_page = if let Some(view) = self.view(active) {
+            if view.is_loading() {
+                view.stop_loading();
+            }
+            view.uri()
+                .map(|u| u.to_string())
+                .is_some_and(|u| !u.is_empty() && u != "about:blank")
+        } else {
+            false
+        };
+        {
+            let mut state = self.state.borrow_mut();
+            state.errors.remove(&active);
+            if let Some(tab) = state.tab_mut(active) {
+                tab.url.clear();
+                tab.title.clear();
+                tab.failed = false;
+                tab.loading = false;
+                tab.progress = 0.0;
+                tab.can_back = has_prev_page;
+                tab.can_forward = false;
+            }
+        }
+        self.ui.start.search.set_text("");
+        self.ui.start.hide_suggest();
+        self.sync_progress(active);
+        self.render();
+        self.schedule_session();
+        self.ui.start.search.grab_focus();
     }
 
     pub fn reload(&self) {
@@ -2797,7 +4338,10 @@ impl App {
             return;
         }
         match self.view(id) {
-            Some(view) => view.reload(),
+            Some(view) => {
+                curtain::apply_for_tab(self, id);
+                view.reload();
+            }
             None => {
                 let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
                 self.navigate(id, &url);
@@ -2824,9 +4368,9 @@ impl App {
             return;
         };
         if url.is_empty() {
-            self.new_tab(None, private, false);
+            self.new_tab_in_space(None, private, false, Some(id));
         } else {
-            self.new_tab(Some(&url), private, true);
+            self.new_tab_in_space(Some(&url), private, true, Some(id));
         }
     }
 
@@ -2909,36 +4453,434 @@ impl App {
             .is_some_and(|w| w.state().contains(gtk::gdk::WindowState::FULLSCREEN))
     }
 
-    /// Chrome is normally hidden: the page is the browser. Ctrl+L still opens
-    /// the command field, and the menu can reveal the controls again.
-    pub fn sync_folded_controls(&self) {
-        let prefs = self.prefs.borrow();
-        let show = (prefs.column_folded || !prefs.sidebar)
-            && !prefs.show_toolbar
-            && !self.fullscreen.get()
-            && self.ui.side.is_child_visible();
-        self.ui.folded_controls.set_no_show_all(true);
-        self.ui.folded_controls.set_visible(show);
-        if show {
-            for child in self.ui.folded_controls.children() {
-                child.show_all();
+    /// Sync native OS decorations and optional browser window-control clusters
+    /// into whichever tab chrome layout is currently active (topbar OR vertical
+    /// sidebar header, never both). Also reparents the single Browser Menu button
+    /// (`more`) so menu/new tab/window controls remain reachable even when the
+    /// navigation toolbar is hidden.
+    pub fn sync_window_controls(&self) {
+        let mode = self.prefs.borrow().window_controls;
+        let plan = crate::decor::live_plan(mode);
+        let fullscreen = self.fullscreen.get();
+        let layout = {
+            let prefs = self.prefs.borrow();
+            crate::ui::tab_layout_plan(prefs.sidebar, prefs.column_folded, fullscreen)
+        };
+        if self.ui.window.is_decorated() != plan.native_decorated {
+            self.ui.window.set_decorated(plan.native_decorated);
+        }
+        for container in [
+            &self.ui.top_lights_left,
+            &self.ui.top_lights_right,
+            &self.ui.side_lights_left,
+            &self.ui.side_lights_right,
+        ] {
+            for child in container.children() {
+                container.remove(&child);
             }
+            container.hide();
+        }
+        let widget_for = |btn: crate::decor::ControlButton| -> &gtk::EventBox {
+            match btn {
+                crate::decor::ControlButton::Minimize => &self.ui.light_amber,
+                crate::decor::ControlButton::Maximize => &self.ui.light_green,
+                crate::decor::ControlButton::Close => &self.ui.light_red,
+            }
+        };
+        let (left_box, right_box) = if layout.show_sidebar {
+            (&self.ui.side_lights_left, &self.ui.side_lights_right)
+        } else {
+            (&self.ui.top_lights_left, &self.ui.top_lights_right)
+        };
+        if !fullscreen {
+            for &btn in &plan.left_controls {
+                let w = widget_for(btn);
+                crate::ui::pack(left_box, w, false);
+                w.show_all();
+            }
+            for &btn in &plan.right_controls {
+                let w = widget_for(btn);
+                crate::ui::pack(right_box, w, false);
+                w.show_all();
+            }
+            left_box.set_visible(!plan.left_controls.is_empty());
+            right_box.set_visible(!plan.right_controls.is_empty());
+        }
+        // Keep the single Browser Menu button (`more`) in the active chrome host.
+        let target_more_slot = if layout.show_sidebar {
+            &self.ui.side_more_slot
+        } else {
+            &self.ui.top_more_slot
+        };
+        let already_there = self
+            .ui
+            .more
+            .parent()
+            .is_some_and(|p| p == *target_more_slot.upcast_ref::<gtk::Widget>());
+        if !already_there {
+            self.close_main_menu();
+            if let Some(parent) = self.ui.more.parent().and_then(|p| p.downcast::<gtk::Container>().ok()) {
+                parent.remove(&self.ui.more);
+            }
+            crate::ui::pack(target_more_slot, &self.ui.more, false);
+            self.ui.more.show_all();
+        }
+        *self.decor_plan.borrow_mut() = plan;
+    }
+
+    pub fn set_window_controls_mode(&self, mode: crate::store::WindowControlsMode) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.window_controls = mode;
+            prefs.save();
+        }
+        self.sync_window_controls();
+        self.ui.window.queue_resize();
+    }
+
+    pub fn set_start_bookmarks_mode(&self, mode: crate::store::StartBookmarksMode) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.start_bookmarks_mode = mode;
+            prefs.save();
+        }
+        self.render();
+    }
+
+    pub fn set_start_shortcuts_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_start_shortcuts = on;
+            prefs.save();
+        }
+        self.render();
+    }
+
+    pub fn set_start_shortcuts_count(&self, count: usize) {
+        let clamped = count.clamp(
+            crate::store::MIN_START_SHORTCUTS_COUNT,
+            crate::store::MAX_START_SHORTCUTS_COUNT,
+        );
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.start_shortcuts_count = clamped;
+            prefs.save();
+        }
+        self.render();
+    }
+
+    pub fn set_start_dither_mode(&self, mode: crate::store::StartDitherMode) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.start_dither = mode;
+            prefs.save();
+        }
+        self.render();
+        self.ui.start.queue_dither_redraw();
+    }
+
+    pub fn set_roomy_tabs(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.roomy_tabs = on;
+            prefs.save();
+        }
+        self.apply_style();
+        self.render();
+        self.ui.window.queue_resize();
+    }
+
+    pub fn set_top_tab_width(&self, width: i32) {
+        let clamped = width.clamp(
+            crate::store::MIN_TOP_TAB_WIDTH,
+            crate::store::MAX_TOP_TAB_WIDTH,
+        );
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.top_tab_width = clamped;
+            prefs.save();
+        }
+        self.render_top_tabs();
+        self.ui.topbar.queue_resize();
+    }
+
+    pub fn set_sidebar_width(&self, width: f64) {
+        if !width.is_finite() {
+            return;
+        }
+        let clamped = width.clamp(crate::store::MIN_SIDE_WIDTH, crate::store::MAX_SIDE_WIDTH);
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.side_width = clamped;
+            prefs.save();
+        }
+        self.sync_tab_layout();
+        self.render_pins_with_width(Some((clamped.round() as i32) - 20));
+        self.ui.window.queue_resize();
+        let (w, h) = (self.ui.overlay.allocated_width(), self.ui.overlay.allocated_height());
+        if w > 1 && h > 1 {
+            self.layout_layers(w, h);
         }
     }
 
+    pub fn sync_toolbar_items(&self) {
+        let (show_back_pref, show_forward_pref, show_reload, show_home, show_reader, show_bookmark, order) = {
+            let p = self.prefs.borrow();
+            (
+                p.show_back_button,
+                p.show_forward_button,
+                p.show_reload_button,
+                p.show_home_button,
+                p.show_reader_button,
+                p.show_bookmark_button,
+                crate::customize::normalize_toolbar_order(&p.toolbar_order),
+            )
+        };
+        for (pos, action) in order.iter().enumerate() {
+            let widget: &gtk::Widget = match action {
+                crate::customize::ToolbarAction::Back => self.ui.back.upcast_ref(),
+                crate::customize::ToolbarAction::Forward => self.ui.forward.upcast_ref(),
+                crate::customize::ToolbarAction::Reload => self.ui.reload.upcast_ref(),
+                crate::customize::ToolbarAction::Home => self.ui.home.upcast_ref(),
+                crate::customize::ToolbarAction::Address => self.ui.location.upcast_ref(),
+                crate::customize::ToolbarAction::Reader => self.ui.reader.upcast_ref(),
+                crate::customize::ToolbarAction::Bookmark => self.ui.bookmark.upcast_ref(),
+            };
+            self.ui.tools.reorder_child(widget, pos as i32);
+        }
+        let w = self.toolbar_width.get().max(self.ui.toolbar.allocated_width());
+        let wide_enough = w <= 1 || w >= 600;
+        let show_back = show_back_pref;
+        let show_forward = show_forward_pref && (w <= 1 || w >= 440);
+        let show_reload_now = show_reload && (w <= 1 || w >= 400);
+        let show_home_now = show_home && (w <= 1 || w >= 480);
+        self.ui.back.set_visible(show_back);
+        self.ui.forward.set_visible(show_forward);
+        self.ui.reload.set_visible(show_reload_now);
+        self.ui.home.set_visible(show_home_now);
+        self.ui.location.set_visible(true);
+        self.ui.reader.set_visible(show_reader && wide_enough);
+        self.ui.bookmark.set_visible(show_bookmark && wide_enough);
+    }
+
+    pub fn set_nav_buttons_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_back_button = on;
+            prefs.show_forward_button = on;
+            prefs.show_nav_buttons = on;
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn set_back_button_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_back_button = on;
+            prefs.show_nav_buttons = prefs.show_back_button || prefs.show_forward_button;
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn set_forward_button_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_forward_button = on;
+            prefs.show_nav_buttons = prefs.show_back_button || prefs.show_forward_button;
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn set_reload_button_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_reload_button = on;
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn set_home_button_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_home_button = on;
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn set_reader_button_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_reader_button = on;
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn set_bookmark_button_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_bookmark_button = on;
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn move_toolbar_action(&self, action: crate::customize::ToolbarAction, delta: isize) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.toolbar_order = crate::customize::move_toolbar_action(&prefs.toolbar_order, action, delta);
+            prefs.save();
+        }
+        self.sync_toolbar_items();
+        self.ui.toolbar.queue_resize();
+    }
+
+    pub fn apply_appearance_live(&self) {
+        let look = self.prefs.borrow().appearance.clone();
+        let palette = Palette::for_look(look, self.prefs.borrow().desktop_dark);
+        *self.palette.borrow_mut() = palette;
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        self.apply_style();
+        self.apply_page_tone();
+        self.sync_window_controls();
+        self.sync_tab_layout();
+        self.sync_toolbar_items();
+        self.render_bmarks();
+        self.render();
+        self.ui.start.queue_dither_redraw();
+        self.ui.window.queue_resize();
+        let (w, h) = (self.ui.overlay.allocated_width(), self.ui.overlay.allocated_height());
+        if w > 1 && h > 1 {
+            self.layout_layers(w, h);
+        }
+    }
+
+    pub fn apply_layout_preset(&self, preset: crate::customize::LayoutPreset) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            preset.apply(&mut prefs);
+            prefs.save();
+        }
+        self.apply_appearance_live();
+        self.flash_toast(&format!("Applied {} layout preset", preset.title()));
+    }
+
+    pub fn import_appearance_profile_str(&self, raw: &str) -> Result<(), crate::customize::ProfileError> {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            crate::customize::import_prefs_json(raw, &mut prefs)?;
+            prefs.save();
+        }
+        self.apply_appearance_live();
+        Ok(())
+    }
+
+    pub fn reset_toolbar_layout(&self) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.reset_toolbar_layout();
+            prefs.save();
+        }
+        self.apply_appearance_live();
+        self.flash_toast("Toolbar layout reset to minimal defaults");
+    }
+
+    /// Single source of truth enforcing exclusive Vertical Sidebar vs Top Tabs
+    /// layout, toolbar visibility, window controls placement, and fullscreen
+    /// hiding. Safe to call after `window.show_all()` so neither layout can
+    /// ever resurrect the other.
+    pub fn sync_tab_layout(&self) {
+        let page_full = self
+            .state
+            .borrow()
+            .active_tab()
+            .is_some_and(|t| t.page_full);
+        let fullscreen = self.fullscreen.get() || self.window_full.get() || page_full;
+        self.fullscreen.set(fullscreen);
+        self.apply_column(fullscreen);
+        self.sync_toolbar();
+    }
+
     pub fn sync_toolbar(&self) {
-        let on = self.prefs.borrow().show_toolbar && !self.fullscreen.get();
-        // `set_child_visible` hid the marks but left the 72px EventBox in
-        // the layout, producing a dead band above every page. Hide the
-        // widget itself and opt it out of the window's show_all().
+        let fullscreen = self.fullscreen.get();
+        let (show_toolbar_pref, layout) = {
+            let prefs = self.prefs.borrow();
+            (
+                prefs.show_toolbar,
+                crate::ui::tab_layout_plan(prefs.sidebar, prefs.column_folded, fullscreen),
+            )
+        };
+        let on = show_toolbar_pref && !fullscreen;
+        self.ui.topbar.set_no_show_all(true);
+        self.ui.topbar.set_visible(layout.show_topbar);
+        if layout.show_topbar {
+            for child in self.ui.topbar.children() {
+                child.show_all();
+            }
+        }
+        self.sync_window_controls();
         self.ui.toolbar.set_no_show_all(true);
         self.ui.toolbar.set_visible(on);
         if on {
             for child in self.ui.toolbar.children() {
                 child.show_all();
             }
+            self.sync_toolbar_items();
         }
-        self.sync_folded_controls();
+        let inset = if fullscreen { 0 } else { 6 };
+        let top_inset = if fullscreen {
+            0
+        } else if on {
+            2
+        } else if layout.show_sidebar {
+            6
+        } else {
+            2
+        };
+        self.ui.viewport_frame.set_margin_start(inset);
+        self.ui.viewport_frame.set_margin_end(inset);
+        self.ui.viewport_frame.set_margin_top(top_inset);
+        self.ui.viewport_frame.set_margin_bottom(inset);
+        let frame_ctx = self.ui.viewport_frame.style_context();
+        if fullscreen {
+            frame_ctx.add_class("fullscreen");
+        } else {
+            frame_ctx.remove_class("fullscreen");
+        }
+        for corner in &self.ui.viewport_corners {
+            corner.set_visible(!fullscreen);
+        }
+    }
+
+    pub fn set_sidebar_visible(&self, on: bool) {
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.sidebar = on;
+            prefs.column_folded = false;
+            prefs.save();
+        }
+        self.close_main_menu();
+        self.close_space_switcher();
+        self.sync_tab_layout();
+        self.render();
+        self.ui.window.queue_resize();
+        let (w, h) = (self.ui.overlay.allocated_width(), self.ui.overlay.allocated_height());
+        if w > 1 && h > 1 {
+            self.layout_layers(w, h);
+        }
     }
 
     pub fn set_toolbar_visible(&self, on: bool) {
@@ -2953,22 +4895,22 @@ impl App {
         self.set_toolbar_visible(on);
     }
 
-    /// Full screen, and back. The window is the only thing that changes.
+    /// Full screen, and back. Hides both topbar and vertical sidebar while
+    /// fullscreen and restores the user's exclusive tab layout on exit.
     pub fn toggle_fullscreen(&self) {
-        // window_full follows window-state-event; the window itself may still
-        // be changing from the last press, so it is not asked here.
         let filling = self.window_full.get();
+        self.fullscreen.set(!filling);
         if filling {
             self.ui.window.unfullscreen();
-            // Leaving with F11 while a video was fullscreen must bring the
-            // column back too, and end the page's own full screen.
             let active = self.active_id();
             self.exit_page_fullscreen(active);
             self.page_fullscreen(false);
         } else {
             self.ui.window.fullscreen();
+            self.sync_tab_layout();
+            self.ui.bmarkbar.set_child_visible(false);
+            self.ui.window.queue_resize();
         }
-        self.fullscreen.set(!filling);
     }
 
     /// The page's element asked for full screen. Remembers whether the window
@@ -3038,9 +4980,10 @@ impl App {
     /// than set_visible so the bookmark row's own shown-or-hidden choice is
     /// kept and comes back exactly as it was.
     pub fn page_fullscreen(&self, on: bool) {
-        self.apply_column(on);
-        self.ui.bmarkbar.set_child_visible(!on);
-        self.fullscreen.set(on || self.window_full.get());
+        let full = on || self.window_full.get();
+        self.fullscreen.set(full);
+        self.apply_column(full);
+        self.ui.bmarkbar.set_child_visible(!full);
         self.sync_toolbar();
         self.ui.window.queue_resize();
         let (w, h) = (self.ui.overlay.allocated_width(), self.ui.overlay.allocated_height());
@@ -3049,147 +4992,46 @@ impl App {
         }
     }
 
-    /// Lays the column out from the saved fold state and the page's full
-    /// screen state. Full screen hides the column; leaving it returns to the
-    /// fold the person chose, never a forced open column.
+    /// Lays the vertical tab sidebar out from the saved layout preference and
+    /// fullscreen state. When vertical sidebar is inactive or fullscreen is on,
+    /// `side` is explicitly hidden with `no_show_all(true)` so `window.show_all()`
+    /// can never resurrect both layouts simultaneously.
     pub fn apply_column(&self, page_full: bool) {
         let (folded, sidebar, width) = {
             let prefs = self.prefs.borrow();
             (prefs.column_folded, prefs.sidebar, prefs.side_width.round() as i32)
         };
-        let plan = crate::ui::column_plan(folded, page_full, sidebar, width);
-        self.ui.side.set_child_visible(plan.side_shown);
-        let min_width = if !folded && sidebar { crate::ui::MIN_COL.min(plan.width) } else { plan.width };
+        let layout = crate::ui::tab_layout_plan(sidebar, folded, page_full);
+        let plan = crate::ui::column_plan(false, page_full, layout.show_sidebar, width);
+        self.ui.side.set_no_show_all(true);
+        self.ui.side.set_visible(layout.show_sidebar);
+        self.ui.side.set_child_visible(layout.show_sidebar);
+        let min_width = if layout.show_sidebar {
+            crate::ui::MIN_COL.min(plan.width)
+        } else {
+            0
+        };
         self.ui.side.set_size_request(min_width, -1);
-        self.sync_folded_controls();
-        self.ui.strip.set_visible(plan.strip);
-        if plan.body {
-            // GTK3's show_all returns at once on a widget marked no_show_all,
-            // so it never reached the body's children: the column opened as an
-            // empty box (seen in the failed-page capture, 15875 bytes). The
-            // mark is lifted for this one call and put back, so the window's
-            // own show_all still cannot unfold a column saved as folded.
-            // Children marked no_show_all themselves (helm, pins) keep their
-            // own choice, as before.
+        self.ui.strip.set_visible(false);
+        if layout.show_sidebar {
             self.ui.body.set_no_show_all(false);
             self.ui.body.show_all();
             self.ui.body.set_no_show_all(true);
-        }
-        self.ui.body.set_visible(plan.body);
-        // Set only while the column is shown: a hidden first child has no
-        // divider to place, and the saved width is still there for later.
-        if !page_full {
+            self.ui.body.set_visible(true);
             self.ui.paned.set_position(plan.width);
+        } else {
+            self.ui.body.set_visible(false);
+            self.ui.paned.set_position(0);
         }
     }
 
-    /// Ctrl S, and a click on the strip: fold the column, or open it again.
+    /// Ctrl S: switch exclusively between Top Tabs and Vertical Sidebar.
     pub fn toggle_fold(&self) {
-        let (folded, sidebar, target_width) = {
-            let mut prefs = self.prefs.borrow_mut();
-            if prefs.sidebar {
-                prefs.column_folded = !prefs.column_folded;
-            } else {
-                prefs.sidebar = true;
-                prefs.column_folded = false;
-            }
-            prefs.save();
-            (prefs.column_folded, prefs.sidebar, prefs.side_width.round() as i32)
+        let open_now = {
+            let prefs = self.prefs.borrow();
+            prefs.sidebar && !prefs.column_folded
         };
-        // A page in full screen hides the column; the fold is still chosen.
-        let page_full = !self.ui.side.is_child_visible();
-        if page_full || !sidebar || !crate::motion::enabled() {
-            self.apply_column(page_full);
-            let (w, h) = (self.ui.overlay.allocated_width(), self.ui.overlay.allocated_height());
-            if w > 1 && h > 1 {
-                self.layout_layers(w, h);
-            }
-            return;
-        }
-
-        crate::motion::cancel(&self.ui.paned);
-        crate::motion::cancel(&self.ui.body);
-        crate::motion::cancel(&self.ui.strip);
-
-        if folded {
-            let from = self.ui.paned.position().max(crate::ui::STRIP_WIDTH);
-            self.folding_anim.set(true);
-            // Lower the column minimum width before animating so GtkPaned can
-            // glide below 140px down to STRIP_WIDTH.
-            self.ui.side.set_size_request(crate::ui::STRIP_WIDTH, -1);
-
-            let body = self.ui.body.clone();
-            let strip = self.ui.strip.clone();
-            // Folding is one layout move on the shared LAYOUT role. The body
-            // clears in the first part of it (LAYOUT - MICRO), and the strip
-            // then fades in over MICRO. Its fade ends on the same frame the
-            // column reaches STRIP_WIDTH, so the two halves never drift apart
-            // and the column is never left empty.
-            crate::motion::fade_out_then(
-                &self.ui.body,
-                crate::motion::dur::LAYOUT - crate::motion::dur::MICRO,
-                move || {
-                    body.hide();
-                    body.set_opacity(1.0);
-                    strip.set_opacity(0.0);
-                    strip.show();
-                    crate::motion::fade_in(&strip, crate::motion::dur::MICRO);
-                },
-            );
-
-            let weak = self.weak();
-            crate::motion::slide_paned(&self.ui.paned, from, crate::ui::STRIP_WIDTH, crate::motion::dur::LAYOUT, move || {
-                if let Some(app) = weak.upgrade() {
-                    crate::motion::cancel(&app.ui.body);
-                    app.ui.side.set_size_request(crate::ui::STRIP_WIDTH, -1);
-                    app.ui.body.hide();
-                    app.ui.body.set_opacity(1.0);
-                    app.ui.strip.show();
-                    app.folding_anim.set(false);
-                    let (w, h) = (app.ui.overlay.allocated_width(), app.ui.overlay.allocated_height());
-                    if w > 1 && h > 1 {
-                        app.layout_layers(w, h);
-                    }
-                }
-            });
-        } else {
-            let from = self.ui.paned.position().max(crate::ui::STRIP_WIDTH);
-            let target_width = target_width.max(crate::ui::STRIP_WIDTH);
-            self.folding_anim.set(true);
-            self.ui.side.set_child_visible(true);
-            // Reversing a fold partway must not blink: if the body is still on
-            // screen (its exit fade was cancelled above), carry on from the
-            // opacity it has now instead of snapping it back to zero first.
-            let resume_from = if self.ui.body.is_visible() {
-                self.ui.body.opacity().clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            self.ui.strip.hide();
-            self.ui.strip.set_opacity(1.0);
-            self.ui.body.set_no_show_all(false);
-            self.ui.body.show_all();
-            self.ui.body.set_no_show_all(true);
-            // Unfolding mirrors folding: the column opens on LAYOUT, and the
-            // body arrives on the shared ENTER role, so it is fully visible
-            // just before the column stops moving. A resumed body covers only
-            // the opacity it still lacks, so it needs proportionally less time.
-            let remaining = ((1.0 - resume_from) * crate::motion::dur::ENTER as f64).round() as u64;
-            crate::motion::fade_from(&self.ui.body, resume_from, 1.0, remaining.max(crate::motion::dur::MICRO / 2));
-
-            let weak = self.weak();
-            crate::motion::slide_paned(&self.ui.paned, from, target_width, crate::motion::dur::LAYOUT, move || {
-                if let Some(app) = weak.upgrade() {
-                    app.ui.side.set_size_request(crate::ui::MIN_COL.min(target_width), -1);
-                    app.ui.body.set_opacity(1.0);
-                    app.folding_anim.set(false);
-                    let (w, h) = (app.ui.overlay.allocated_width(), app.ui.overlay.allocated_height());
-                    if w > 1 && h > 1 {
-                        app.layout_layers(w, h);
-                    }
-                }
-            });
-        }
+        self.set_sidebar_visible(!open_now);
     }
 
     pub fn copy_address(&self) {
@@ -3203,7 +5045,7 @@ impl App {
     pub fn cycle(&self, forwards: bool) {
         let (ids, active) = {
             let state = self.state.borrow();
-            (state.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), state.active)
+            (state.space_tab_ids_visual(state.active_space_id()), state.active)
         };
         if ids.len() < 2 {
             return;
@@ -3214,7 +5056,10 @@ impl App {
     }
 
     pub fn jump(&self, number: usize) {
-        let ids: Vec<TabId> = self.state.borrow().tabs.iter().map(|t| t.id).collect();
+        let ids: Vec<TabId> = {
+            let state = self.state.borrow();
+            state.space_tab_ids_visual(state.active_space_id())
+        };
         if number == 9 {
             if let Some(last) = ids.last() {
                 self.select(*last);
@@ -3229,7 +5074,15 @@ impl App {
             self.flash_error("That is as many tabs as this browser will hold");
             return;
         }
-        let popped = self.state.borrow_mut().closed_tabs.pop();
+        let popped = {
+            let mut state = self.state.borrow_mut();
+            let active_space = state.spaces.active_space.clone();
+            state
+                .closed_tabs
+                .iter()
+                .rposition(|c| c.space_id == active_space)
+                .map(|idx| state.closed_tabs.remove(idx))
+        };
         if let Some(closed) = popped {
             let id = {
                 let mut guard = self.state.borrow_mut();
@@ -3246,7 +5099,13 @@ impl App {
         }
         let entry = {
             let state = self.state.borrow();
-            let open: Vec<String> = state.tabs.iter().map(|t| t.url.clone()).collect();
+            let active_space = state.active_space_id();
+            let open: Vec<String> = state
+                .tabs
+                .iter()
+                .filter(|t| t.space_id == active_space)
+                .map(|t| t.url.clone())
+                .collect();
             // Read, not taken: bringing a tab back is not a reason to forget
             // that the page was ever visited.
             let index = state.history.iter().position(|e| !open.contains(&e.url));
@@ -3311,6 +5170,12 @@ impl App {
             // holding open goes the same way as on close, crash or rebuild.
             self.retire_page_layers(*id);
             if let Some(view) = self.view(*id) {
+                let private = self.state.borrow().tab(*id).is_some_and(|t| t.private);
+                if private {
+                    if let Some(manager) = view.user_content_manager() {
+                        curtain::forget_manager(&manager);
+                    }
+                }
                 // Same rule as closing: out of the stack is not gone. A slept
                 // tab that keeps its view keeps its whole engine.
                 self.ui.stack.remove(&view);
@@ -3412,9 +5277,13 @@ impl App {
         // would keep focus under the address field and Escape would only take
         // down whichever opened first. The field takes the screen alone.
         crate::sitecard::dismiss(self);
+        if let Ok(panels) = self.panels.try_borrow() {
+            panels.dismiss_popover();
+        }
         // The ordinary field: every kind of row. Ctrl K sets the tabs-only
         // mode after this, so each opening starts from a known mode.
         TAB_SWITCHER.with(|mode| mode.set(false));
+        crate::suggest::stop();
         // Keep the old text until show() sets the address: setting the
         // placeholder first fired `changed` with the previous session's
         // query, which asked the search engine and filled the list with its
@@ -3447,6 +5316,7 @@ impl App {
 
     pub fn close_omni(&self) {
         TAB_SWITCHER.with(|mode| mode.set(false));
+        crate::suggest::stop();
         // hide() sets the visible flag to false at once, before the exit fade
         // runs, so restore_page_focus() skips the omnibox and goes to the next
         // open layer. With no layer open it goes to the start page search on a
@@ -3480,9 +5350,10 @@ impl App {
         let switching = tab_switcher_on();
         let tab_seats = if switching { 8 } else { 3 };
         let state = self.state.borrow();
+        let active_space = state.active_space_id();
         let mut open: Vec<(i32, usize, Offer)> = Vec::new();
         for (index, tab) in state.tabs.iter().enumerate() {
-            if tab.url.is_empty() {
+            if tab.url.is_empty() || tab.space_id != active_space {
                 continue;
             }
             let hay = format!("{} {}", tab.title, tab.url).to_lowercase();
@@ -3595,6 +5466,141 @@ impl App {
         offers
     }
 
+    /// Autocomplete offers for the native Start Page search box.
+    /// In normal tabs: matches Bookmarks first (retaining their real URL icons),
+    /// then matching Open normal tabs, History, Keyword shortcuts or Search, and
+    /// asynchronous search-engine query suggestions (Startpage / Ecosia / DDG /
+    /// Google / Bing / Brave) when enabled.
+    /// In private tabs: matches ONLY open private tabs and Search (never leaks
+    /// regular bookmarks, history, or remote suggestion queries).
+    pub fn start_offers(&self, typed: &str, private: bool) -> Vec<Offer> {
+        let trimmed = typed.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        let typed_lower = trimmed.to_lowercase();
+        let words: Vec<&str> = typed_lower.split_whitespace().collect();
+        let hit = |hay: &str| words.is_empty() || crate::fuzzy::score(&words, hay).is_some();
+        let mut offers: Vec<Offer> = Vec::new();
+        let state = self.state.borrow();
+        if !private {
+            for bookmark in &state.bookmarks {
+                if offers.len() >= 3 {
+                    break;
+                }
+                let hay = format!("{} {}", bookmark.title, bookmark.url).to_lowercase();
+                if hit(&hay) && !offers.iter().any(|o| o.url == bookmark.url) {
+                    offers.push(Offer {
+                        title: bookmark.title.clone(),
+                        url: bookmark.url.clone(),
+                        kind: "Bookmark".into(),
+                    });
+                }
+            }
+        }
+        let active_space = state.active_space_id();
+        for tab in &state.tabs {
+            if offers.len() >= 5 {
+                break;
+            }
+            if tab.url.is_empty() || tab.private != private || tab.space_id != active_space {
+                continue;
+            }
+            let hay = format!("{} {}", tab.title, tab.url).to_lowercase();
+            if hit(&hay) && !offers.iter().any(|o| o.url == tab.url) {
+                offers.push(Offer {
+                    title: if tab.title.is_empty() { tab.url.clone() } else { tab.title.clone() },
+                    url: tab.url.clone(),
+                    kind: "Open".into(),
+                });
+            }
+        }
+        if !private {
+            for entry in &state.history {
+                if offers.len() >= 5 {
+                    break;
+                }
+                let hay = format!("{} {}", entry.title, entry.url).to_lowercase();
+                if hit(&hay) && !offers.iter().any(|o| o.url == entry.url) {
+                    offers.push(Offer {
+                        title: if entry.title.is_empty() {
+                            crate::shield::host_of(&entry.url)
+                        } else {
+                            entry.title.clone()
+                        },
+                        url: entry.url.clone(),
+                        kind: "History".into(),
+                    });
+                }
+            }
+        }
+        drop(state);
+        let prefs = self.prefs.borrow().clone();
+        if let Some((url, name, rest)) = crate::keyword::find_named(trimmed, &prefs.keywords) {
+            if !offers.iter().any(|o| o.url == url) {
+                offers.insert(0, Offer {
+                    title: format!("Search {name} for \"{rest}\""),
+                    url,
+                    kind: "Keyword".into(),
+                });
+            }
+        } else {
+            let target = plain_target(trimmed, &|query| prefs.search_url(query));
+            if target == prefs.search_url(trimmed) && !offers.iter().any(|o| o.url == target) {
+                offers.push(Offer {
+                    title: format!("Search for \"{trimmed}\""),
+                    url: target,
+                    kind: "Search".into(),
+                });
+            }
+        }
+        let no_engine = query_path(trimmed).is_some();
+        match crate::suggest::url_if_asked(trimmed, &prefs, private, no_engine) {
+            Some(url) => {
+                crate::suggest::ask(&prefs.search_engine, trimmed, url);
+                let suggest_words = crate::suggest::rows_for(&prefs.search_engine, trimmed);
+                if !suggest_words.is_empty() {
+                    let suggest_slots = suggest_words.len().min(4);
+                    while offers.len() + suggest_slots > 7 {
+                        if let Some(pos) = offers.iter().rposition(|o| o.kind == "History") {
+                            offers.remove(pos);
+                        } else {
+                            break;
+                        }
+                    }
+                    for word in suggest_words {
+                        if offers.len() >= 7 {
+                            break;
+                        }
+                        let url = prefs.search_url(&word);
+                        if !offers.iter().any(|o| o.url == url) {
+                            offers.push(Offer {
+                                title: word,
+                                url,
+                                kind: "Suggest".into(),
+                            });
+                        }
+                    }
+                }
+            }
+            None => crate::suggest::stop(),
+        }
+        offers.truncate(7);
+        offers
+    }
+
+    pub fn refresh_open_search_offers(&self) {
+        if self.omni.visible.get() {
+            let text = self.omni.entry.text();
+            self.refresh_offers(&text);
+        }
+        if self.ui.stack.visible_child_name().as_deref() == Some("blank")
+            && !self.ui.start.search.text().trim().is_empty()
+        {
+            self.ui.start.refresh_suggestions_async();
+        }
+    }
+
     pub fn refresh_offers(&self, typed: &str) {
         let mut offers = self.offers(typed);
         // The engine's words go under the field's own rows, in the seats left.
@@ -3606,18 +5612,29 @@ impl App {
         match crate::suggest::url_if_asked(typed, &prefs, private, no_engine) {
             Some(url) => {
                 let asked = typed.trim();
-                crate::suggest::ask(asked, url);
-                for word in crate::suggest::rows_for(asked) {
-                    if offers.len() >= 8 {
-                        break;
+                crate::suggest::ask(&prefs.search_engine, asked, url);
+                let suggest_words = crate::suggest::rows_for(&prefs.search_engine, asked);
+                if !suggest_words.is_empty() {
+                    let suggest_slots = suggest_words.len().min(4);
+                    while offers.len() + suggest_slots > 8 {
+                        if let Some(pos) = offers.iter().rposition(|o| o.kind == "History") {
+                            offers.remove(pos);
+                        } else {
+                            break;
+                        }
                     }
-                    // A suggestion is always a search. Sending it through resolve()
-                    // would turn "google.com" into a visit to google.com and
-                    // "yt cats" into a keyword jump, neither of which was picked.
-                    // The search is built directly with the engine the field uses.
-                    let url = prefs.search_url(&word);
-                    if !offers.iter().any(|o| o.url == url) {
-                        offers.push(Offer { title: word, url, kind: "Suggest".into() });
+                    for word in suggest_words {
+                        if offers.len() >= 8 {
+                            break;
+                        }
+                        // A suggestion is always a search. Sending it through resolve()
+                        // would turn "google.com" into a visit to google.com and
+                        // "yt cats" into a keyword jump, neither of which was picked.
+                        // The search is built directly with the engine the field uses.
+                        let url = prefs.search_url(&word);
+                        if !offers.iter().any(|o| o.url == url) {
+                            offers.push(Offer { title: word, url, kind: "Suggest".into() });
+                        }
                     }
                 }
             }
@@ -3723,9 +5740,20 @@ impl App {
             if let Ok(find) = self.find.try_borrow() {
                 find.holder.set_size_request(-1, -1);
             }
+            let weak = self.weak();
+            glib::idle_add_local_once(move || {
+                if let Some(app) = weak.upgrade() {
+                    let (ow, oh) = (app.ui.overlay.allocated_width(), app.ui.overlay.allocated_height());
+                    if ow > 1 && oh > 1 {
+                        app.layout_layers(ow, oh);
+                    }
+                    app.scroll_active_into_view();
+                }
+            });
         }
         let column = self.side_width();
         self.omni.layout_in(width, height, column, 0);
+        self.layout_bmark_autocomplete();
         if let Ok(panels) = self.panels.try_borrow() {
             panels.layout_with_column(width, height, column);
         }
@@ -3784,18 +5812,22 @@ impl App {
         // sitting on top of it under the same Escape key.
         crate::sitecard::dismiss(self);
         if let Some(app) = current() {
-            {
-                let mut panels = self.panels.borrow_mut();
-                panels.open_panel(&app, kind);
-                self.ui.overlay.reorder_overlay(&panels.holder, -1);
-            }
-            let (w, h) = (
-                self.ui.overlay.allocated_width().max(self.ui.window.allocated_width()),
-                self.ui.overlay.allocated_height().max(self.ui.window.allocated_height()),
-            );
-            if w > 1 && h > 1 {
-                self.panels.borrow().layout_with_column(w, h, self.side_width());
-            }
+            // `panels.open_panel` measures, lays out for the current sidebar
+            // column, and starts the entrance slide. Calling `layout_with_column`
+            // again here immediately snapped the card back to its final `y` on
+            // frame 0, clobbering the entrance animation.
+            let mut panels = self.panels.borrow_mut();
+            panels.open_panel(&app, kind);
+            self.ui.overlay.reorder_overlay(&panels.holder, -1);
+        }
+    }
+
+    pub fn open_panel_filtered(&self, kind: PanelKind, filter: &str) {
+        crate::sitecard::dismiss(self);
+        if let Some(app) = current() {
+            let mut panels = self.panels.borrow_mut();
+            panels.open_panel_filtered(&app, kind, filter);
+            self.ui.overlay.reorder_overlay(&panels.holder, -1);
         }
     }
 
@@ -3839,6 +5871,7 @@ impl App {
     }
 
     pub fn close_panels(&self) {
+        crate::addons_catalog::cancel_pending();
         self.panels.borrow_mut().close(&self.ui);
         self.restore_page_focus();
     }
@@ -3868,22 +5901,51 @@ impl App {
         }
         // Clone the holder first, so no borrow of the panels is held while
         // GTK runs focus handlers that may borrow them again.
-        let panel_holder = self
+        let panel_open = self
             .panels
             .try_borrow()
             .ok()
             .filter(|panels| panels.open.is_some())
-            .map(|panels| panels.holder.clone());
-        if let Some(holder) = panel_holder {
-            if holder.child_focus(gtk::DirectionType::TabForward) {
-                return;
+            .map(|panels| (panels.holder.clone(), panels.close_button.clone()));
+        if let Some((holder, close_button)) = panel_open {
+            let already_inside = self
+                .ui
+                .window
+                .focused_widget()
+                .is_some_and(|w| w.is_ancestor(&holder) || w == holder);
+            if !already_inside && !holder.child_focus(gtk::DirectionType::TabForward) {
+                close_button.grab_focus();
             }
+            return;
+        }
+        if crate::sitecard::is_open() || crate::peek::is_open() {
+            return;
+        }
+        // Full-tab onboarding owns keyboard focus while visible inside the tab
+        // viewport stack; never steal focus back into the hidden StartPage.
+        if self.ui.stack.visible_child_name().as_deref() == Some("welcome") {
+            return;
         }
         // No layer is open. A blank tab has no view, so its start page search
         // field takes focus, the same as close_omni does.
         if self.ui.stack.visible_child_name().as_deref() == Some("blank") {
             self.ui.start.search.grab_focus();
             return;
+        }
+        if self.ui.stack.visible_child_name().as_deref() == Some("error") {
+            let active = self.active_id();
+            let reason = self
+                .state
+                .borrow()
+                .errors
+                .get(&active)
+                .map(|e| e.reason.clone());
+            if let Some(reason) = reason {
+                if should_focus_error_back(true, true, &reason, self.overlay_blocks_page_focus(active)) {
+                    self.ui.error_back.grab_focus();
+                    return;
+                }
+            }
         }
         if let Some(view) = self.view(self.active_id()) {
             if view.is_mapped() {
@@ -3900,6 +5962,9 @@ impl App {
             self.find.borrow_mut().hide(&self.ui);
             self.restore_page_focus();
             return;
+        }
+        if let Ok(panels) = self.panels.try_borrow() {
+            panels.dismiss_popover();
         }
         {
             let mut find = self.find.borrow_mut();
@@ -4186,15 +6251,20 @@ impl App {
     }
 
     pub fn add_bookmark(&self) {
-        let (url, title) = {
+        let (tab_id, url, title, private) = {
             let state = self.state.borrow();
             match state.active_tab() {
-                Some(tab) => (tab.url.clone(), tab.title.clone()),
+                Some(tab) => (tab.id, tab.url.clone(), tab.title.clone(), tab.private),
                 None => return,
             }
         };
         if url.is_empty() {
             return;
+        }
+        if !private {
+            if let Some(surface) = self.icons.borrow().get(&tab_id).cloned() {
+                self.cache_favicon(&url, &surface);
+            }
         }
         let (toast, turned_bar_on) = {
             let mut state = self.state.borrow_mut();
@@ -4238,88 +6308,302 @@ impl App {
         self.refresh_helm();
     }
 
-    pub fn hide_element_mode(&self) {
-        let on = !self.state.borrow().hide_mode;
-        self.state.borrow_mut().hide_mode = on;
-        if let Some(view) = self.view(self.active_id()) {
-            curtain::pick(self, &view, on);
-        }
-        self.flash_toast(if on { "Click what should go" } else { "Done hiding" });
+    fn hide_target_snapshot_data(&self, tab_id: TabId) -> Option<(bool, String, u64, Option<usize>)> {
+        let (private, tab_host, nav_epoch) = {
+            let state = self.state.borrow();
+            let tab = state.tab(tab_id)?;
+            (tab.private, crate::shield::host_of(&tab.url), tab.nav_epoch)
+        };
+        let (effective_host, manager_key) = if let Some(view) = self.view(tab_id) {
+            let view_host = view
+                .uri()
+                .map(|uri| crate::shield::host_of(&uri))
+                .filter(|host| !host.is_empty());
+            let effective_host = match view_host {
+                Some(vh) if vh != tab_host => vh,
+                _ => tab_host,
+            };
+            let key = view
+                .user_content_manager()
+                .map(|manager| curtain::manager_key(&manager));
+            (effective_host, key)
+        } else {
+            (tab_host, None)
+        };
+        Some((private, effective_host, nav_epoch, manager_key))
     }
 
-    pub fn hide_selector(&self, host: &str, selector: &str) {
-        let Some(selector) = sanitize_selector(selector) else {
-            return;
+    pub(crate) fn arm_hide_mode(&self, tab_id: TabId) -> Option<curtain::HideOrigin> {
+        let prev_tab = self
+            .state
+            .borrow()
+            .hide_origin
+            .as_ref()
+            .map(|o| o.tab_id);
+        if let Some(old_tab) = prev_tab {
+            if old_tab != tab_id {
+                if let Some(old_view) = self.view(old_tab) {
+                    curtain::pick(self, &old_view, false);
+                }
+            }
+        }
+        let (private, host, nav_epoch, manager_key) = self.hide_target_snapshot_data(tab_id)?;
+        if host.is_empty() || manager_key.is_none() {
+            let mut state = self.state.borrow_mut();
+            state.hide_mode = false;
+            state.hide_origin = None;
+            return None;
+        }
+        let origin = curtain::HideOrigin {
+            tab_id,
+            host,
+            private,
+            nav_epoch,
+            manager_key,
         };
+        let mut state = self.state.borrow_mut();
+        state.hide_mode = true;
+        state.hide_origin = Some(origin.clone());
+        Some(origin)
+    }
+
+    pub(crate) fn cancel_hide_mode(&self) {
+        let origin = {
+            let mut state = self.state.borrow_mut();
+            state.hide_mode = false;
+            state.hide_origin.take()
+        };
+        if let Some(origin) = origin {
+            if let Some(view) = self.view(origin.tab_id) {
+                curtain::pick(self, &view, false);
+            }
+        }
+    }
+
+    /// Validates an incoming `searchHide` callback against the armed
+    /// `HideOrigin` and source `UserContentManager` identity, disarming
+    /// `hide_mode` immediately so no duplicate or cross-tab message can fire
+    /// during the 10ms deferral window.
+    pub(crate) fn take_verified_hide_origin(
+        &self,
+        source_manager_key: usize,
+    ) -> Option<curtain::HideOrigin> {
+        let (hide_mode, origin) = {
+            let state = self.state.borrow();
+            (state.hide_mode, state.hide_origin.clone())
+        };
+        let origin_tab = origin.as_ref()?.tab_id;
+        let snap_data = self.hide_target_snapshot_data(origin_tab);
+        let snapshot = snap_data.as_ref().map(|(private, host, nav_epoch, manager_key)| {
+            curtain::HideTargetSnapshot {
+                private: *private,
+                host: host.as_str(),
+                nav_epoch: *nav_epoch,
+                manager_key: *manager_key,
+            }
+        });
+        let verified = curtain::validate_hide_source(
+            hide_mode,
+            origin.as_ref(),
+            source_manager_key,
+            snapshot,
+        )?;
+        let mut state = self.state.borrow_mut();
+        state.hide_mode = false;
+        state.hide_origin = None;
+        Some(verified)
+    }
+
+    pub fn hide_element_mode(&self) {
+        if self.state.borrow().hide_mode {
+            self.cancel_hide_mode();
+            self.flash_toast("Done hiding");
+            return;
+        }
+        let active = self.active_id();
+        if self.arm_hide_mode(active).is_some() {
+            if let Some(view) = self.view(active) {
+                curtain::pick(self, &view, true);
+            }
+            self.flash_toast("Click what should go");
+        } else {
+            self.flash_toast("Nothing to hide here");
+        }
+    }
+
+    /// Applies a deferred element-hide selection strictly to its originating
+    /// tab and host, verifying that the tab is still alive and unchanged rather
+    /// than reading whichever tab happens to be active when the timer fires.
+    pub(crate) fn hide_selector_for_origin(
+        &self,
+        origin: &curtain::HideOrigin,
+        selector: &str,
+    ) -> bool {
+        let snap_data = self.hide_target_snapshot_data(origin.tab_id);
+        let snapshot = snap_data.as_ref().map(|(private, host, nav_epoch, manager_key)| {
+            curtain::HideTargetSnapshot {
+                private: *private,
+                host: host.as_str(),
+                nav_epoch: *nav_epoch,
+                manager_key: *manager_key,
+            }
+        });
+        let curtain_enabled = self.prefs.borrow().curtain;
+        let outcome = {
+            let mut state = self.state.borrow_mut();
+            let mut priv_hidden = self.private_hidden.borrow_mut();
+            apply_hide_for_origin(
+                origin,
+                snapshot,
+                selector,
+                curtain_enabled,
+                &mut state.hidden,
+                &mut priv_hidden,
+            )
+        };
+        match outcome {
+            HideApplyOutcome::Canceled => false,
+            HideApplyOutcome::AppliedPrivate { tab_id } => {
+                let list = self
+                    .private_hidden
+                    .borrow()
+                    .get(&tab_id)
+                    .and_then(|hosts| hosts.get(&origin.host))
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(view) = self.view(tab_id) {
+                    if let Some(manager) = view.user_content_manager() {
+                        curtain::sync_private_sheet(&manager, &origin.host, &list);
+                    }
+                    curtain::apply_immediate_private(&view, &list);
+                }
+                if self.active_id() == tab_id {
+                    self.flash_toast("Hidden for this private tab only");
+                }
+                true
+            }
+            HideApplyOutcome::AppliedNormal { tab_id, save_persisted } => {
+                if save_persisted {
+                    let state = self.state.borrow();
+                    Records::save_hidden(&state.hidden);
+                }
+                if let Some(view) = self.view(tab_id) {
+                    curtain::apply_immediately(&view, self, &origin.host);
+                    if let Some(app) = current() {
+                        curtain::sync_shared_managers_for_host(&app, &origin.host);
+                        if let Some(manager) = view.user_content_manager() {
+                            curtain::sync_manager(&app, &manager, &origin.host);
+                        }
+                    }
+                }
+                if self.active_id() == tab_id {
+                    self.flash_toast("Hidden here for good");
+                }
+                true
+            }
+        }
+    }
+
+    /// Explicit compatibility wrapper around `hide_selector_for_origin` for
+    /// callers holding only `(host, selector)`.
+    #[allow(dead_code)]
+    pub fn hide_selector(&self, host: &str, selector: &str) {
         if host.is_empty() {
             return;
         }
-        let (private, active) = {
+        let origin = {
             let mut state = self.state.borrow_mut();
             if !state.hide_mode {
                 return;
             }
-            let private = state.active_tab().map(|t| t.private).unwrap_or(true);
-            let active = state.active;
             state.hide_mode = false;
-            (private, active)
-        };
-        if private {
-            if let Some(view) = self.view(active) {
-                let css = format!("{selector} {{ display: none !important; }}");
-                if let Some(manager) = view.user_content_manager() {
-                    if let Some(app) = current() {
-                        crate::curtain::sync_manager(&app, &manager, host);
-                    }
-                    let style = webkit2gtk::UserStyleSheet::new(
-                        &css,
-                        webkit2gtk::UserContentInjectedFrames::AllFrames,
-                        webkit2gtk::UserStyleLevel::User,
-                        &[],
-                        &[],
-                    );
-                    manager.add_style_sheet(&style);
+            if let Some(armed) = state.hide_origin.take() {
+                if armed.host == host {
+                    Some(armed)
+                } else {
+                    None
                 }
-                let text = serde_json::to_string(&css).unwrap_or_else(|_| "\"\"".into());
-                let js = format!(
-                    "(() => {{ let s = document.getElementById('__search_hidden_private'); if (!s) {{ s = document.createElement('style'); s.id = '__search_hidden_private'; (document.head || document.documentElement).appendChild(s); }} s.textContent = (s.textContent ? s.textContent + '\\n' : '') + {text}; }})();"
-                );
-                crate::js::run(&view, &js, |_| {});
+            } else {
+                state.active_tab().and_then(|tab| {
+                    let current_host = crate::shield::host_of(&tab.url);
+                    if current_host == host {
+                        Some(curtain::HideOrigin {
+                            tab_id: tab.id,
+                            host: current_host,
+                            private: tab.private,
+                            nav_epoch: tab.nav_epoch,
+                            manager_key: None,
+                        })
+                    } else {
+                        None
+                    }
+                })
             }
-            self.flash_toast("Hidden for this private tab only");
-            return;
+        };
+        if let Some(origin) = origin {
+            let _ = self.hide_selector_for_origin(&origin, selector);
         }
-        {
-            let mut state = self.state.borrow_mut();
-            let list = state.hidden.entry(host.to_string()).or_default();
-            if !list.iter().any(|s| s == selector) {
-                list.push(selector.to_string());
-            }
-            Records::save_hidden(&state.hidden);
+    }
+
+    /// Updates `prefs.curtain`, synchronizes all live shared/private managers
+    /// and immediate styles, and reloads the active tab.
+    #[allow(dead_code)]
+    pub fn set_curtain_enabled(&self, on: bool) {
+        self.prefs.borrow_mut().curtain = on;
+        self.prefs.borrow().save();
+        if let Some(app) = current() {
+            curtain::apply_curtain_pref(&app);
         }
-        if let Some(view) = self.view(active) {
-            curtain::apply_immediately(&view, self, host);
-            if let (Some(app), Some(manager)) = (current(), view.user_content_manager()) {
-                crate::curtain::sync_manager(&app, &manager, host);
-            }
-        }
-        self.flash_toast("Hidden here for good");
+        self.reload();
     }
 
     pub fn unhide_all(&self) {
-        let host = self
-            .state
-            .borrow()
-            .active_tab()
-            .map(|t| crate::shield::host_of(&t.url))
-            .unwrap_or_default();
-        {
+        let (active, host, private) = {
+            let state = self.state.borrow();
+            match state.active_tab() {
+                Some(tab) => (tab.id, crate::shield::host_of(&tab.url), tab.private),
+                None => (state.active, String::new(), true),
+            }
+        };
+        if host.is_empty() {
+            return;
+        }
+        let save_persisted = {
             let mut state = self.state.borrow_mut();
-            state.hidden.remove(&host);
+            let mut priv_hidden = self.private_hidden.borrow_mut();
+            apply_unhide_for_tab(&mut state.hidden, &mut priv_hidden, active, private, &host)
+        };
+        if private {
+            if let Some(view) = self.view(active) {
+                if let Some(manager) = view.user_content_manager() {
+                    curtain::sync_private_sheet(&manager, &host, &[]);
+                }
+                curtain::clear_immediate_styles(&view);
+            }
+            self.reload();
+            self.flash_toast("Nothing is hidden in this private tab");
+            return;
+        }
+        if save_persisted {
+            let state = self.state.borrow();
             Records::save_hidden(&state.hidden);
+        }
+        if let Some(app) = current() {
+            curtain::sync_shared_managers_for_host(&app, &host);
+            if let Some(manager) = self.view(active).and_then(|v| v.user_content_manager()) {
+                curtain::sync_manager(&app, &manager, &host);
+            }
         }
         self.reload();
         self.flash_toast("Nothing is hidden here now");
+    }
+
+    pub fn current_zoom_percent(&self) -> i32 {
+        let level = self
+            .view(self.active_id())
+            .map(|v| v.zoom_level())
+            .unwrap_or(1.0);
+        (level * 100.0).round() as i32
     }
 
     pub fn zoom(&self, delta: f64) {
@@ -4405,29 +6689,315 @@ impl App {
         saved
     }
 
-    /// The tabs session.json would hold right now: no private tabs and no
-    /// blank ones, with the active tab marked. Returns None when session
-    /// restore is off, which means there is nothing to write. Both the
-    /// direct save and the background timer use it, so they record the same thing.
+    /// The tabs session.json would hold right now: every normal tab across all
+    /// spaces (including blank/start tabs), with the active tab and each
+    /// space's last active tab marked. Private tabs are never persisted.
+    /// Returns None when session restore is off.
     fn session_records(&self) -> Option<Vec<TabRecord>> {
         if !self.prefs.borrow().restore_session {
             return None;
         }
         let state = self.state.borrow();
-        let active = state.active;
-        Some(
-            state
-                .tabs
-                .iter()
-                .filter(|t| !t.private && !t.url.is_empty())
-                .map(|t| TabRecord {
-                    url: t.url.clone(),
-                    title: t.title.clone(),
-                    pinned: t.pinned,
-                    active: t.id == active,
-                })
-                .collect(),
-        )
+        Some(session_records_from_state(&state))
+    }
+
+    // ---- spaces ---------------------------------------------------------
+
+    pub fn close_space_switcher(&self) {
+        if let Some(pop) = self.space_popover.borrow_mut().take() {
+            pop.popdown();
+        }
+    }
+
+    pub fn switch_space(&self, space_id: &str) -> bool {
+        let target_tab = {
+            let mut state = self.state.borrow_mut();
+            if state.spaces.active_space == space_id || state.spaces.space(space_id).is_none() {
+                return false;
+            }
+            if state.tabs.len() >= TAB_LIMIT && !state.tabs.iter().any(|tab| tab.space_id == space_id) {
+                drop(state);
+                self.flash_error("Close a tab before opening an empty space");
+                return false;
+            }
+            let prev_space = state.spaces.active_space.clone();
+            let prev_active = state.active;
+            if state.tab(prev_active).is_some_and(|t| t.space_id == prev_space) {
+                state.space_active_tabs.insert(prev_space, prev_active);
+            }
+            state.spaces.set_active(space_id);
+            let existing = state
+                .space_active_tabs
+                .get(space_id)
+                .copied()
+                .filter(|id| state.tab(*id).is_some_and(|t| t.space_id == space_id))
+                .or_else(|| state.tabs.iter().find(|t| t.space_id == space_id).map(|t| t.id));
+            let target = match existing {
+                Some(id) => id,
+                None => {
+                    let id = state.next_id;
+                    state.next_id += 1;
+                    let mut blank = Tab::new(id);
+                    blank.space_id = space_id.to_string();
+                    state.tabs.push(blank);
+                    id
+                }
+            };
+            state.space_active_tabs.insert(space_id.to_string(), target);
+            let spaces_snapshot = state.spaces.clone();
+            drop(state);
+            Records::save_spaces(&spaces_snapshot);
+            target
+        };
+        self.close_space_switcher();
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        self.select(target_tab);
+        true
+    }
+
+    pub fn create_space(&self, raw_name: &str) -> Result<crate::spaces::Space, &'static str> {
+        let (created, snapshot) = {
+            let mut state = self.state.borrow_mut();
+            let created = state.spaces.create(raw_name)?;
+            let snapshot = state.spaces.clone();
+            (created, snapshot)
+        };
+        Records::save_spaces(&snapshot);
+        self.render();
+        Ok(created)
+    }
+
+    pub fn rename_space(&self, id: &str, raw_name: &str) -> Result<String, &'static str> {
+        let (renamed, snapshot) = {
+            let mut state = self.state.borrow_mut();
+            let renamed = state.spaces.rename(id, raw_name)?;
+            let snapshot = state.spaces.clone();
+            (renamed, snapshot)
+        };
+        Records::save_spaces(&snapshot);
+        self.render();
+        Ok(renamed)
+    }
+
+    pub fn delete_space(&self, id: &str) -> Result<usize, &'static str> {
+        let (moved, snapshot, next_active) = {
+            let mut state = self.state.borrow_mut();
+            let was_active_space = state.spaces.active_space == id;
+            let _removed = state.spaces.delete(id)?;
+            let mut moved = 0usize;
+            for tab in &mut state.tabs {
+                if tab.space_id == id {
+                    tab.space_id = crate::spaces::default_space_id();
+                    moved += 1;
+                }
+            }
+            for closed in &mut state.closed_tabs {
+                if closed.space_id == id {
+                    closed.space_id = crate::spaces::default_space_id();
+                }
+            }
+            state.space_active_tabs.remove(id);
+            let next_active = if was_active_space {
+                let current = state.active;
+                if state.tab(current).is_some_and(|t| t.space_id == crate::spaces::DEFAULT_SPACE_ID) {
+                    state.space_active_tabs.insert(crate::spaces::default_space_id(), current);
+                    Some(current)
+                } else {
+                    let fallback = state
+                        .last_active_in_space(crate::spaces::DEFAULT_SPACE_ID)
+                        .unwrap_or_else(|| {
+                            let fresh_id = state.next_id;
+                            state.next_id += 1;
+                            let fresh = Tab::new(fresh_id);
+                            state.tabs.push(fresh);
+                            fresh_id
+                        });
+                    state.space_active_tabs.insert(crate::spaces::default_space_id(), fallback);
+                    Some(fallback)
+                }
+            } else {
+                None
+            };
+            (moved, state.spaces.clone(), next_active)
+        };
+        self.close_space_switcher();
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        Records::save_spaces(&snapshot);
+        if let Some(id) = next_active {
+            self.select(id);
+        } else {
+            self.render();
+        }
+        self.save_session();
+        Ok(moved)
+    }
+
+    pub fn move_tab_to_space(&self, tab_id: TabId, target_space_id: &str) -> bool {
+        let replacement = {
+            let mut state = self.state.borrow_mut();
+            if state.spaces.space(target_space_id).is_none() {
+                return false;
+            }
+            let Some(old_space) = state.tab(tab_id).map(|t| t.space_id.clone()) else {
+                return false;
+            };
+            if old_space == target_space_id {
+                return false;
+            }
+            let was_active = state.active == tab_id && state.spaces.active_space == old_space;
+            if was_active
+                && state.tabs.len() >= TAB_LIMIT
+                && state.tabs.iter().filter(|tab| tab.space_id == old_space).count() == 1
+            {
+                drop(state);
+                self.flash_error("Close a tab before moving the last tab out of this space");
+                return false;
+            }
+            if let Some(tab) = state.tab_mut(tab_id) {
+                tab.space_id = target_space_id.to_string();
+            }
+            state.space_active_tabs.insert(target_space_id.to_string(), tab_id);
+            if was_active {
+                let next = state
+                    .tabs
+                    .iter()
+                    .find(|t| t.space_id == old_space)
+                    .map(|t| t.id)
+                    .unwrap_or_else(|| {
+                        let fresh_id = state.next_id;
+                        state.next_id += 1;
+                        let mut fresh = Tab::new(fresh_id);
+                        fresh.space_id = old_space.clone();
+                        state.tabs.push(fresh);
+                        fresh_id
+                    });
+                state.space_active_tabs.insert(old_space, next);
+                Some(next)
+            } else {
+                None
+            }
+        };
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        if let Some(next_id) = replacement {
+            self.select(next_id);
+        } else {
+            self.render();
+        }
+        self.save_session();
+        true
+    }
+
+    pub fn open_space_switcher(&self, anchor: &gtk::Button) {
+        if let Some(existing) = self.space_popover.borrow_mut().take() {
+            let was_visible = existing.is_visible();
+            existing.popdown();
+            if was_visible {
+                return;
+            }
+        }
+        let popover = gtk::Popover::new(Some(anchor));
+        crate::ui::class(&popover, "browser-menu");
+        crate::ui::class(&popover, "space-switcher");
+        popover.set_modal(true);
+        popover.set_position(if anchor == &self.ui.side_space_btn {
+            gtk::PositionType::Top
+        } else {
+            gtk::PositionType::Bottom
+        });
+
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        container.set_size_request(220, -1);
+
+        let (spaces, active_id, counts) = {
+            let state = self.state.borrow();
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for tab in &state.tabs {
+                *counts.entry(tab.space_id.clone()).or_insert(0) += 1;
+            }
+            (
+                state.spaces.spaces.clone(),
+                state.spaces.active_space.clone(),
+                counts,
+            )
+        };
+
+        for space in spaces {
+            let btn = gtk::Button::new();
+            crate::ui::class(&btn, "menu-row");
+            if space.id == active_id {
+                crate::ui::class(&btn, "active-space-row");
+            }
+            btn.set_relief(gtk::ReliefStyle::None);
+            btn.set_widget_name(&format!("space-switch-{}", space.id));
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            let title_text = if space.id == active_id {
+                format!("\u{2713}  {}", space.name)
+            } else {
+                format!("    {}", space.name)
+            };
+            let title = gtk::Label::new(Some(&title_text));
+            crate::ui::class(&title, "menu-row-title");
+            title.set_xalign(0.0);
+            title.set_hexpand(true);
+            title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            let n = counts.get(&space.id).copied().unwrap_or(0);
+            let badge = gtk::Label::new(Some(&n.to_string()));
+            crate::ui::class(&badge, "menu-row-accel");
+            row.pack_start(&title, true, true, 0);
+            row.pack_end(&badge, false, false, 0);
+            btn.add(&row);
+            let weak = self.weak();
+            let target_id = space.id.clone();
+            let pop_weak = popover.downgrade();
+            btn.connect_clicked(move |_| {
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                if let Some(app) = weak.upgrade() {
+                    app.switch_space(&target_id);
+                }
+            });
+            container.pack_start(&btn, false, true, 0);
+        }
+
+        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+        let manage = gtk::Button::new();
+        crate::ui::class(&manage, "menu-row");
+        manage.set_relief(gtk::ReliefStyle::None);
+        let manage_lbl = gtk::Label::new(Some("Manage Spaces in Settings\u{2026}"));
+        crate::ui::class(&manage_lbl, "menu-row-title");
+        manage_lbl.set_xalign(0.0);
+        manage.add(&manage_lbl);
+        {
+            let weak = self.weak();
+            let pop_weak = popover.downgrade();
+            manage.connect_clicked(move |_| {
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                if let Some(app) = weak.upgrade() {
+                    app.open_panel(PanelKind::Settings);
+                }
+            });
+        }
+        container.pack_start(&manage, false, true, 0);
+
+        container.show_all();
+        popover.add(&container);
+        let weak = self.weak();
+        popover.connect_closed(move |pop| {
+            if let Some(app) = weak.upgrade() {
+                let mut slot = app.space_popover.borrow_mut();
+                if slot.as_ref().is_some_and(|p| p == pop) {
+                    *slot = None;
+                }
+            }
+        });
+        *self.space_popover.borrow_mut() = Some(popover.clone());
+        popover.popup();
     }
 
     // ---- menus and toasts ----------------------------------------------
@@ -4435,10 +7005,11 @@ impl App {
     pub fn close_other_tabs(&self, keep: TabId) {
         let (targets, active) = {
             let state = self.state.borrow();
+            let Some(keep_space) = state.tab(keep).map(|t| t.space_id.clone()) else { return };
             let targets: Vec<TabId> = state
                 .tabs
                 .iter()
-                .filter(|t| t.id != keep && !t.pinned)
+                .filter(|t| t.space_id == keep_space && t.id != keep && !t.pinned)
                 .map(|t| t.id)
                 .collect();
             (targets, state.active)
@@ -4461,9 +7032,10 @@ impl App {
             if state.tabs[pos].pinned {
                 return;
             }
+            let anchor_space = state.tabs[pos].space_id.clone();
             let targets: Vec<TabId> = state.tabs[pos + 1..]
                 .iter()
-                .filter(|t| !t.pinned)
+                .filter(|t| t.space_id == anchor_space && !t.pinned)
                 .map(|t| t.id)
                 .collect();
             (targets, state.active)
@@ -4481,20 +7053,47 @@ impl App {
 
     pub fn tab_menu(&self, id: TabId, event: &gtk::gdk::Event) {
         let menu = gtk::Menu::new();
-        let (pinned, has_others, has_below) = {
+        prepare_popup_menu(&menu);
+        let (pinned, tab_space, has_others, has_right, can_left, can_right, other_spaces) = {
             let state = self.state.borrow();
-            let pinned = state.tab(id).map(|t| t.pinned).unwrap_or(false);
-            let has_others = state.tabs.iter().any(|t| t.id != id && !t.pinned);
-            let has_below = if pinned {
+            let Some(tab) = state.tab(id) else { return };
+            let pinned = tab.pinned;
+            let tab_space = tab.space_id.clone();
+            let has_others = state
+                .tabs
+                .iter()
+                .any(|t| t.space_id == tab_space && t.id != id && !t.pinned);
+            let has_right = if pinned {
                 false
             } else {
                 state
                     .position(id)
-                    .map(|pos| state.tabs[pos + 1..].iter().any(|t| !t.pinned))
+                    .map(|pos| {
+                        state.tabs[pos + 1..]
+                            .iter()
+                            .any(|t| t.space_id == tab_space && !t.pinned)
+                    })
                     .unwrap_or(false)
             };
-            (pinned, has_others, has_below)
+            let partition: Vec<TabId> = state
+                .tabs
+                .iter()
+                .filter(|t| t.space_id == tab_space && t.pinned == pinned)
+                .map(|t| t.id)
+                .collect();
+            let pos = partition.iter().position(|t| *t == id);
+            let can_left = pos.is_some_and(|p| p > 0);
+            let can_right = pos.is_some_and(|p| p + 1 < partition.len());
+            let other_spaces: Vec<crate::spaces::Space> = state
+                .spaces
+                .spaces
+                .iter()
+                .filter(|s| s.id != tab_space)
+                .cloned()
+                .collect();
+            (pinned, tab_space, has_others, has_right, can_left, can_right, other_spaces)
         };
+        let _ = tab_space;
         let view = self.view(id);
         let muted = view.as_ref().is_some_and(|v| v.is_muted());
         let pin_label = if pinned { "Unpin Tab" } else { "Pin Tab" };
@@ -4512,9 +7111,11 @@ impl App {
             ),
             (pin_label, true, Box::new(move |app: &App| app.toggle_pin(id))),
             ("Duplicate Tab", true, Box::new(move |app: &App| app.duplicate(id))),
+            ("Move Tab Left", can_left, Box::new(move |app: &App| { let _ = app.move_tab_by(id, -1); })),
+            ("Move Tab Right", can_right, Box::new(move |app: &App| { let _ = app.move_tab_by(id, 1); })),
             ("Close Tab", true, Box::new(move |app: &App| app.close_tab(id))),
             ("Close Other Tabs", has_others, Box::new(move |app: &App| app.close_other_tabs(id))),
-            ("Close Tabs Below", has_below, Box::new(move |app: &App| app.close_tabs_below(id))),
+            ("Close Tabs to the Right", has_right, Box::new(move |app: &App| app.close_tabs_below(id))),
         ];
         for (label, sensitive, action) in items {
             let item = gtk::MenuItem::with_label(label);
@@ -4526,6 +7127,25 @@ impl App {
                 }
             });
             menu.append(&item);
+        }
+        if !other_spaces.is_empty() {
+            menu.append(&gtk::SeparatorMenuItem::new());
+            let move_item = gtk::MenuItem::with_label("Move Tab to Space");
+            let submenu = gtk::Menu::new();
+            prepare_popup_menu(&submenu);
+            for target in other_spaces {
+                let entry = gtk::MenuItem::with_label(&target.name);
+                let weak = self.weak();
+                let target_id = target.id.clone();
+                entry.connect_activate(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        app.move_tab_to_space(id, &target_id);
+                    }
+                });
+                submenu.append(&entry);
+            }
+            move_item.set_submenu(Some(&submenu));
+            menu.append(&move_item);
         }
         menu.show_all();
         if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
@@ -4533,54 +7153,76 @@ impl App {
         }
     }
 
-    pub fn main_menu(&self) {
+    pub fn toolbar_context_menu(&self, event: &gtk::gdk::EventButton) {
         let menu = gtk::Menu::new();
-        crate::ui::class(&menu, "browser-menu");
-        let (url, private) = self
-            .state
-            .borrow()
-            .active_tab()
-            .map(|t| (t.url.clone(), t.private))
-            .unwrap_or_default();
-        let lower = url.to_ascii_lowercase();
-        let is_http = lower.starts_with("http://") || lower.starts_with("https://");
-        let host = if is_http { crate::shield::host_of(&url) } else { String::new() };
-        let blocker_off = !private && !host.is_empty() && crate::shield::allowed(&host);
-        let blocker_label = if blocker_off { "Blocker On Here" } else { "Blocker Off Here" };
-        let (back, forward, loading) = self.state.borrow().active_tab()
-            .map(|tab| (tab.can_back, tab.can_forward, tab.loading)).unwrap_or_default();
-        let items: Vec<(&str, bool, MenuItem)> = vec![
-            ("Back", back, Box::new(|app: &App| app.go_back())),
-            ("Forward", forward, Box::new(|app: &App| app.go_forward())),
-            (if loading { "Stop Loading" } else { "Reload" }, !url.is_empty(), Box::new(|app: &App| app.reload_or_stop())),
-            ("New Tab", true, Box::new(|app: &App| {
-                app.new_tab(None, false, false);
-            })),
-            ("New Private Tab", true, Box::new(|app: &App| {
-                app.new_tab(None, true, false);
-            })),
+        prepare_popup_menu(&menu);
+        let prefs = self.prefs.borrow().clone();
+        let check = |on: bool, label: &str| -> String {
+            if on { format!("\u{2713}  {label}") } else { format!("    {label}") }
+        };
+        let toggles: Vec<(String, Box<dyn Fn(&App)>)> = vec![
             (
-                if self.reading.get() { "Leave Reading Mode" } else { "Reading Mode" },
-                !url.is_empty(),
-                Box::new(|app: &App| app.reader()),
+                check(prefs.show_back_button, "Back Button"),
+                Box::new(|app: &App| {
+                    let next = !app.prefs.borrow().show_back_button;
+                    app.set_back_button_visible(next);
+                }),
             ),
-            ("Find in Page", true, Box::new(|app: &App| app.toggle_find())),
-            ("Bookmarks", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Bookmarks))),
-            ("History", true, Box::new(|app: &App| app.toggle_panel(PanelKind::History))),
-            ("Downloads", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Downloads))),
-            ("Extensions", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Extensions))),
-            ("Settings", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Settings))),
-            ("Shortcuts", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Shortcuts))),
             (
-                if self.prefs.borrow().show_toolbar { "Hide Top Controls" } else { "Show Top Controls" },
-                true,
+                check(prefs.show_forward_button, "Forward Button"),
+                Box::new(|app: &App| {
+                    let next = !app.prefs.borrow().show_forward_button;
+                    app.set_forward_button_visible(next);
+                }),
+            ),
+            (
+                check(prefs.show_reload_button, "Reload / Stop"),
+                Box::new(|app: &App| {
+                    let next = !app.prefs.borrow().show_reload_button;
+                    app.set_reload_button_visible(next);
+                }),
+            ),
+            (
+                check(prefs.show_home_button, "Home Button"),
+                Box::new(|app: &App| {
+                    let next = !app.prefs.borrow().show_home_button;
+                    app.set_home_button_visible(next);
+                }),
+            ),
+            (
+                check(prefs.show_reader_button, "Reader Mode Button"),
+                Box::new(|app: &App| {
+                    let next = !app.prefs.borrow().show_reader_button;
+                    app.set_reader_button_visible(next);
+                }),
+            ),
+            (
+                check(prefs.show_bookmark_button, "Bookmark Button"),
+                Box::new(|app: &App| {
+                    let next = !app.prefs.borrow().show_bookmark_button;
+                    app.set_bookmark_button_visible(next);
+                }),
+            ),
+            (
+                check(prefs.show_bookmarks_bar, "Bookmarks Bar"),
+                Box::new(|app: &App| {
+                    let next = !app.prefs.borrow().show_bookmarks_bar;
+                    app.prefs.borrow_mut().show_bookmarks_bar = next;
+                    app.prefs.borrow().save();
+                    app.render_bmarks();
+                }),
+            ),
+            (
+                check(prefs.sidebar && !prefs.column_folded, "Tab Sidebar"),
+                Box::new(|app: &App| app.toggle_fold()),
+            ),
+            (
+                check(prefs.show_toolbar, "Address & Navigation Bar"),
                 Box::new(|app: &App| app.toggle_toolbar()),
             ),
-            (blocker_label, is_http && !host.is_empty(), Box::new(|app: &App| app.toggle_blocker())),
         ];
-        for (label, sensitive, action) in items {
-            let item = gtk::MenuItem::with_label(label);
-            item.set_sensitive(sensitive);
+        for (caption, action) in toggles {
+            let item = gtk::MenuItem::with_label(&caption);
             let weak = self.weak();
             item.connect_activate(move |_| {
                 if let Some(app) = weak.upgrade() {
@@ -4589,10 +7231,308 @@ impl App {
             });
             menu.append(&item);
         }
-        // At the pointer, not in the corner: a menu that opens far from where
-        // you clicked reads as a different menu.
+        menu.append(&gtk::SeparatorMenuItem::new());
+        let customize = gtk::MenuItem::with_label("Customize Toolbar\u{2026}");
+        {
+            let weak = self.weak();
+            customize.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_panel_filtered(PanelKind::Settings, "Toolbar");
+                }
+            });
+        }
+        menu.append(&customize);
+        let reset = gtk::MenuItem::with_label("Reset to Minimal Layout");
+        {
+            let weak = self.weak();
+            reset.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.reset_toolbar_layout();
+                }
+            });
+        }
+        menu.append(&reset);
         menu.show_all();
-        menu.popup_at_widget(&self.ui.more, gtk::gdk::Gravity::SouthEast, gtk::gdk::Gravity::NorthEast, None);
+        menu.popup_easy(event.button(), event.time());
+    }
+
+    pub fn close_main_menu(&self) {
+        let pop = self.menu_popover.borrow_mut().take();
+        if let Some(pop) = pop {
+            pop.popdown();
+        }
+    }
+
+    pub fn main_menu(&self) {
+        let existing = self.menu_popover.borrow_mut().take();
+        if let Some(existing) = existing {
+            let was_visible = existing.is_visible();
+            existing.popdown();
+            if was_visible {
+                return;
+            }
+        }
+        let popover = gtk::Popover::new(Some(&self.ui.more));
+        crate::ui::class(&popover, "browser-menu");
+        popover.set_modal(true);
+        popover.set_position(gtk::PositionType::Bottom);
+
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        container.set_size_request(256, -1);
+
+        let (url, private, back, forward, loading, kept) = {
+            let state = self.state.borrow();
+            let (url, private, back, forward, loading) = state
+                .active_tab()
+                .map(|t| (t.url.clone(), t.private, t.can_back, t.can_forward, t.loading))
+                .unwrap_or_default();
+            let kept = !url.is_empty() && state.bookmarks.iter().any(|b| b.url == url);
+            (url, private, back, forward, loading, kept)
+        };
+        let lower = url.to_ascii_lowercase();
+        let is_http = lower.starts_with("http://") || lower.starts_with("https://");
+        let host = if is_http { crate::shield::host_of(&url) } else { String::new() };
+        let blocker_off = !private && !host.is_empty() && crate::shield::allowed(&host);
+        let blocker_label = if blocker_off { "Blocker On Here" } else { "Blocker Off Here" };
+        let prefs = self.prefs.borrow().clone();
+        let has_view = self.view(self.active_id()).is_some();
+
+        let add_row = |box_: &gtk::Box, label: &str, accel: &str, sensitive: bool, action: MenuItem| {
+            let btn = gtk::Button::new();
+            crate::ui::class(&btn, "menu-row");
+            btn.set_relief(gtk::ReliefStyle::None);
+            btn.set_sensitive(sensitive);
+            btn.set_widget_name(label);
+            if let Some(access) = btn.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, label);
+            }
+            let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+            let title = gtk::Label::new(Some(label));
+            crate::ui::class(&title, "menu-row-title");
+            title.set_xalign(0.0);
+            title.set_hexpand(true);
+            hbox.pack_start(&title, true, true, 0);
+            if !accel.is_empty() {
+                let hint = gtk::Label::new(Some(accel));
+                crate::ui::class(&hint, "menu-row-accel");
+                hint.set_xalign(1.0);
+                hbox.pack_end(&hint, false, false, 0);
+            }
+            btn.add(&hbox);
+            let weak = self.weak();
+            let pop_weak = popover.downgrade();
+            btn.connect_clicked(move |_| {
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                if let Some(app) = weak.upgrade() {
+                    action(&app);
+                }
+            });
+            box_.pack_start(&btn, false, true, 0);
+        };
+
+        // Group 1: Tabs
+        add_row(&container, "New Tab", "Ctrl+T", true, Box::new(|app: &App| {
+            app.new_tab(None, false, false);
+        }));
+        add_row(&container, "New Private Tab", "Ctrl+Shift+N", true, Box::new(|app: &App| {
+            app.new_tab(None, true, false);
+        }));
+
+        let show_back_in_menu = !prefs.show_toolbar || !prefs.show_back_button || !self.ui.back.is_visible();
+        let show_forward_in_menu = !prefs.show_toolbar || !prefs.show_forward_button || !self.ui.forward.is_visible();
+        let show_reload_in_menu = !prefs.show_toolbar || !prefs.show_reload_button || !self.ui.reload.is_visible();
+        let show_home_in_menu = !prefs.show_toolbar || !prefs.show_home_button || !self.ui.home.is_visible();
+        if show_back_in_menu || show_forward_in_menu || show_reload_in_menu || show_home_in_menu {
+            container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+            if show_back_in_menu {
+                add_row(&container, "Back", "Alt+Left", back, Box::new(|app: &App| app.go_back()));
+            }
+            if show_forward_in_menu {
+                add_row(&container, "Forward", "Alt+Right", forward, Box::new(|app: &App| app.go_forward()));
+            }
+            if show_reload_in_menu {
+                add_row(
+                    &container,
+                    if loading { "Stop Loading" } else { "Reload" },
+                    if loading { "Esc" } else { "Ctrl+R" },
+                    !url.is_empty(),
+                    Box::new(|app: &App| app.reload_or_stop()),
+                );
+            }
+            if show_home_in_menu {
+                add_row(&container, "Home", "Alt+Home", true, Box::new(|app: &App| app.go_home()));
+            }
+        }
+
+        // Group 2: Zoom (- / % reset / +) + Fullscreen
+        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+        let zoom_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        crate::ui::class(&zoom_row, "menu-zoom-row");
+        let zoom_label = gtk::Label::new(Some("Zoom"));
+        crate::ui::class(&zoom_label, "menu-zoom-label");
+        zoom_label.set_xalign(0.0);
+        zoom_label.set_hexpand(true);
+        zoom_row.pack_start(&zoom_label, true, true, 0);
+
+        let zoom_out = gtk::Button::with_label("\u{2212}");
+        crate::ui::class(&zoom_out, "menu-zoom-btn");
+        zoom_out.set_widget_name("Zoom Out");
+        zoom_out.set_tooltip_text(Some("Zoom out (Ctrl -)"));
+        zoom_out.set_sensitive(has_view);
+        if let Some(a) = zoom_out.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Zoom Out");
+        }
+
+        let zoom_reset = gtk::Button::with_label(&format!("{}%", self.current_zoom_percent()));
+        crate::ui::class(&zoom_reset, "menu-zoom-reset");
+        zoom_reset.set_widget_name("Reset Zoom");
+        zoom_reset.set_tooltip_text(Some("Reset zoom to 100% (Ctrl 0)"));
+        zoom_reset.set_sensitive(has_view);
+        if let Some(a) = zoom_reset.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Reset Zoom");
+        }
+
+        let zoom_in = gtk::Button::with_label("+");
+        crate::ui::class(&zoom_in, "menu-zoom-btn");
+        zoom_in.set_widget_name("Zoom In");
+        zoom_in.set_tooltip_text(Some("Zoom in (Ctrl +)"));
+        zoom_in.set_sensitive(has_view);
+        if let Some(a) = zoom_in.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Zoom In");
+        }
+
+        {
+            let weak = self.weak();
+            let reset_btn = zoom_reset.downgrade();
+            zoom_out.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.zoom(-0.1);
+                    if let Some(btn) = reset_btn.upgrade() {
+                        btn.set_label(&format!("{}%", app.current_zoom_percent()));
+                    }
+                }
+            });
+        }
+        {
+            let weak = self.weak();
+            let reset_btn = zoom_reset.downgrade();
+            zoom_reset.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.reset_zoom();
+                    if let Some(btn) = reset_btn.upgrade() {
+                        btn.set_label(&format!("{}%", app.current_zoom_percent()));
+                    }
+                }
+            });
+        }
+        {
+            let weak = self.weak();
+            let reset_btn = zoom_reset.downgrade();
+            zoom_in.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.zoom(0.1);
+                    if let Some(btn) = reset_btn.upgrade() {
+                        btn.set_label(&format!("{}%", app.current_zoom_percent()));
+                    }
+                }
+            });
+        }
+        zoom_row.pack_start(&zoom_out, false, false, 0);
+        zoom_row.pack_start(&zoom_reset, false, false, 0);
+        zoom_row.pack_start(&zoom_in, false, false, 0);
+        container.pack_start(&zoom_row, false, true, 0);
+
+        add_row(
+            &container,
+            if self.window_full.get() { "Exit Fullscreen" } else { "Fullscreen" },
+            "F11",
+            true,
+            Box::new(|app: &App| app.toggle_fullscreen()),
+        );
+
+        // Group 3: Page tools
+        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+        add_row(&container, "Find in Page", "Ctrl+F", true, Box::new(|app: &App| app.toggle_find()));
+        add_row(
+            &container,
+            if kept { "Remove Bookmark" } else { "Bookmark This Page" },
+            "Ctrl+D",
+            !url.is_empty(),
+            Box::new(|app: &App| app.add_bookmark()),
+        );
+        add_row(
+            &container,
+            if self.reading.get() { "Leave Reading Mode" } else { "Reading Mode" },
+            "Ctrl+Shift+R",
+            !url.is_empty(),
+            Box::new(|app: &App| app.reader()),
+        );
+        add_row(
+            &container,
+            blocker_label,
+            "",
+            is_http && !host.is_empty(),
+            Box::new(|app: &App| app.toggle_blocker()),
+        );
+
+        // Group 4: Library & Add-ons
+        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+        add_row(&container, "Bookmarks", "Ctrl+Shift+B", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Bookmarks)));
+        add_row(&container, "History", "Ctrl+H", true, Box::new(|app: &App| app.toggle_panel(PanelKind::History)));
+        add_row(&container, "Downloads", "Ctrl+J", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Downloads)));
+        add_row(&container, "Add-ons & Extensions", "", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Extensions)));
+
+        // Group 5: Customize & Settings
+        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+        add_row(
+            &container,
+            if prefs.show_toolbar { "Hide Navigation Bar" } else { "Show Navigation Bar" },
+            "Ctrl+Shift+S",
+            true,
+            Box::new(|app: &App| app.toggle_toolbar()),
+        );
+        add_row(
+            &container,
+            if prefs.show_bookmarks_bar { "Hide Bookmarks Bar" } else { "Show Bookmarks Bar" },
+            "",
+            true,
+            Box::new(|app: &App| {
+                let next = !app.prefs.borrow().show_bookmarks_bar;
+                app.prefs.borrow_mut().show_bookmarks_bar = next;
+                app.prefs.borrow().save();
+                app.render_bmarks();
+            }),
+        );
+        add_row(
+            &container,
+            if prefs.sidebar && !prefs.column_folded { "Switch to Top Tabs" } else { "Switch to Vertical Tabs" },
+            "Ctrl+S",
+            true,
+            Box::new(|app: &App| app.toggle_fold()),
+        );
+        add_row(&container, "Customize Toolbar\u{2026}", "", true, Box::new(|app: &App| app.open_panel_filtered(PanelKind::Settings, "Toolbar")));
+        add_row(&container, "Settings", "Ctrl+,", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Settings)));
+        add_row(&container, "Shortcuts", "Ctrl+/", true, Box::new(|app: &App| app.toggle_panel(PanelKind::Shortcuts)));
+
+        // Safe window close route (important when window controls are Hidden).
+        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+        add_row(&container, "Close Window", "Alt+F4", true, Box::new(|app: &App| app.ui.window.close()));
+
+        container.show_all();
+        popover.add(&container);
+        let weak = self.weak();
+        popover.connect_closed(move |pop| {
+            if let Some(app) = weak.upgrade() {
+                let mut slot = app.menu_popover.borrow_mut();
+                if slot.as_ref().is_some_and(|p| p == pop) {
+                    *slot = None;
+                }
+            }
+        });
+        *self.menu_popover.borrow_mut() = Some(popover.clone());
+        popover.popup();
     }
 
     pub fn flash_toast(&self, message: &str) {
@@ -4609,6 +7549,7 @@ impl App {
         let toast = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         toast.set_widget_name("toast-bar");
         crate::ui::class(&toast, "dlbar");
+        crate::ui::class(&toast, "toast-pill");
         toast.set_margin_bottom(bottom);
         toast.set_margin_start(self.side_width() + 12);
         toast.set_margin_end(12);
@@ -4686,11 +7627,34 @@ impl App {
             self.render_rows();
             return;
         }
+        self.render_error_page(reason, url);
+        // A child added to a stack after the window was shown still has to be
+        // told it is visible before it can be the visible child.
+        self.ui.errorpage.show_all();
+        self.ui.stack.set_visible_child_name("error");
+        self.ui.window.check_resize();
+        self.ui.overlay.check_resize();
+        self.ui.error_holder.queue_resize();
+        let error_visible = self.ui.stack.visible_child_name().as_deref() == Some("error");
+        if should_focus_error_back(true, error_visible, reason, self.overlay_blocks_page_focus(id))
+        {
+            self.ui.error_back.grab_focus();
+        }
+    }
+
+    fn overlay_blocks_page_focus(&self, id: TabId) -> bool {
+        self.omni.visible.get()
+            || self.find.try_borrow().is_ok_and(|f| f.visible)
+            || self.panels.try_borrow().is_ok_and(|p| p.open.is_some())
+            || crate::sitecard::is_open()
+            || crate::peek::is_open()
+            || crate::dialogs::focus_pending(self, id)
+            || crate::permissions::focus_pending(self, id)
+    }
+
+    fn render_error_page(&self, reason: &str, url: &str) {
         let (title, action) = error_copy(reason);
-        let security = reason.contains("certificate")
-            || reason.contains("secure connection")
-            || reason.contains("tls")
-            || reason.contains("ssl");
+        let security = error_is_security(reason);
         let glyph = error_icon(reason);
         // The state mark is swapped as a whole: `icons::area` itself is the
         // DrawingArea that the error box holds, so replace that child.
@@ -4704,8 +7668,8 @@ impl App {
         self.ui.error_reason.set_text(reason);
         self.ui.error_address.set_text(url);
         self.ui.error_retry.set_label(action);
-        // A rejected certificate must lead with the safe way out, like Chrome
-        // and Firefox. The retry stays available as the secondary action.
+        // A rejected certificate or TLS verification failure must lead with
+        // the safe way out ("Go back"), keeping retry as the secondary action.
         if security {
             self.ui.error_retry.style_context().remove_class("primary");
             self.ui.error_retry.style_context().add_class("act");
@@ -4714,13 +7678,6 @@ impl App {
             self.ui.error_retry.style_context().add_class("primary");
             self.ui.error_back.style_context().remove_class("primary");
         }
-        // A child added to a stack after the window was shown still has to be
-        // told it is visible before it can be the visible child.
-        self.ui.errorpage.show_all();
-        self.ui.stack.set_visible_child_name("error");
-        self.ui.window.check_resize();
-        self.ui.overlay.check_resize();
-        self.ui.error_holder.queue_resize();
     }
 
     /// The engine says the load ended; only a load that did not fail takes the
@@ -4828,11 +7785,27 @@ impl App {
         if width < 2 || height < 2 {
             return Err("the window has not been laid out".into());
         }
-        // The overlay is allowed to keep its last smaller allocation after a
-        // window-manager resize. Pin every layer to the window's frame before
-        // compositing so the picture matches the real window, not the old one.
-        self.ui.overlay.size_allocate(&gtk::Allocation::new(0, 0, width, height));
-        self.layout_layers(width, height);
+        // Keep the overlay's exact client origin inside the toplevel window
+        // (respecting the zero-height CSD headerbar inset, typically (0, 1))
+        // so capturing never changes overlay/shell/errorpage geometry.
+        let pre_offset = self
+            .ui
+            .overlay
+            .translate_coordinates(&self.ui.window, 0, 0)
+            .unwrap_or((0, 0));
+        let overlay_w = (width - pre_offset.0).max(1);
+        let overlay_h = (height - pre_offset.1).max(1);
+        if self.ui.overlay.allocated_width() != overlay_w
+            || self.ui.overlay.allocated_height() != overlay_h
+        {
+            self.ui.overlay.size_allocate(&gtk::Allocation::new(
+                pre_offset.0,
+                pre_offset.1,
+                overlay_w,
+                overlay_h,
+            ));
+        }
+        self.layout_layers(overlay_w, overlay_h);
         // Let GTK finish any allocation it has queued: a window that has not
         // been on screen since its last resize is only drawn once this runs.
         // A window that has not been on screen yet has not allocated its
@@ -4945,15 +7918,28 @@ impl App {
             // WebView paints a stale copy of the same page at the same place:
             // two pictures of one page, half a pixel apart, which reads as a
             // ghost behind the field.
-            let page_widget = self.view(self.active_id()).map(|view| view.upcast::<gtk::Widget>());
-            draw_shell(&context, &self.ui.shell, &self.ui.overlay, page_widget.as_ref());
+            let mut shell_skip: Vec<gtk::Widget> = Vec::with_capacity(6);
+            if let Some(view) = self.view(self.active_id()) {
+                shell_skip.push(view.upcast::<gtk::Widget>());
+            }
+            shell_skip.push(self.ui.progress.clone().upcast::<gtk::Widget>());
+            for corner in &self.ui.viewport_corners {
+                shell_skip.push(corner.clone().upcast::<gtk::Widget>());
+            }
+            draw_shell(&context, &self.ui.shell, &self.ui.overlay, &shell_skip);
 
-            // 2. the page, from the engine's own snapshot.
+            // 2. the page, from the engine's own snapshot, clipped only to its
+            // own rectangle (no capture-only rounding; live rounding comes from
+            // the actual `viewport_corners` overlay widgets painted next).
             if let Some((page, x, y, page_width, page_height)) = page.as_ref() {
                 let _ = context.save();
-                context.rectangle(*x as f64, *y as f64, *page_width as f64, *page_height as f64);
+                let fx = *x as f64;
+                let fy = *y as f64;
+                let fw = *page_width as f64;
+                let fh = *page_height as f64;
+                context.rectangle(fx, fy, fw, fh);
                 context.clip();
-                context.translate(*x as f64, *y as f64);
+                context.translate(fx, fy);
                 let _ = context.set_source_surface(page, 0.0, 0.0);
                 // Source, not Over. A snapshot is not opaque everywhere: a page
                 // with no background of its own leaves holes, and painting it
@@ -4963,6 +7949,17 @@ impl App {
                 let _ = context.paint();
                 context.set_operator(cairo::Operator::Over);
                 let _ = context.restore();
+            }
+
+            // 2a. live viewport overlays (progress bar and the 4 anti-aliased
+            // corner masks) in the same GtkOverlay z-order as the live window.
+            if self.ui.progress.is_visible() {
+                draw_at(&context, &self.ui.progress, &self.ui.overlay, &[]);
+            }
+            for corner in &self.ui.viewport_corners {
+                if corner.is_visible() {
+                    draw_at(&context, corner, &self.ui.overlay, &[]);
+                }
             }
 
             // A failed page is not the WebView behind it. Draw the browser's
@@ -5054,7 +8051,18 @@ impl App {
         self.ui.window.connect_window_state_event(move |_, event| {
             if event.changed_mask().contains(gtk::gdk::WindowState::FULLSCREEN) {
                 if let Some(app) = weak.upgrade() {
-                    app.window_full.set(event.new_window_state().contains(gtk::gdk::WindowState::FULLSCREEN));
+                    let is_full = event.new_window_state().contains(gtk::gdk::WindowState::FULLSCREEN);
+                    app.window_full.set(is_full);
+                    let page_full = app
+                        .state
+                        .borrow()
+                        .active_tab()
+                        .is_some_and(|tab| tab.page_full);
+                    let full = is_full || page_full;
+                    app.fullscreen.set(full);
+                    app.sync_tab_layout();
+                    app.ui.bmarkbar.set_child_visible(!full);
+                    app.ui.window.queue_resize();
                 }
             }
             glib::Propagation::Proceed
@@ -5068,12 +8076,19 @@ impl App {
             None => crate::gtkx::inh(false),
         });
         {
-            // "Follow the desktop" has to follow it while running.
+            // "Follow the desktop" has to follow it while running, and
+            // `gtk-decoration-layout` changes update browser CSD button order live.
             let weak = self.weak();
             if let Some(settings) = gtk::Settings::default() {
+                let weak_dark = weak.clone();
                 settings.connect_notify_local(Some("gtk-application-prefer-dark-theme"), move |_, _| {
-                    if let Some(app) = weak.upgrade() {
+                    if let Some(app) = weak_dark.upgrade() {
                         app.follow_desktop();
+                    }
+                });
+                settings.connect_notify_local(Some("gtk-decoration-layout"), move |_, _| {
+                    if let Some(app) = weak.upgrade() {
+                        app.sync_window_controls();
                     }
                 });
             }
@@ -5101,33 +8116,6 @@ impl App {
         {
             let weak = self.weak();
             self.ui.light_green.connect_button_press_event(move |_, _| {
-                if let Some(app) = weak.upgrade() {
-                    app.toggle_maximised();
-                }
-                crate::gtkx::inh(true)
-            });
-        }
-        {
-            let weak = self.weak();
-            self.ui.folded_red.connect_button_press_event(move |_, _| {
-                if let Some(app) = weak.upgrade() {
-                    app.ui.window.close();
-                }
-                crate::gtkx::inh(true)
-            });
-        }
-        {
-            let weak = self.weak();
-            self.ui.folded_amber.connect_button_press_event(move |_, _| {
-                if let Some(app) = weak.upgrade() {
-                    app.ui.window.iconify();
-                }
-                crate::gtkx::inh(true)
-            });
-        }
-        {
-            let weak = self.weak();
-            self.ui.folded_green.connect_button_press_event(move |_, _| {
                 if let Some(app) = weak.upgrade() {
                     app.toggle_maximised();
                 }
@@ -5162,22 +8150,18 @@ impl App {
         }
         {
             let weak = self.weak();
-            self.ui.menu.connect_clicked(move |_| {
+            self.ui.home.connect_clicked(move |_| {
                 if let Some(app) = weak.upgrade() {
-                    app.open_panel(PanelKind::Settings);
+                    app.go_home();
                 }
             });
         }
 
         for (button, intent) in [
-            (&self.ui.fold, crate::keys::Intent::FoldColumn),
             (&self.ui.side_fold, crate::keys::Intent::FoldColumn),
             (&self.ui.address, crate::keys::Intent::Omni),
             (&self.ui.newtab, crate::keys::Intent::NewTab),
-            (&self.ui.private_tab, crate::keys::Intent::NewPrivateTab),
-            (&self.ui.library, crate::keys::Intent::Bookmarks),
-            (&self.ui.history, crate::keys::Intent::History),
-            (&self.ui.downloads, crate::keys::Intent::Downloads),
+            (&self.ui.side_newtab, crate::keys::Intent::NewTab),
             (&self.ui.bookmark, crate::keys::Intent::Bookmark),
             (&self.ui.reader, crate::keys::Intent::Reader),
         ] {
@@ -5194,6 +8178,14 @@ impl App {
                 if let Some(app) = weak.upgrade() { app.main_menu(); }
             });
         }
+        for space_btn in [&self.ui.top_space_btn, &self.ui.side_space_btn] {
+            let weak = self.weak();
+            space_btn.connect_clicked(move |btn| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_space_switcher(btn);
+                }
+            });
+        }
         {
             let weak = self.weak();
             self.ui.site_info.connect_clicked(move |_| {
@@ -5207,27 +8199,35 @@ impl App {
             });
         }
 
-        // Drag the window by the band at the top of the column; double-click
-        // maximises. The three controls sit inside it, so they swallow their
-        // own clicks first; everything from the last control to the page is
-        // the handle.
+        // Drag the window by the top tab strip, its open drag space, or the toolbar;
+        // double-click maximises; right-click opens toolbar customization.
         {
             let weak = self.weak();
-            for handle in [&self.ui.top, &self.ui.toolbar] {
+            for handle in [&self.ui.topbar, &self.ui.top_drag, &self.ui.top, &self.ui.toolbar] {
                 let weak = weak.clone();
                 handle.connect_button_press_event(move |_, event| {
-                    if let Some(app) = weak.upgrade() { app.begin_drag(event); }
+                    if let Some(app) = weak.upgrade() {
+                        if let Some(btn) = event.downcast_ref::<gtk::gdk::EventButton>() {
+                            if btn.button() == 3 {
+                                app.toolbar_context_menu(btn);
+                                return crate::gtkx::inh(true);
+                            }
+                        }
+                        app.begin_drag(event);
+                    }
                     crate::gtkx::inh(false)
                 });
             }
         }
 
         // The field.
-        // Up and down belong to the field's list, Escape puts it away.
+        // Up and down belong to the field's list, Tab completes, Escape puts it away.
         {
             let weak = self.weak();
             self.omni.entry.connect_key_press_event(move |_, event| {
                 let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                let ctrl = event.state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let alt = event.state().contains(gtk::gdk::ModifierType::MOD1_MASK);
                 match event.keyval().name().as_deref() {
                     Some("Down") => {
                         app.omni.step(1);
@@ -5237,8 +8237,65 @@ impl App {
                         app.omni.step(-1);
                         crate::gtkx::inh(true)
                     }
+                    Some("Tab") if !ctrl && !alt => {
+                        if app.omni.complete_picked() {
+                            app.refresh_offers(&app.omni.entry.text());
+                            return crate::gtkx::inh(true);
+                        }
+                        crate::gtkx::inh(false)
+                    }
                     Some("Escape") => {
                         app.close_omni();
+                        crate::gtkx::inh(true)
+                    }
+                    _ => crate::gtkx::inh(false),
+                }
+            });
+        }
+        // Bookmarks bar inline filter & autocomplete.
+        {
+            let weak = self.weak();
+            self.ui.bmark_search.connect_changed(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.refresh_bmark_autocomplete();
+                }
+            });
+        }
+        {
+            let weak = self.weak();
+            self.ui.bmark_search.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.commit_bmark_suggest();
+                }
+            });
+        }
+        {
+            let weak = self.weak();
+            self.ui.bmark_search.connect_key_press_event(move |_, event| {
+                let Some(app) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                let ctrl = event.state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let alt = event.state().contains(gtk::gdk::ModifierType::MOD1_MASK);
+                if ctrl || alt {
+                    return crate::gtkx::inh(false);
+                }
+                match event.keyval().name().as_deref() {
+                    Some("Down") => {
+                        app.step_bmark_suggest(1);
+                        crate::gtkx::inh(true)
+                    }
+                    Some("Up") => {
+                        app.step_bmark_suggest(-1);
+                        crate::gtkx::inh(true)
+                    }
+                    Some("Tab") => {
+                        if app.complete_bmark_suggest() {
+                            return crate::gtkx::inh(true);
+                        }
+                        crate::gtkx::inh(false)
+                    }
+                    Some("Escape") => {
+                        app.close_bmark_autocomplete(true);
+                        app.restore_page_focus();
                         crate::gtkx::inh(true)
                     }
                     _ => crate::gtkx::inh(false),
@@ -5312,7 +8369,7 @@ impl App {
                     crate::sitecard::relayout(&app);
                 }
                 let page_width = allocation.width();
-                let fit = (page_width >= 720, page_width >= 520, page_width >= 480);
+                let fit = (page_width >= 600, page_width >= 480, page_width >= 440, page_width >= 400);
                 if fitted.replace(Some(fit)) == Some(fit) {
                     return;
                 }
@@ -5323,11 +8380,8 @@ impl App {
                         return;
                     }
                     let Some(app) = weak.upgrade() else { return };
-                    app.ui.reader.set_visible(fit.0);
-                    app.ui.bookmark.set_visible(fit.0);
-                    app.ui.address_hint.set_visible(fit.0);
-                    app.ui.forward.set_visible(fit.1);
-                    app.ui.reload.set_visible(fit.2);
+                    app.toolbar_width.set(page_width);
+                    app.sync_toolbar_items();
                     app.ui.toolbar.queue_resize();
                     app.ui.toolbar.check_resize();
                 });
@@ -5498,14 +8552,53 @@ fn not_shown(widget: &gtk::Widget) -> bool {
     false
 }
 
+pub fn prepare_popup_menu_pub(menu: &gtk::Menu) {
+    prepare_popup_menu(menu);
+}
+
+fn prepare_popup_menu(menu: &gtk::Menu) {
+    crate::ui::class(menu, "search-menu");
+    let Some(toplevel) = menu
+        .toplevel()
+        .and_then(|w| w.downcast::<gtk::Window>().ok())
+    else {
+        return;
+    };
+    crate::ui::class(&toplevel, "search-menu-popup");
+    toplevel.set_app_paintable(true);
+    if let Some(screen) = gtk::prelude::GtkWindowExt::screen(&toplevel) {
+        if screen.is_composited() {
+            if let Some(visual) = screen.rgba_visual() {
+                toplevel.set_visual(Some(&visual));
+            }
+        }
+    }
+    let apply_shape = |win: &gtk::Window| {
+        let Some(gdk_win) = win.window() else { return };
+        let composited = gtk::prelude::GtkWindowExt::screen(win).is_some_and(|s| s.is_composited());
+        if composited {
+            gdk_win.shape_combine_region(None, 0, 0);
+            return;
+        }
+        let w = win.allocated_width();
+        let h = win.allocated_height();
+        if w > 2 && h > 2 {
+            let region = crate::ui::rounded_rect_region(w, h, 16);
+            gdk_win.shape_combine_region(Some(&region), 0, 0);
+        }
+    };
+    toplevel.connect_map(move |win| apply_shape(win));
+    toplevel.connect_size_allocate(move |win, _| apply_shape(win));
+}
+
 fn draw_shell(
     context: &cairo::Context,
     widget: &impl IsA<gtk::Widget>,
     ancestor: &impl IsA<gtk::Widget>,
-    skip: Option<&gtk::Widget>,
+    skip: &[gtk::Widget],
 ) {
     let widget = widget.clone().upcast::<gtk::Widget>();
-    if skip == Some(&widget) || not_shown(&widget) {
+    if skip.iter().any(|skipped| skipped == &widget) || not_shown(&widget) {
         return;
     }
     let offset = widget.translate_coordinates(ancestor, 0, 0).unwrap_or((0, 0));
@@ -5763,17 +8856,241 @@ fn http_status(reason: &str) -> Option<u16> {
         .and_then(|run| run.parse().ok())
 }
 
+/// Applies a tab's title update to persisted history only for non-private tabs.
+/// Returns `true` when persistence should be scheduled (i.e. tab is not private).
+pub(crate) fn record_title_for_history(
+    history: &mut Vec<crate::store::HistoryEntry>,
+    private: bool,
+    url: &str,
+    title: &str,
+) -> bool {
+    if private {
+        return false;
+    }
+    if !url.is_empty() {
+        Records::name_visit(history, url, title);
+    }
+    true
+}
+
+/// Updates hidden-element rules for `unhide_all`. Private tabs mutate only their
+/// own ephemeral `private_hidden` override (recording an explicit empty list so
+/// reloads stay unhidden) and never touch persisted `hidden` rules.
+/// Returns `true` only when persisted `hidden.json` should be saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HideApplyOutcome {
+    AppliedPrivate { tab_id: TabId },
+    AppliedNormal { tab_id: TabId, save_persisted: bool },
+    Canceled,
+}
+
+/// Pure state transition for applying a deferred element-hide selection to its
+/// originating tab and host. Never consults the active tab: even if focus moved
+/// from a private tab to a normal tab during the 10ms delay, private selections
+/// mutate only `private_hidden[origin.tab_id]` and never touch persisted
+/// `hidden` rules. Navigating or closing the originating tab cancels safely.
+pub(crate) fn apply_hide_for_origin(
+    origin: &curtain::HideOrigin,
+    snapshot: Option<curtain::HideTargetSnapshot<'_>>,
+    selector: &str,
+    curtain_enabled: bool,
+    hidden: &mut BTreeMap<String, Vec<String>>,
+    private_hidden: &mut std::collections::HashMap<
+        TabId,
+        std::collections::HashMap<String, Vec<String>>,
+    >,
+) -> HideApplyOutcome {
+    let Some(selector) = sanitize_selector(selector) else {
+        return HideApplyOutcome::Canceled;
+    };
+    match curtain::validate_hide_target(origin, snapshot) {
+        curtain::HideDecision::Cancel => HideApplyOutcome::Canceled,
+        curtain::HideDecision::ApplyPrivate => {
+            let base = if curtain_enabled {
+                hidden.get(&origin.host).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let list = private_hidden
+                .entry(origin.tab_id)
+                .or_default()
+                .entry(origin.host.clone())
+                .or_insert(base);
+            if !list.iter().any(|s| s == selector) {
+                list.push(selector.to_string());
+            }
+            HideApplyOutcome::AppliedPrivate { tab_id: origin.tab_id }
+        }
+        curtain::HideDecision::ApplyNormal => {
+            let list = hidden.entry(origin.host.clone()).or_default();
+            if !list.iter().any(|s| s == selector) {
+                list.push(selector.to_string());
+            }
+            HideApplyOutcome::AppliedNormal {
+                tab_id: origin.tab_id,
+                save_persisted: true,
+            }
+        }
+    }
+}
+
+/// Whether keyboard focus should move to the safe `Go back` button when an
+/// error page is shown or revisited. True strictly for security/TLS errors on
+/// the active tab when the error page is visible and no higher overlay owns
+/// focus.
+pub(crate) fn should_focus_error_back(
+    is_active_tab: bool,
+    error_visible: bool,
+    reason: &str,
+    overlay_blocking_focus: bool,
+) -> bool {
+    is_active_tab && error_visible && !overlay_blocking_focus && error_is_security(reason)
+}
+
+pub(crate) fn apply_unhide_for_tab(
+    hidden: &mut BTreeMap<String, Vec<String>>,
+    private_hidden: &mut std::collections::HashMap<
+        TabId,
+        std::collections::HashMap<String, Vec<String>>,
+    >,
+    tab_id: TabId,
+    private: bool,
+    host: &str,
+) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    if private {
+        private_hidden
+            .entry(tab_id)
+            .or_default()
+            .insert(host.to_string(), Vec::new());
+        return false;
+    }
+    hidden.remove(host).is_some()
+}
+
+/// Pure snapshot builder for `session.json`: persists every non-private tab
+/// (including blank/start and pinned blank tabs) across ALL spaces along with
+/// global active and per-space last active markers. Private tabs are never
+/// serialized.
+pub(crate) fn session_records_from_state(state: &State) -> Vec<TabRecord> {
+    let active = state.active;
+    let active_space = state.active_space_id();
+    state
+        .tabs
+        .iter()
+        .filter(|t| !t.private)
+        .map(|t| {
+            let space_active = if t.space_id == active_space {
+                t.id == active
+            } else {
+                state.space_active_tabs.get(&t.space_id) == Some(&t.id)
+            };
+            TabRecord {
+                url: t.url.clone(),
+                title: t.title.clone(),
+                pinned: t.pinned,
+                active: t.id == active,
+                space_id: t.space_id.clone(),
+                space_active,
+            }
+        })
+        .collect()
+}
+
+/// Reorder `source_id` to `target_id`'s index within the same space AND
+/// pinned/unpinned partition.
+pub(crate) fn reorder_tab_in_slice(tabs: &mut Vec<Tab>, source_id: TabId, target_id: TabId) -> bool {
+    if source_id == target_id {
+        return false;
+    }
+    let Some(from) = tabs.iter().position(|t| t.id == source_id) else { return false };
+    let Some(to) = tabs.iter().position(|t| t.id == target_id) else { return false };
+    if tabs[from].pinned != tabs[to].pinned || tabs[from].space_id != tabs[to].space_id {
+        return false;
+    }
+    let tab = tabs.remove(from);
+    tabs.insert(to, tab);
+    true
+}
+
+/// Move `id` one slot left (`delta < 0`) or right (`delta > 0`) within its
+/// space and pinned/unpinned partition.
+pub(crate) fn move_tab_slot_in_slice(tabs: &mut Vec<Tab>, id: TabId, delta: isize) -> bool {
+    if delta == 0 {
+        return false;
+    }
+    let Some(from) = tabs.iter().position(|t| t.id == id) else { return false };
+    let pinned = tabs[from].pinned;
+    let space_id = tabs[from].space_id.clone();
+    let same_partition: Vec<usize> = tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.pinned == pinned && t.space_id == space_id)
+        .map(|(i, _)| i)
+        .collect();
+    let Some(part_pos) = same_partition.iter().position(|&idx| idx == from) else { return false };
+    let next_part_pos = if delta < 0 {
+        let Some(prev) = part_pos.checked_sub(1) else { return false };
+        prev
+    } else {
+        let next = part_pos + 1;
+        if next >= same_partition.len() {
+            return false;
+        }
+        next
+    };
+    let to = same_partition[next_part_pos];
+    tabs.swap(from, to);
+    true
+}
+
+#[allow(dead_code)]
+pub(crate) fn should_show_folded_controls(
+    column_folded: bool,
+    sidebar: bool,
+    fullscreen: bool,
+    side_shown: bool,
+    body_visible: bool,
+) -> bool {
+    (column_folded || !sidebar) && !fullscreen && side_shown && !body_visible
+}
+
+#[allow(dead_code)]
+pub(crate) fn folded_controls_top_margin(toolbar_visible: bool, toolbar_height: i32) -> i32 {
+    if toolbar_visible {
+        toolbar_height.max(72) + 8
+    } else {
+        8
+    }
+}
+
+/// Shared case-insensitive TLS / certificate security error classifier used by
+/// `show_error`, `render_error_page`, `error_copy`, and `error_icon`, covering
+/// both `web::reason_for_tls` and `web::message_for` fallback strings.
+pub(crate) fn error_is_security(reason: &str) -> bool {
+    let lower = reason.to_lowercase();
+    lower.contains("certificate")
+        || lower.contains("secure connection")
+        || lower.contains("security could not be verified")
+        || lower.contains("tls")
+        || lower.contains("ssl")
+}
+
 /// A 4xx is the address's fault: there is nothing there to ask again.
 fn error_is_client(reason: &str) -> bool {
     matches!(http_status(reason), Some(status) if (400..500).contains(&status))
 }
 
-/// The sentence and next step a failure puts in front of the reader. A 4xx
-/// is a missing address, not a temporary failure, so it must not invite a
-/// retry; DNS and connection failures get their own plain-language titles.
-fn error_copy(reason: &str) -> (&'static str, &'static str) {
+/// The sentence and next step a failure puts in front of the reader. Security
+/// errors always take precedence so a TLS failure mentioning a hostname never
+/// degrades to a DNS error or generic fallback.
+pub(crate) fn error_copy(reason: &str) -> (&'static str, &'static str) {
     let lower = reason.to_lowercase();
-    if error_is_client(reason) {
+    if error_is_security(reason) {
+        ("This site can't be verified", "Try again")
+    } else if error_is_client(reason) {
         ("There's nothing at this address", "Change address")
     } else if lower.contains("no network") || lower.contains("offline") {
         ("You're offline", "Try again")
@@ -5783,8 +9100,6 @@ fn error_copy(reason: &str) -> (&'static str, &'static str) {
         || lower.contains("could not be found")
     {
         ("This address doesn't resolve", "Try again")
-    } else if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
-        ("This site can't be verified", "Try again")
     } else if lower.contains("refused") {
         ("The site refused the connection", "Try again")
     } else if lower.contains("too long") || lower.contains("timed out") {
@@ -5797,9 +9112,9 @@ fn error_copy(reason: &str) -> (&'static str, &'static str) {
 /// A failure's mark names the class of failure. Sharing one warning triangle
 /// across TLS, DNS, refusal, timeout and 404 makes them all read as the same
 /// event, which is not what the sentence underneath says.
-fn error_icon(reason: &str) -> crate::icons::Icon {
+pub(crate) fn error_icon(reason: &str) -> crate::icons::Icon {
     let lower = reason.to_lowercase();
-    if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
+    if error_is_security(reason) {
         crate::icons::Icon::ShieldAlert
     } else if lower.contains("no network")
         || lower.contains("offline")
@@ -5826,7 +9141,7 @@ thread_local! {
     static TAB_SWITCHER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn tab_switcher_on() -> bool {
+pub(crate) fn tab_switcher_on() -> bool {
     TAB_SWITCHER.with(|mode| mode.get())
 }
 
@@ -5894,7 +9209,7 @@ mod tests {
         assert_eq!(crate::app::plain_target("about:blank", &engine), "about:blank");
         assert_eq!(crate::app::plain_target("example.com", &engine), "https://example.com");
         assert_eq!(crate::app::plain_target("localhost:8099", &engine), "https://localhost:8099");
-        assert!(crate::app::plain_target("two words", &engine).contains("duckduckgo"));
+        assert!(crate::app::plain_target("two words", &engine).contains("startpage.com/sp/search?query=two+words"));
         assert_eq!(crate::app::plain_target("   ", &engine), "");
     }
 
@@ -6021,6 +9336,7 @@ mod state_logic_tests {
         let mut tabs = vec![Tab::new(1), Tab::new(2)];
         let mut next_id = 3;
         let closed = ClosedTab {
+            space_id: crate::spaces::default_space_id(),
             url: "https://restored.example/".into(),
             title: "Restored".into(),
             pinned: true,
@@ -6039,6 +9355,7 @@ mod state_logic_tests {
             &mut tabs,
             &mut next_id,
             ClosedTab {
+                space_id: "space-2".into(),
                 url: "https://first.example/".into(),
                 title: "First".into(),
                 pinned: false,
@@ -6047,6 +9364,7 @@ mod state_logic_tests {
         );
         assert_eq!(tabs[1].id, id2);
         assert_eq!(tabs[1].url, "https://first.example/");
+        assert_eq!(tabs[1].space_id, "space-2");
     }
 
     #[test]
@@ -6086,4 +9404,111 @@ mod state_logic_tests {
         assert_eq!(sanitize_selector("#x</style>"), None);
         assert_eq!(sanitize_selector("   "), None);
     }
+
+    #[test]
+    fn top_tabs_reorder_and_move_within_partitions() {
+        let mut p1 = Tab::new(1);
+        p1.pinned = true;
+        let mut p2 = Tab::new(2);
+        p2.pinned = true;
+        let t3 = Tab::new(3);
+        let t4 = Tab::new(4);
+        let t5 = Tab::new(5);
+        let mut tabs = vec![p1, p2, t3, t4, t5];
+
+        // Dragging across pinned/unpinned boundary is refused.
+        assert!(!reorder_tab_in_slice(&mut tabs, 1, 3));
+        assert!(!reorder_tab_in_slice(&mut tabs, 3, 2));
+
+        // Dragging unpinned tab 5 onto tab 3 reorders unpinned tabs cleanly.
+        assert!(reorder_tab_in_slice(&mut tabs, 5, 3));
+        let ids: Vec<TabId> = tabs.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![1, 2, 5, 3, 4]);
+
+        // Keyboard move left/right stays inside the tab's partition.
+        assert!(!move_tab_slot_in_slice(&mut tabs, 5, -1));
+        assert!(move_tab_slot_in_slice(&mut tabs, 5, 1));
+        let ids: Vec<TabId> = tabs.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 5, 4]);
+
+        // Pinned tabs reorder among themselves without crossing into unpinned.
+        assert!(move_tab_slot_in_slice(&mut tabs, 1, 1));
+        assert!(!move_tab_slot_in_slice(&mut tabs, 1, 1));
+        let ids: Vec<TabId> = tabs.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![2, 1, 3, 5, 4]);
+    }
+
+    #[test]
+    fn reorder_and_session_records_respect_space_boundaries_and_private_exclusion() {
+        let mut s1 = Tab::new(1);
+        s1.url = "https://default.example/1".into();
+        s1.title = "Default One".into();
+        s1.pinned = true;
+
+        let mut pinned_blank = Tab::new(2);
+        pinned_blank.pinned = true;
+
+        let mut s2 = Tab::new(3);
+        s2.space_id = "space-1".into();
+        s2.url = "https://work.example/1".into();
+        s2.title = "Work One".into();
+        s2.pinned = true;
+
+        let mut active_blank = Tab::new(4);
+        active_blank.space_id = "space-1".into();
+
+        let mut priv_tab = Tab::new(5);
+        priv_tab.space_id = "space-1".into();
+        priv_tab.url = "https://secret.example/private".into();
+        priv_tab.title = "Secret".into();
+        priv_tab.private = true;
+
+        let mut priv_blank = Tab::new(6);
+        priv_blank.space_id = "space-1".into();
+        priv_blank.private = true;
+
+        let mut tabs = vec![s1, pinned_blank, s2, active_blank, priv_tab, priv_blank];
+        // Cross-space reorder is refused even when both are pinned.
+        assert!(!reorder_tab_in_slice(&mut tabs, 1, 3));
+        assert!(!move_tab_slot_in_slice(&mut tabs, 2, 1));
+
+        let mut spaces = crate::spaces::SpaceStore::default();
+        let work = spaces.create("Work").unwrap();
+        spaces.set_active(&work.id);
+        let mut space_active_tabs = BTreeMap::new();
+        space_active_tabs.insert(crate::spaces::default_space_id(), 1);
+        space_active_tabs.insert(work.id.clone(), 4);
+        let state = State {
+            spaces,
+            space_active_tabs,
+            tabs,
+            errors: BTreeMap::new(),
+            active: 4,
+            next_id: 7,
+            history: Vec::new(),
+            bookmarks: Vec::new(),
+            hidden: BTreeMap::new(),
+            downloads: Vec::new(),
+            hide_mode: false,
+            hide_origin: None,
+            blocked: BTreeMap::new(),
+            closed_tabs: Vec::new(),
+        };
+
+        let recs = session_records_from_state(&state);
+        assert_eq!(recs.len(), 4, "all normal tabs (including blank/pinned blank) persist; private tabs excluded");
+        assert!(recs.iter().all(|r| !r.url.contains("secret.example")));
+        assert_eq!(recs[0].space_id, "default");
+        assert!(recs[0].space_active && !recs[0].active);
+        assert_eq!(recs[1].space_id, "default");
+        assert!(recs[1].url.is_empty() && recs[1].pinned && !recs[1].active && !recs[1].space_active);
+        assert_eq!(recs[2].space_id, "space-1");
+        assert!(recs[2].pinned && !recs[2].space_active);
+        assert_eq!(recs[3].space_id, "space-1");
+        assert!(recs[3].url.is_empty() && !recs[3].pinned && recs[3].active && recs[3].space_active);
+    }
 }
+
+#[cfg(test)]
+#[path = "f38_core_security_tests.rs"]
+mod f38_core_security_tests;

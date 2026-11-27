@@ -4,16 +4,26 @@
 use crate::app::AppRef;
 use crate::palette::Reader;
 
-const TOGGLE_ON: &str = include_str!("../assets/reader.js");
+/// Isolated WebKit script world for reading mode so page scripts in the main
+/// world cannot see, spoof, or overwrite reader state or saved DOM nodes.
+pub(crate) const READER_WORLD: &str = "search-reader";
+
+/// State probe evaluated inside `READER_WORLD` when the page's exit button
+/// notifies the host.
+pub(crate) const STATE_PROBE: &str =
+    "!!(globalThis.__searchReaderCtrl && globalThis.__searchReaderCtrl.isActive())";
+
+pub(crate) const TOGGLE_ON: &str = include_str!("../assets/reader.js");
 
 /// The call appended to reader.js. The page answers with one word and the
-/// host reads only that word. A page where the function never arrived answers
+/// host reads only that word. A page where the controller never arrived answers
 /// `missing`, so absence is a stated answer rather than a value that happens
 /// to compare unequal to a failure.
 const CALL_OPEN: &str = concat!(
     "\n(function () {\n",
-    "  if (typeof window.__searchReader !== 'function') return 'missing';\n",
-    "  return String(window.__searchReader("
+    "  const ctrl = globalThis.__searchReaderCtrl;\n",
+    "  if (!ctrl || typeof ctrl.toggle !== 'function') return 'missing';\n",
+    "  return String(ctrl.toggle("
 );
 const CALL_CLOSE: &str = "));\n})();";
 
@@ -77,7 +87,7 @@ pub fn enter(app: &AppRef, view: &webkit2gtk::WebView) {
     let script = script_for(&app.palette.borrow().reader());
     let Some(id) = crate::app::view_id(view) else { return };
     let weak = app.weak();
-    crate::js::run(view, &script, move |result| {
+    crate::js::run_in_world(view, READER_WORLD, &script, move |result| {
         let Some(app) = weak.upgrade() else { return };
         // The page is the only witness: it reports what it did, and only an
         // entry or a departure may change the tab's state. Anything else, a
@@ -163,7 +173,9 @@ mod tests {
     #[test]
     fn reading_text_has_visible_size_controls() {
         let script = script_for(&Palette::for_look(Look::Light, false).reader());
-        assert!(script.contains("window.__searchReaderFont"), "no font helper");
+        assert!(script.contains("setFont"), "no font helper");
+        assert!(!script.contains("window.__searchReader"), "reader must not leak mutable main-world globals");
+        assert!(!script.contains("innerHTML"), "reader must use DOM adoption instead of innerHTML");
         assert!(script.contains("--search-reader-size"), "no size variable");
         assert!(script.contains("Smaller reading text"), "no smaller control");
         assert!(script.contains("Larger reading text"), "no larger control");

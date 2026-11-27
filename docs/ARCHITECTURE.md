@@ -1,14 +1,17 @@
-# How Search is put together
+# How Rill is put together
 
-A browser is a small surface with a lot underneath. This is the module map for
-the local, unreleased native UI makeover:
+Rill (internal Cargo package/binary `search`) is a small surface with a lot underneath. This is the module map for
+the current local build:
 
 ```
 main.rs           flags, the environment, the window, and the loop
-app.rs            the browser: tabs, the active tab, and every action
+app.rs            the browser: tabs, active space, session restoration, and every action
+spaces.rs         persistent named tab groups, Default-space safety, and name/ID validation
 web.rs            WebKitGTK 4.1 setup, persistent SQLite cookies vs ephemeral private sessions, locale Accept-Language & spellcheck, WebRTC, downloads, error pages
-ui.rs             GTK3 shell: branded tab column + permanent responsive navigation toolbar + page stack, with 3px progress and a 120ms crossfade (`motion::dur::MICRO`)
-startpage.rs      native editorial start page, direct search, Cairo orbital artwork, bookmarks, recent pages, and private-session presentation
+ui.rs             GTK3 shell: top tab strip, optional Ctrl S vertical tab sidebar, customizable mouse-first navigation toolbar (`Ctrl Shift S`), live rounded viewport corner masks, and 3px load progress
+startpage.rs      native start page with cached 8x8 Bayer ordered-dither horizon, direct search/autocomplete, customizable bookmark shortcuts, and private-session isolation
+decor.rs          Linux window decoration negotiation (`System`, `Browser`, `Hidden`) honoring EWMH WMs and `gtk-decoration-layout`
+addons_catalog.rs bounded user-initiated HTTPS search and `.xpi` staging against official `addons.mozilla.org` with strict redirect/size guards and honest capability badges
 motion.rs         VSync `add_tick_callback` frame-clock motion engine for fades, slides, pops, toasts, and paned sidebar fold (disabled under `SEARCH_BENCH` or `gtk-enable-animations=false`)
 css.rs            one stylesheet, built from the palette
 palette.rs        every colour, as a light/dark pair
@@ -17,7 +20,7 @@ find.rs           the find bar
 panels.rs         bookmarks, history, downloads, settings, shortcuts, extensions
 peek.rs           Shift+click floating preview card with its own WebView, Keep/Close controls, and compositor-independent snapshot capture
 sitecard.rs       site identity, TLS status, per-host zoom, saved permissions, active add-ons, and site-data clearing card
-reader.rs         reading mode (assets/reader.js does the work)
+reader.rs         reading mode (assets/reader.js in isolated "search-reader" WebKit script world with strict allowlist DOM sanitization)
 curtain.rs        hidden elements, per site, before first paint, with element picking in the isolated `"search-curtain"` WebKit script world
 shield.rs         the content blocker, compiled once from the generated lists
 extensions.rs     content scripts and CSS, limited to the sites they ask for
@@ -28,9 +31,9 @@ menu.rs           the right-click menu: edits WebKit's own, keeps what it has
 permissions.rs    site permission & HTTP auth prompts (camera, mic, geolocation, notifications, clipboard, add-on install), `permissions.json`
 dialogs.rs        alert, confirm, prompt and file-chooser cards over a tab
 status.rs         the link address line at the bottom left of the page
-suggest.rs        search-engine suggestions, off unless turned on
+suggest.rs        search-engine suggestions (Startpage default, opt-out in Settings)
 import.rs         bookmarks and history from Firefox, Chromium, Chrome, Brave
-welcome.rs        the first-run card
+welcome.rs        full-tab first-run introduction with live draft previews and explicit optional starter sites
 js.rs             running a script in a page, and hearing back
 store.rs          prefs and the small JSON files
 files.rs          reading and writing those files
@@ -59,15 +62,17 @@ compiled filter back instead of recompiling 14,000 rules: the key changes when
 the list changes, so a new EasyList pull cannot be answered with last month's
 rules.
 
-`src/curtain.rs` hides per-site user-picked elements via a `UserStyleSheet`
-before first paint and runs element picking in the isolated `"search-curtain"`
-WebKit script world (`CURTAIN_WORLD`), keeping `searchHide` message handling
-separate from page scripts so untrusted page JS cannot invoke `searchHide` or
-tamper with picker state.
+`src/curtain.rs` hides per-site user-picked elements via host-scoped
+`UserStyleSheet` entries (`allow_list` per host, with separate in-memory
+overrides for private tabs that never mutate `hidden.json`) before first paint,
+and runs element picking in the isolated `"search-curtain"` WebKit script world
+(`CURTAIN_WORLD`), keeping `searchHide` message handling separate from page
+scripts so untrusted page JS cannot invoke `searchHide` or tamper with picker
+state.
 
 ## One tab
 
-`app::Tab` holds the identity: id, url, title, pinned, private, and the widgets
+`app::Tab` holds the identity: id, space_id, url, title, pinned, private, and the widgets
 for its row and pin. The `WebView` is not there. It is made by `web::view_for`
 the first time the tab is selected, added to a `GtkStack` under the name
 `tab-<id>`, and removed when the tab closes. A tab restored from the session
@@ -113,21 +118,33 @@ a sheet added that way is accepted and has no effect at either
 
 ## The frame
 
-`ui::build` uses one `GtkPaned`: the branded tab column on the left and the page
-card on the right. The column holds a drag handle/wordmark, new/private-tab
-actions, a pinned-page section, title/host tab rows in a scrolled window, and
-direct library/settings/history/download controls. It folds to a 10px strip.
-The page card packs a permanent responsive navigation toolbar, the optional
-bookmarks bar, and a `GtkOverlay` containing the `GtkStack` (120ms crossfade from `motion::dur::MICRO`,
-turned off under `SEARCH_BENCH` or when GTK animations are off) with an overlaid 3px load-progress bar.
+`ui::build` supports two exclusive tab layouts: a horizontal top strip or a
+vertical sidebar (`Ctrl S`). `app::sync_tab_layout` reapplies the visibility
+plan after broad GTK visibility updates, so showing one tab list cannot revive
+the other. Both layouts have compact favicon-only pins with a monogram fallback,
+accessible names, and context actions. Browser menus, new-tab actions, and
+window controls remain reachable when the navigation toolbar is hidden.
+
+The page column packs a customizable navigation toolbar (visible by default for
+new profiles; `Ctrl Shift S` toggles it), the optional bookmarks bar, and a
+`GtkOverlay` containing the page `GtkStack` with an overlaid 3px load-progress
+bar. Viewport corner masks round live WebKit content as well as native pages.
+Fullscreen hides browser chrome and restores its layout when it ends.
 
 `startpage::StartPage` owns a native scrolled start surface under the stack's
 `blank` child. Its direct entry resolves URLs/search/keywords through the same
-navigation path as the omnibox. It deduplicates bookmarks and recent web pages,
-labels curated fallbacks honestly, and hides regular browsing records in
-private mode. The illustration reads live CSS colors, so theme switches do
+navigation path as the omnibox. Bookmark shortcuts use cached real site icons
+and configurable label modes; private mode hides regular browsing records.
+The dither canvas reads the live theme, so appearance switches do
 not leave stale artwork. No additional WebView or network request is needed
 for the start page.
+
+The introduction is a separate native `welcome` child of that same stack,
+filling the tab viewport. A scrollable settings body and a fixed action footer
+keep Back, Next, Skip, and Finish reachable on short windows. Appearance,
+layout, and search changes are drafts until completion; Skip/Escape reverts
+unconfirmed choices. Showing setup makes no favicon requests. Selecting an
+optional starter site explicitly allows its official icon request.
 
 `app::refresh_helm` updates the persistent address, navigation sensitivity,
 reload/stop glyph, bookmark/reader state, protection tooltip, and tab count.
@@ -159,6 +176,19 @@ helpers under it), walking the real widget tree with cairo because a screenshot
 of a window with no compositor has to draw the widgets that were actually built,
 at the offsets they were actually given. Grep `fn capture` to see the shape of it.
 
+## Spaces and session ownership
+
+New profiles contain only **Default**. Settings manages additional named
+spaces. Spaces group tabs within the same browser profile: cookies, logins,
+bookmarks, and history remain shared. They are not isolated containers.
+
+`spaces.json` holds stable IDs, names, and the selected space. Session tab
+records carry their space ID and per-space active markers. Older records with
+no space ID migrate to Default; unknown IDs resolve there as well. Switching
+spaces changes the visible tab set and restores its last active tab. Private
+tabs stay in memory and are excluded from session serialization. Deleting a
+custom space moves its tabs into Default; Default itself cannot be deleted.
+
 ## Things over the page
 
 `layer::Layer` is a `GtkFixed` that knows how to place a child for a window of a
@@ -183,30 +213,40 @@ of the visible page (and any visible `peek.rs` preview WebView), lays that into
 the page's rectangle, and then draws the over-page layers on top. This captures
 the actual GTK widget tree and WebKit page, not a simulated browser interface.
 
-`tools/test_ui.py` is the current visual/behavior walkthrough for the makeover.
-It launches an isolated profile, exercises real GTK entries and buttons through
-the test socket, and captures light/dark and responsive states for geometry,
-navigation overflow, and screenshot palette review. Final gallery images in
-`docs/screenshots/` are to come from that walkthrough; replacement and final
-verification are pending. See [TESTING.md](TESTING.md).
-
-`tools/shots.sh` is the older `1.0.2` capture harness. Its hardcoded pixel checks
-describe the previous palette and layout and must not be reported as passing
-the redesign.
+`tools/test_ui.py` is the GTK widget/behavior walkthrough (isolated profile,
+real GTK entries and buttons, light/dark switching, wide/medium/compact
+reflow, private-tab isolation, and stderr cleanliness). `tools/shots.sh` is
+the 40-state light/dark/narrow screenshot and pixel-gate capture suite
+rebaselined to the warm paper/charcoal palette (`1500×918` wide and `900×1001`
+narrow), including true fresh-profile start (`08a-start-fresh`), failed-TLS
+omnibox (`04d-omni-tls-failed`), true bottom-of-Settings geometry verification,
+and Site Card `18px` inset + dismiss-scrim verification. Repository gallery
+images in `docs/screenshots/` are refreshed directly from the final Design F39
+wide captures (`build/council/design-f39-{light,dark}`). See [TESTING.md](TESTING.md).
 
 ## Memory
 
-Three processes with one tab open: the frame, a web process, a network process.
-The frame is GTK and the browser's own widgets; the other two belong to WebKit,
-as in any browser on this engine.
+One idle tab consists of three core processes — the GTK frame, a
+WebKit web process, and a WebKit network process. In Design F38, replacing the
+named GTK filter icon (`edit-find-symbolic`) with Cairo `Icon::Search` removed
+F37's `glycin-svg` + 2 `bwrap` regression at idle and after History/Bookmarks;
+in Design F39, replacing Settings' `GtkSwitch` and `GtkComboBoxText` with native
+Cairo `pill-switch` (`GtkToggleButton`) and `engine-picker` (`GtkMenuButton` +
+`GtkPopover`) eliminated the remaining `glycin-image-rs` + 2 `bwrap` spawn as
+well, holding the process tree at **3 processes** across idle, History,
+Bookmarks, Settings open, and after Settings closed (both source and AppImage).
 
-`tools/stress.py` measures PSS, Pss_Anon, Pss_Shmem, Private_Dirty and RSS for the
-whole tree. The historical `1.0.2` baseline recorded one idle tab at 218.1 MB
-total PSS, 94.2 MB anonymous PSS, and 318.2 MB RSS. The original 100 MB total-PSS request was not met; round 75
-rebaselined the enforced floor to 230 MB. Anonymous PSS is not total RAM: shared libraries and other backing
-also contribute to total PSS. These figures and the earlier tuning samples
-below are historical baseline evidence, not new measurements of the local UI
-makeover.
+`tools/stress.py` measures total PSS (`pss_mb`), anonymous own PSS (`anon_mb`),
+shared memory (`shmem_mb`), `private_dirty_mb`, RSS (`rss_mb`), and process
+count for the whole process group. The archived Design F39 full run
+(`docs/benchmarks/stress-report-f39.json`, 151/151 passed) recorded one idle
+tab at **182.9 MB warm total PSS** (185.3 MB cold), **94.5 MB own anonymous
+PSS**, and **441.9 MB RSS** across 3 processes (archived F38: 146.1 MB PSS / 3
+idle procs, 6 after Settings; archived F37: 188.1 MB PSS / 6 procs;
+historical `1.0.2` baseline: 218.1 MB total PSS, 94.2 MB anonymous PSS, 318.2 MB RSS).
+The original ~100 MB total-PSS request remains **unmet**; `tools/stress.py`
+enforces a rebaselined 230 MB WebKitGTK floor. Anonymous PSS is not total RAM:
+shared libraries and other file-backed mappings also contribute to total PSS.
 
 Before GTK starts, `src/main.rs` always sets `MALLOC_ARENA_MAX=2` and disables
 the Wayland DMA-BUF renderer by default with `WEBKIT_DISABLE_DMABUF_RENDERER=1`

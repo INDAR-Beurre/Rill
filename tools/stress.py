@@ -39,6 +39,39 @@ REPORT = Path(os.environ.get("SEARCH_STRESS_REPORT", str(ROOT / "build/stress-re
 PORT = 0  # chosen at start: a stale server on a fixed port has fooled this before
 
 
+def select_backend(env=None):
+    """Choose GTK backend reproducibly across Wayland- and X11-only sessions.
+
+    Matches tools/test_ui.py: explicit SEARCH_TEST_BACKEND always wins;
+    otherwise prefer wayland when WAYLAND_DISPLAY is set, fall back to x11
+    when DISPLAY is set, and default to wayland if neither is present.
+    """
+    source = os.environ if env is None else env
+    explicit = (source.get("SEARCH_TEST_BACKEND") or "").strip().lower()
+    if explicit:
+        return explicit
+    if (source.get("WAYLAND_DISPLAY") or "").strip():
+        return "wayland"
+    if (source.get("DISPLAY") or "").strip():
+        return "x11"
+    return "wayland"
+
+
+def configure_backend_env(env, source=None):
+    base = os.environ if source is None else source
+    backend = select_backend(base)
+    if backend == "x11":
+        env.pop("WAYLAND_DISPLAY", None)
+        env["GDK_BACKEND"] = "x11"
+        env["DISPLAY"] = (base.get("DISPLAY") or "").strip() or ":0"
+    elif backend == "wayland":
+        env.pop("DISPLAY", None)
+        env["GDK_BACKEND"] = "wayland"
+    else:
+        env["GDK_BACKEND"] = backend
+    return backend
+
+
 # -- process and memory ----------------------------------------------------
 
 def process_tree(root_pid):
@@ -205,12 +238,7 @@ class Run:
         # earlier run left there. Give the suite its own folder.
         self.downloads.mkdir(exist_ok=True)
         env["XDG_DOWNLOAD_DIR"] = str(self.downloads)
-        if os.environ.get("SEARCH_TEST_BACKEND") == "x11":
-            env["GDK_BACKEND"] = "x11"
-            env["DISPLAY"] = os.environ.get("DISPLAY", ":0")
-        else:
-            env.pop("DISPLAY", None)
-            env["GDK_BACKEND"] = "wayland"
+        configure_backend_env(env, os.environ)
         started = time.time()
         argv = [str(BINARY), "--appearance", "light", "--size", "1180x1000"]
         if fresh:
@@ -247,11 +275,14 @@ class Run:
             except Exception:
                 pass
         if self.browser and self.browser.poll() is None:
-            self.browser.terminate()
             try:
                 self.browser.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.browser.kill()
+                self.browser.terminate()
+                try:
+                    self.browser.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.browser.kill()
         self.bench = None
         self.start_browser(fresh=False)
         return self.bench
@@ -342,6 +373,51 @@ class Run:
 
     def url(self, path):
         return f"http://127.0.0.1:{self.port}{path}"
+
+    def url_for(self, host, path):
+        return f"http://{host}:{self.port}{path}"
+
+    def wait_until(self, probe_fn, predicate, timeout=8.0, interval=0.1):
+        deadline = time.time() + timeout
+        last = None
+        while True:
+            last = probe_fn()
+            if predicate(last):
+                return True, last
+            if time.time() >= deadline:
+                return False, last
+            time.sleep(interval)
+
+    def element_display(self, bench, selector, timeout=8.0):
+        sel_js = json.dumps(selector)
+        expr = (
+            f"js (() => {{ const e = document.querySelector({sel_js}); "
+            "return e ? getComputedStyle(e).display : 'absent'; })()"
+        )
+        _, value = self.wait_until(
+            lambda: bench.command(expr).get("value", "absent"),
+            lambda val: val not in ("absent", None, ""),
+            timeout=timeout,
+            interval=0.15,
+        )
+        return value
+
+    def reload_and_wait(self, bench, tab_id, trigger="key reload", timeout=20.0):
+        bench.must("js (window.__searchStressReload = 1, true)")
+        bench.must(trigger)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ans = bench.command(
+                "js (window.__searchStressReload === undefined "
+                "&& document.readyState === 'complete') ? 'reloaded' : 'wait'"
+            )
+            if ans.get("ok") and ans.get("value") == "reloaded":
+                probe = bench.probe()
+                tab = next((t for t in probe.get("tabs", []) if t.get("id") == tab_id), None)
+                if tab is not None and not tab.get("loading", False):
+                    return
+            time.sleep(0.1)
+        raise BenchError(f"tab {tab_id} did not finish reload after {trigger!r}")
 
     def ram(self):
         return memory(self.browser.pid)
@@ -1021,6 +1097,59 @@ class Run:
                 time.sleep(0.25)
             self.check("and stays hidden after a reload", still.get("value") == "none", str(still)[:60])
 
+            # M2 per-host curtain isolation: #hide-me on 127.0.0.1 must not
+            # affect localhost in another normal tab, and reloading either host
+            # must keep the other host's sheet intact on the shared manager.
+            local_tab = bench.open(self.url_for("localhost", "/plain?hide=localhost"))
+            bench.wait_loaded(local_tab, timeout=20)
+            local_strip = self.element_display(bench, "#hide-me", timeout=10)
+            self.check(
+                "a curtain rule on 127.0.0.1 does not hide elements on localhost",
+                local_strip not in ("none", "absent"),
+                f"localhost #hide-me display={local_strip!r}",
+            )
+            bench.must("hide h1")
+            local_h1_ok, local_h1 = self.wait_until(
+                lambda: self.element_display(bench, "h1", timeout=2),
+                lambda val: val == "none",
+                timeout=6,
+            )
+            self.reload_and_wait(bench, local_tab, trigger="key reload", timeout=20)
+            local_after_reload = (
+                self.element_display(bench, "#hide-me", timeout=10),
+                self.element_display(bench, "h1", timeout=10),
+            )
+            bench.select(tab)
+            self.reload_and_wait(bench, tab, trigger="key reload", timeout=20)
+            ip_after_local_reload = (
+                self.element_display(bench, "#hide-me", timeout=10),
+                self.element_display(bench, "h1", timeout=10),
+            )
+            self.check(
+                "reloading localhost keeps 127.0.0.1's sheet intact without cross-host bleed",
+                local_h1_ok
+                and local_after_reload[0] not in ("none", "absent")
+                and local_after_reload[1] == "none"
+                and ip_after_local_reload[0] == "none"
+                and ip_after_local_reload[1] not in ("none", "absent"),
+                f"localhost={local_after_reload}, 127.0.0.1={ip_after_local_reload}, local_h1={local_h1!r}",
+            )
+            bench.select(local_tab)
+            self.reload_and_wait(bench, local_tab, trigger="key reload", timeout=20)
+            local_after_ip_reload = (
+                self.element_display(bench, "#hide-me", timeout=10),
+                self.element_display(bench, "h1", timeout=10),
+            )
+            self.check(
+                "reloading 127.0.0.1 keeps localhost's sheet intact too",
+                local_after_ip_reload[0] not in ("none", "absent")
+                and local_after_ip_reload[1] == "none",
+                f"localhost after 127.0.0.1 reload={local_after_ip_reload}",
+            )
+            self.reload_and_wait(bench, local_tab, trigger="key unhide", timeout=20)
+            bench.close(local_tab)
+            bench.select(tab)
+
         @self.scenario("downloads and popups")
         def _downloads():
             tab = bench.open(self.url("/popup"))
@@ -1257,6 +1386,164 @@ class Run:
             fork = bench.must("js document.cookie.includes('flavour')")
             self.check("two private tabs share nothing with the ordinary one",
                        fork.get("value") == "false", str(fork)[:60])
+
+            # H2 private-tab persistence isolation: seed a normal URL title and
+            # persisted hidden selector, then verify private title updates and
+            # private hide/unhide leave history.json and hidden.json byte-for-byte
+            # unchanged while private hide/unhide stays usable across reloads
+            # and normal tabs retain their selectors.
+            seeded_url = self.url("/plain?h2-private-isolation=1")
+            normal_tab = bench.open(seeded_url)
+            bench.wait_loaded(normal_tab, timeout=20)
+            self.element_display(bench, "#hide-me", timeout=10)
+            bench.must("js (document.title = 'NormalSeedTitle', document.title)")
+            self.wait_until(
+                lambda: next(
+                    (t.get("title") for t in bench.probe().get("tabs", []) if t.get("id") == normal_tab),
+                    "",
+                ),
+                lambda title: title == "NormalSeedTitle",
+                timeout=8,
+            )
+            bench.must("hide #hide-me")
+            self.wait_until(
+                lambda: self.element_display(bench, "#hide-me", timeout=2),
+                lambda val: val == "none",
+                timeout=6,
+            )
+            data_dir = self.tmp / "data" / "search"
+            history_path = data_dir / "history.json"
+            hidden_path = data_dir / "hidden.json"
+
+            def _seeded_on_disk():
+                if not (history_path.exists() and hidden_path.exists()):
+                    return False
+                try:
+                    hist = json.loads(history_path.read_text())
+                    hid = json.loads(hidden_path.read_text())
+                except (OSError, ValueError):
+                    return False
+                has_title = any(
+                    entry.get("url") == seeded_url and entry.get("title") == "NormalSeedTitle"
+                    for entry in hist
+                )
+                has_selector = "#hide-me" in hid.get("127.0.0.1", [])
+                return has_title and has_selector
+
+            seeded_disk_ok = True
+            history_bytes_before = b""
+            hidden_bytes_before = b""
+            if not self.args.attach:
+                seeded_disk_ok, _ = self.wait_until(_seeded_on_disk, bool, timeout=10, interval=0.2)
+                # Let the same spawn_blocking batch finish writing hidden.json right after history.json.
+                time.sleep(0.35)
+                history_bytes_before = history_path.read_bytes() if history_path.exists() else b""
+                hidden_bytes_before = hidden_path.read_bytes() if hidden_path.exists() else b""
+
+            prev_ids = {t["id"] for t in bench.probe().get("tabs", [])}
+            bench.must("key privatetab")
+            priv_ok, priv_probe = self.wait_until(
+                bench.probe,
+                lambda p: p.get("active") not in prev_ids
+                and any(t.get("id") == p.get("active") and t.get("private") for t in p.get("tabs", [])),
+                timeout=8,
+            )
+            priv_tab = priv_probe["active"]
+            bench.must(f"go {seeded_url}")
+            bench.wait_loaded(priv_tab, timeout=20)
+            priv_initial_disp = self.element_display(bench, "#hide-me", timeout=10)
+            bench.must("js (document.title = 'PrivatePoisonTitle', document.title)")
+            priv_title_ok, _ = self.wait_until(
+                lambda: next(
+                    (t.get("title") for t in bench.probe().get("tabs", []) if t.get("id") == priv_tab),
+                    "",
+                ),
+                lambda title: title == "PrivatePoisonTitle",
+                timeout=8,
+            )
+            self.reload_and_wait(bench, priv_tab, trigger="key unhide", timeout=20)
+            priv_unhidden_disp = self.element_display(bench, "#hide-me", timeout=10)
+            self.reload_and_wait(bench, priv_tab, trigger="key reload", timeout=20)
+            priv_unhidden_reload_disp = self.element_display(bench, "#hide-me", timeout=10)
+            bench.must("hide #hide-me")
+            priv_rehidden_ok, priv_rehidden_disp = self.wait_until(
+                lambda: self.element_display(bench, "#hide-me", timeout=2),
+                lambda val: val == "none",
+                timeout=6,
+            )
+            self.reload_and_wait(bench, priv_tab, trigger="key reload", timeout=20)
+            priv_rehidden_reload_disp = self.element_display(bench, "#hide-me", timeout=10)
+            self.reload_and_wait(bench, priv_tab, trigger="key unhide", timeout=20)
+            priv_final_unhidden_disp = self.element_display(bench, "#hide-me", timeout=10)
+            self.check(
+                "private hide and unhide stay usable across reload",
+                priv_ok
+                and priv_initial_disp == "none"
+                and priv_unhidden_disp not in ("none", "absent")
+                and priv_unhidden_reload_disp not in ("none", "absent")
+                and priv_rehidden_ok
+                and priv_rehidden_reload_disp == "none"
+                and priv_final_unhidden_disp not in ("none", "absent"),
+                f"init={priv_initial_disp}, unhide={priv_unhidden_disp}, "
+                f"unhide_reload={priv_unhidden_reload_disp}, rehide={priv_rehidden_disp}, "
+                f"rehide_reload={priv_rehidden_reload_disp}, final_unhide={priv_final_unhidden_disp}",
+            )
+
+            # F39 delayed private-hide -> normal-tab switch race: fire a hide
+            # selection on the private tab and immediately switch focus to the
+            # normal tab while the IPC + 10ms timer is in flight. Neither
+            # normal_tab's DOM nor persisted hidden.json may receive h1.
+            bench.must("hide h1")
+            bench.select(normal_tab)
+            time.sleep(0.25)
+            normal_h1_after_race = self.element_display(bench, "h1", timeout=6)
+            race_kept = bench.must("hidden").get("hidden", [])
+            self.check(
+                "delayed private hide followed by normal-tab switch cannot style or persist to normal tab",
+                normal_h1_after_race not in ("none", "absent")
+                and not any(
+                    item.get("host") == "127.0.0.1" and item.get("selector") == "h1"
+                    for item in race_kept
+                ),
+                f"normal h1 display={normal_h1_after_race!r}, hidden={race_kept}",
+            )
+
+            # Wait past the 2s persist timer so any leaked schedule_flush() would land on disk.
+            time.sleep(2.5)
+            if not self.args.attach:
+                history_bytes_after = history_path.read_bytes() if history_path.exists() else b""
+                hidden_bytes_after = hidden_path.read_bytes() if hidden_path.exists() else b""
+                self.check(
+                    "private title updates leave seeded history.json byte-for-byte unchanged",
+                    seeded_disk_ok
+                    and priv_title_ok
+                    and history_bytes_after == history_bytes_before
+                    and b"NormalSeedTitle" in history_bytes_after
+                    and b"PrivatePoisonTitle" not in history_bytes_after,
+                    f"seeded={seeded_disk_ok}, priv_title={priv_title_ok}, "
+                    f"before={len(history_bytes_before)}B, after={len(history_bytes_after)}B, "
+                    f"same={history_bytes_after == history_bytes_before}",
+                )
+                self.check(
+                    "private hide/unhide leaves seeded hidden.json byte-for-byte unchanged",
+                    seeded_disk_ok
+                    and hidden_bytes_after == hidden_bytes_before
+                    and b"#hide-me" in hidden_bytes_after,
+                    f"before={len(hidden_bytes_before)}B, after={len(hidden_bytes_after)}B, "
+                    f"same={hidden_bytes_after == hidden_bytes_before}",
+                )
+
+            still_kept = bench.must("hidden").get("hidden", [])
+            bench.select(normal_tab)
+            self.reload_and_wait(bench, normal_tab, trigger="key reload", timeout=20)
+            normal_after_priv = self.element_display(bench, "#hide-me", timeout=10)
+            self.check(
+                "normal tabs retain their hidden selectors after private unhide",
+                any(item.get("host") == "127.0.0.1" and item.get("selector") == "#hide-me" for item in still_kept)
+                and normal_after_priv == "none",
+                f"hidden={still_kept}, normal #hide-me display={normal_after_priv!r}",
+            )
+
             # Five tabs, two of them private, none of them the next scenario's
             # business: a private tab left open is also a promise this suite
             # has no way to check.
@@ -1315,51 +1602,144 @@ class Run:
         def _reading():
             # The page's own words, set again by the browser: it must enter, and
             # it must carry a way out that does not need a keyboard.
+            def _reader_dom():
+                return bench.must("js !!document.getElementById('__search_reader')").get("value") == "true"
+
+            def _wait_reader(want, timeout=6.0):
+                return self.wait_until(
+                    lambda: (_reader_dom(), bench.probe().get("reading") is True),
+                    lambda pair: pair == (want, want),
+                    timeout=timeout,
+                )
+
             tab = bench.open(self.url("/long"))
             bench.wait_loaded(tab, timeout=20)
             bench.must("escape")
-            time.sleep(0.2)
+            bench.settle()
             # Read from partway down the page, not from the top. A restore that
             # always lands on 0 looks correct at 0 and is only wrong here.
             start_y = 200
             bench.must(f"js window.scrollTo(0, {start_y})")
-            time.sleep(0.1)
+            self.wait_until(
+                lambda: float(bench.must("js window.scrollY").get("value") or 0),
+                lambda y: abs(y - start_y) <= 2,
+                timeout=3.0,
+            )
             bench.must("js (() => { const p = document.createElement('p'); p.className = 'byline'; p.textContent = 'By Ada Lovelace'; document.querySelector('article').appendChild(p); return true; })()")
             bench.must("key reader")
-            time.sleep(1.2)
-            inside = bench.must("js !!window.__searchReaderOn")
-            self.check("reading mode enters", inside.get("value") == "true", str(inside)[:60])
-            self.check("the browser knows which tab is being read", bench.probe().get("reading") is True, str(bench.probe()))
+            _, entered_state = _wait_reader(True, timeout=6.0)
+            self.check(
+                "reading mode enters",
+                entered_state[0] is True,
+                f"dom={entered_state[0]}, host={entered_state[1]}",
+            )
+            self.check(
+                "the browser knows which tab is being read",
+                entered_state[1] is True,
+                str(bench.probe()),
+            )
             way_out = bench.must("js !!document.getElementById('__search_reader_exit')")
             self.check("and carries its own way out", way_out.get("value") == "true", str(way_out)[:60])
             contrast = bench.must("js (() => { const b = document.querySelector('#__search_reader > .byline'); if (!b) return '0'; const ch = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; const lum = (s) => { const m = (s.match(/[0-9]+/g) || []).map(Number); return 0.2126 * ch(m[0]) + 0.7152 * ch(m[1]) + 0.0722 * ch(m[2]); }; const x = lum(getComputedStyle(document.body).backgroundColor), y = lum(getComputedStyle(b).color); return ((Math.max(x,y) + 0.05) / (Math.min(x,y) + 0.05)).toFixed(2); })()")
             self.check("reader byline has measured contrast", float(contrast.get("value") or 0) >= 6.0, str(contrast))
+
+            # H4 isolated-world regression: reader globals must not leak into
+            # the main world, and forged main-world __searchReaderCtrl or posted
+            # searchReader messages must not alter isolated reader/host state.
+            leaked = bench.must(
+                "js JSON.stringify({"
+                "on: typeof window.__searchReaderOn, "
+                "font: typeof window.__searchReaderFont, "
+                "body: typeof window.__searchReaderBody, "
+                "ctrl: typeof window.__searchReaderCtrl, "
+                "handler: !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchReader)"
+                "})"
+            )
+            leaked_data = json.loads(leaked.get("value") or "{}")
+            forge = bench.must(
+                "js (() => { "
+                "window.__forgedReaderCalls = 0; "
+                "window.__searchReaderCtrl = { "
+                "toggle: () => { window.__forgedReaderCalls++; return 'left'; }, "
+                "setFont: () => '99', "
+                "isActive: () => false "
+                "}; "
+                "let post = 'absent'; "
+                "try { "
+                "const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchReader; "
+                "if (h && typeof h.postMessage === 'function') { h.postMessage('off'); post = 'sent'; } "
+                "} catch (e) { post = 'threw'; } "
+                "return post; "
+                "})()"
+            )
+            bench.command("js window.webkit.messageHandlers.searchReader.postMessage('off')")
+            bench.settle()
+            after_forge_dom = _reader_dom()
+            after_forge_host = bench.probe().get("reading") is True
+            forged_calls = bench.must("js window.__forgedReaderCalls").get("value")
+            self.check(
+                "main-world forged __searchReaderCtrl and searchReader posts cannot alter isolated reader state",
+                leaked_data.get("on") == "undefined"
+                and leaked_data.get("font") == "undefined"
+                and leaked_data.get("body") == "undefined"
+                and leaked_data.get("ctrl") == "undefined"
+                and leaked_data.get("handler") is False
+                and forge.get("value") == "absent"
+                and after_forge_dom is True
+                and after_forge_host is True
+                and forged_calls == "0",
+                f"leaked={leaked_data}, post={forge.get('value')}, dom={after_forge_dom}, "
+                f"host={after_forge_host}, forged_calls={forged_calls}",
+            )
+
             # The page's own button, clicked as a page clicks it. Toggling from
             # the host would prove only that the host can leave; this is the
             # way out a keyboardless user has, and it has to reach the host too.
             bench.must("js document.getElementById('__search_reader_exit').click()")
-            time.sleep(0.3)
-            clicked = bench.must("js !!window.__searchReaderOn")
-            self.check("the page's exit button leaves reading mode",
-                       clicked.get("value") == "false", str(clicked)[:60])
-            self.check("and the browser is told the page left it",
-                       bench.probe().get("reading") is False, str(bench.probe()))
-            scrolled = bench.must("js window.scrollY")
-            self.check("the exit button puts the page back where it was read from",
-                       abs(float(scrolled.get("value") or 0) - start_y) <= 2,
-                       f"scrollY {scrolled.get('value')!r}, was {start_y}")
+            _, left_state = _wait_reader(False, timeout=6.0)
+            forged_after_exit = bench.must("js window.__forgedReaderCalls").get("value")
+            self.check(
+                "the page's exit button leaves reading mode",
+                left_state[0] is False and forged_after_exit == "0",
+                f"dom={left_state[0]}, host={left_state[1]}, forged_calls={forged_after_exit}",
+            )
+            self.check(
+                "and the browser is told the page left it",
+                left_state[1] is False,
+                str(bench.probe()),
+            )
+            scroll_ok, scrolled_val = self.wait_until(
+                lambda: float(bench.must("js window.scrollY").get("value") or 0),
+                lambda y: abs(y - start_y) <= 2,
+                timeout=3.0,
+            )
+            self.check(
+                "the exit button puts the page back where it was read from",
+                scroll_ok,
+                f"scrollY {scrolled_val!r}, was {start_y}",
+            )
             # Back in by the keyboard, and out by it: the toggle the host owns
-            # still works after the page has left reading mode on its own.
+            # still works after the page has left reading mode on its own, and
+            # remains isolated from the forged main-world __searchReaderCtrl.
             bench.must("key reader")
-            time.sleep(1.2)
-            again = bench.must("js !!window.__searchReaderOn")
-            self.check("reading mode enters again after the page left it",
-                       again.get("value") == "true", str(again)[:60])
+            again_ok, again_state = _wait_reader(True, timeout=6.0)
+            self.check(
+                "reading mode enters again after the page left it",
+                again_ok and bench.must("js window.__forgedReaderCalls").get("value") == "0",
+                f"dom={again_state[0]}, host={again_state[1]}",
+            )
             bench.must("key reader")
-            time.sleep(1.2)
-            back = bench.must("js !!window.__searchReaderOn")
-            self.check("and leaves again", back.get("value") == "false", str(back)[:60])
-            self.check("the browser knows reading ended", bench.probe().get("reading") is False, str(bench.probe()))
+            _, back_state = _wait_reader(False, timeout=6.0)
+            self.check(
+                "and leaves again",
+                back_state[0] is False and bench.must("js window.__forgedReaderCalls").get("value") == "0",
+                f"dom={back_state[0]}, host={back_state[1]}",
+            )
+            self.check(
+                "the browser knows reading ended",
+                back_state[1] is False,
+                str(bench.probe()),
+            )
             restored = bench.must("js [!!document.querySelector('style[data-search-reader]'), window.scrollY]")
             self.check("leaving restores the page",
                        str(restored.get("value")).startswith("false,"), str(restored)[:80])
@@ -1417,16 +1797,48 @@ class Run:
             while True:
                 probe = bench.probe()
                 vw, vh = probe.get("viewWidth", 0), probe.get("viewHeight", 0)
-                viewport = next(node for node in bench.must("uitree")["nodes"] if node["type"] == "GtkStack")
+                nodes = bench.must("uitree")["nodes"]
+                viewport = next(node for node in nodes if node["type"] == "GtkStack")
                 if [vw, vh] == viewport["size"] or time.time() > deadline:
                     break
                 time.sleep(0.1)
             width, height = probe.get("shellWidth", 0), probe.get("shellHeight", 0)
+            frame = next((node for node in nodes if "viewport-frame" in node.get("classes", [])), None)
+            if frame is not None:
+                fx, fy = frame["at"]
+                fw, fh = frame["size"]
+                vx, vy = viewport["at"]
+                # Viewport must be centered/contained inside the 1px-bordered rounded frame,
+                # and the frame itself must preserve its 6px right/bottom shell margins (or 0px in fullscreen).
+                left_border = vx - fx
+                right_border = (fx + fw) - (vx + vw)
+                top_border = vy - fy
+                bottom_border = (fy + fh) - (vy + vh)
+                frame_right_margin = width - (fx + fw)
+                frame_bottom_margin = height - (fy + fh)
+                is_fs = "fullscreen" in frame.get("classes", [])
+                expected_margin = 0 if is_fs else 6
+                fills_frame = (
+                    abs(left_border - 1) <= 1
+                    and abs(right_border - 1) <= 1
+                    and abs(top_border - 1) <= 1
+                    and abs(bottom_border - 1) <= 1
+                    and left_border == right_border
+                    and top_border == bottom_border
+                    and abs(frame_right_margin - expected_margin) <= 1
+                    and abs(frame_bottom_margin - expected_margin) <= 1
+                )
+            else:
+                # Without a viewport frame (fullscreen only), the stack must sit flush to window edges.
+                is_fs = bool(bench.must("fullscreen").get("flag"))
+                fills_frame = (
+                    is_fs
+                    and abs(viewport["at"][0] + vw - width) <= 1
+                    and abs(viewport["at"][1] + vh - height) <= 1
+                )
             self.check("the page fills the resized window",
-                       vw > 0 and vh > 0 and [vw, vh] == viewport["size"]
-                       and abs(viewport["at"][0] + vw - width) <= 1
-                       and abs(viewport["at"][1] + vh - height) <= 1,
-                       f"view {vw}x{vh}, viewport {viewport['size']} at {viewport['at']} inside {width}x{height}")
+                       vw > 0 and vh > 0 and [vw, vh] == viewport["size"] and fills_frame,
+                       f"view {vw}x{vh}, viewport {viewport['size']} at {viewport['at']}, frame={frame and (frame['at'], frame['size'])} inside {width}x{height}")
             before = bench.probe()["maximised"]
             bench.must("key maximise")
             time.sleep(0.4)
@@ -1848,33 +2260,127 @@ class Run:
                 f"cards after escape: {after_site}",
             )
 
-            # Folded tab column: toggle fold on (<= 20px strip), then off (>= 140px).
-            before_fold = bench.must("fullscreen").get("sideWidth", 0)
+            # Exclusive tab-layout toggle (Ctrl+S): top tabs <-> vertical sidebar (never both mapped).
+            def _mapped_dupes():
+                nodes = bench.must("uitree")["nodes"]
+                top_has = any(("toptab" in n["classes"] or "toppin" in n["classes"]) and n["size"][0] > 0 for n in nodes)
+                side_has = any(
+                    ("row" in n["classes"] or "pin" in n["classes"])
+                    and "toptab" not in n["classes"] and "toppin" not in n["classes"]
+                    and n["type"] == "GtkEventBox" and n["size"][0] > 0
+                    for n in nodes
+                )
+                return top_has, side_has
+
+            before_chrome = bench.must("chrome")
+            before_side = bool(before_chrome.get("sidebarShown"))
             bench.must("key foldcolumn")
-            folded_width = before_fold
-            for _ in range(20):
-                folded_width = bench.must("fullscreen").get("sideWidth", before_fold)
-                if folded_width <= 20:
-                    break
-                time.sleep(0.05)
+            bench.settle()
+            after1_chrome = bench.must("chrome")
+            after1_side = bool(after1_chrome.get("sidebarShown"))
+            top1, side1 = _mapped_dupes()
             self.check(
-                "folding tab column collapses to strip",
-                before_fold >= 140 and folded_width <= 20,
-                f"sideWidth {before_fold} -> {folded_width}",
+                "Ctrl+S toggles exclusive sidebar vs top-tabs cleanly",
+                (after1_side != before_side)
+                and (after1_side == (side1 and not top1))
+                and ((not after1_side) == (top1 and not side1)),
+                f"sidebarShown {before_side} -> {after1_side}, mapped top={top1} side={side1}",
             )
             bench.must("key foldcolumn")
-            unfolded_width = folded_width
-            for _ in range(20):
-                unfolded_width = bench.must("fullscreen").get("sideWidth", 0)
-                if unfolded_width >= 140:
-                    break
-                time.sleep(0.05)
+            bench.settle()
+            after2_chrome = bench.must("chrome")
+            after2_side = bool(after2_chrome.get("sidebarShown"))
+            top2, side2 = _mapped_dupes()
             self.check(
-                "unfolding tab column restores width",
-                unfolded_width >= 140,
-                f"sideWidth {folded_width} -> {unfolded_width}",
+                "second Ctrl+S restores previous exclusive tab layout",
+                (after2_side == before_side)
+                and (after2_side == (side2 and not top2))
+                and ((not after2_side) == (top2 and not side2)),
+                f"sidebarShown {after1_side} -> {after2_side}, mapped top={top2} side={side2}",
             )
             bench.close(opener)
+
+        @self.scenario("f48 exclusive layouts, pins, and persistent spaces")
+        def _f48_spaces_and_layouts():
+            nonlocal bench
+            # Fresh state starts with Default space only.
+            sp0 = bench.must("spaces")
+            self.check(
+                "starts with Default space only",
+                len(sp0["spaces"]) == 1 and sp0["spaces"][0]["id"] == "default" and sp0["activeSpace"] == "default",
+                f"spaces={sp0}",
+            )
+            # Default space cannot be deleted.
+            del_def = bench.command("spacedelete default")
+            self.check("Default space cannot be deleted", not del_def.get("ok"), f"resp={del_def}")
+
+            # Create & rename a custom space, open tabs in both spaces, verify per-space active tab memory.
+            created = bench.must("spacecreate Work")
+            work_id = created["id"]
+            bench.must(f"spacerename {work_id} Deep Work")
+            sp1 = bench.must("spaces")
+            work_meta = next((s for s in sp1["spaces"] if s["id"] == work_id), None)
+            self.check(
+                "space create and rename preserve stable id",
+                work_meta is not None and work_meta["name"] == "Deep Work",
+                f"spaces={sp1['spaces']}",
+            )
+            def_tab = bench.open(self.url("/plain?space=default"))
+            bench.wait_loaded(def_tab, timeout=20)
+            bench.must(f"spaceswitch {work_id}")
+            bench.settle()
+            work_tab = bench.open(self.url("/long?space=work"))
+            bench.wait_loaded(work_tab, timeout=20)
+            # Open a private tab in Work space — must NOT persist across restart!
+            bench.must("key privatetab")
+            priv_probe = bench.wait_for(lambda p: any(t["id"] == p["active"] and t["private"] for t in p["tabs"]), timeout=10)
+            priv_id = priv_probe["active"]
+            bench.must(f"go {self.url('/form?private-space=1')}")
+            bench.wait_loaded(priv_id, timeout=20)
+            bench.select(work_tab)
+            bench.settle()
+
+            # Switch back to Default and confirm per-space active tab remembered.
+            bench.must("spaceswitch default")
+            bench.settle()
+            self.check(
+                "switching back to Default restores Default's active tab",
+                bench.probe()["active"] == def_tab and bench.probe()["activeSpace"] == "default",
+                f"active={bench.probe()['active']} expected={def_tab} space={bench.probe()['activeSpace']}",
+            )
+            # Switch back to Work and verify Work's active tab remembered.
+            bench.must(f"spaceswitch {work_id}")
+            bench.settle()
+            self.check(
+                "switching back to Work restores Work's active tab",
+                bench.probe()["active"] == work_tab and bench.probe()["activeSpace"] == work_id,
+                f"active={bench.probe()['active']} expected={work_tab} space={bench.probe()['activeSpace']}",
+            )
+
+            # Session restore across restart: spaces + tabs restore, private tab does NOT leak.
+            self.restart()
+            bench = self.bench
+            sp_after = bench.must("spaces")
+            p_after = bench.probe()
+            restored_work = next((s for s in sp_after["spaces"] if s["id"] == work_id and s["name"] == "Deep Work"), None)
+            has_work_tab = any(t.get("spaceId") == work_id and "/long?space=work" in t.get("url", "") for t in p_after["tabs"])
+            has_def_tab = any(t.get("spaceId") == "default" and "/plain?space=default" in t.get("url", "") for t in p_after["tabs"])
+            has_private_leak = any(t.get("private") or "private-space=1" in t.get("url", "") for t in p_after["tabs"])
+            self.check(
+                "spaces and per-space tabs persist across restart with zero private leakage",
+                restored_work is not None and has_work_tab and has_def_tab and not has_private_leak,
+                f"spaces={sp_after['spaces']}, tabs={[(t['spaceId'], t['url'], t['private']) for t in p_after['tabs']]}",
+            )
+
+            # Deleting Work migrates its tabs back to Default without losing them.
+            del_res = bench.must(f"spacedelete {work_id}")
+            p_post_del = bench.probe()
+            migrated = any(t.get("spaceId") == "default" and "/long?space=work" in t.get("url", "") for t in p_post_del["tabs"])
+            self.check(
+                "deleting custom space migrates tabs to Default safely",
+                del_res.get("moved", 0) >= 1 and p_post_del["activeSpace"] == "default" and migrated,
+                f"del={del_res}, activeSpace={p_post_del['activeSpace']}, migrated={migrated}",
+            )
 
         @self.scenario("duplicate private tab and reopen closed tab")
         def _dup_reopen():
@@ -1951,12 +2457,7 @@ class Run:
                 env["XDG_DATA_HOME"] = str(full_tmp / "data")
                 (full_tmp / "downloads").mkdir(exist_ok=True)
                 env["XDG_DOWNLOAD_DIR"] = str(full_tmp / "downloads")
-                if os.environ.get("SEARCH_TEST_BACKEND") == "x11":
-                    env["GDK_BACKEND"] = "x11"
-                    env["DISPLAY"] = os.environ.get("DISPLAY", ":0")
-                else:
-                    env.pop("DISPLAY", None)
-                    env["GDK_BACKEND"] = "wayland"
+                configure_backend_env(env, os.environ)
                 with open("/dev/full", "wb") as err_sink:
                     proc = subprocess.Popen(
                         [str(BINARY), "--appearance", "light", "--fresh"],

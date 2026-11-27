@@ -590,6 +590,7 @@ pub fn settings_row(app: &crate::app::AppRef) -> gtk::Box {
 
     let button = gtk::Button::with_label("Import");
     crate::ui::class(&button, "act");
+    button.set_valign(gtk::Align::Center);
     button.set_sensitive(!found.is_empty());
     {
         let weak = app.weak();

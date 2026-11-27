@@ -16,9 +16,16 @@ use webkit2gtk::{
     WebContextExt, WebViewExt, WebsiteData, WebsiteDataManagerExt, WebsiteDataManagerExtManual, WebsiteDataTypes,
 };
 
+struct OpenCard {
+    tab: TabId,
+    card: gtk::Box,
+    scrim: gtk::DrawingArea,
+    scrim_alpha: std::rc::Rc<Cell<f64>>,
+}
+
 thread_local! {
-    /// The card on screen and the tab it describes. Only one is ever up.
-    static OPEN: RefCell<Option<(TabId, gtk::Box)>> = const { RefCell::new(None) };
+    /// The card on screen, its backdrop scrim, and the tab it describes. Only one is ever up.
+    static OPEN: RefCell<Option<OpenCard>> = const { RefCell::new(None) };
     /// The records each clear is removing, filed under that clear's number. They
     /// stay alive until WebKit reports back for that clear, so two clears in a
     /// row never drop each other's records.
@@ -31,7 +38,7 @@ thread_local! {
 
 /// Whether the site card is on screen. It only asks and never moves focus.
 pub fn is_open() -> bool {
-    OPEN.with(|o| o.borrow().as_ref().is_some_and(|(_, card)| card.is_visible()))
+    OPEN.with(|o| o.borrow().as_ref().is_some_and(|open| open.card.is_visible()))
 }
 
 /// The data kinds a site clear removes. Cookies and storage only: the cache is
@@ -181,11 +188,16 @@ pub fn clear_targets(host: &str, names: &[String]) -> Vec<usize> {
 
 /// Opens the card for the tab on screen, replacing one already up.
 pub fn open(app: &App) {
+    if let Ok(panels) = app.panels.try_borrow() {
+        panels.dismiss_popover();
+    }
     let tab = app.active_id();
-    let was_open = OPEN.with(|o| o.borrow().as_ref().is_some_and(|(id, _)| *id == tab));
-    if let Some((_, old)) = OPEN.with(|o| o.borrow_mut().take()) {
-        crate::motion::cancel(&old);
-        app.ui.overlay.remove(&old);
+    let was_open = OPEN.with(|o| o.borrow().as_ref().is_some_and(|open| open.tab == tab));
+    if let Some(old) = OPEN.with(|o| o.borrow_mut().take()) {
+        crate::motion::cancel(&old.card);
+        crate::motion::cancel(&old.scrim);
+        app.ui.overlay.remove(&old.card);
+        app.ui.overlay.remove(&old.scrim);
     }
     for child in app.ui.overlay.children() {
         let name = child.widget_name();
@@ -207,8 +219,17 @@ pub fn open(app: &App) {
         extensions::here(&url),
     );
     let title = if model.host.is_empty() { "This page".to_string() } else { model.host.clone() };
-    let scrim = crate::ui::scrim(&app.palette.borrow());
+    let (scrim, scrim_alpha) = crate::ui::scrim_with_alpha(&app.palette.borrow());
     scrim.set_widget_name("site-card-scrim");
+    {
+        let weak = app.weak();
+        scrim.connect_button_press_event(move |_, _| {
+            if let Some(app) = weak.upgrade() {
+                dismiss(&app);
+            }
+            crate::gtkx::inh(true)
+        });
+    }
     app.ui.overlay.add_overlay(&scrim);
     scrim.show_all();
     let card = permissions::card(app, &title);
@@ -265,6 +286,9 @@ pub fn open(app: &App) {
     // wide, not the 380px it was told to be.
     let anchor_top = anchor_under_button(app, &card);
     if !was_open {
+        // Both the scrim and the card arrive on the shared entrance role so
+        // clicking outside dismisses via a real alpha-animated backdrop.
+        crate::motion::fade_alpha(&scrim, &scrim_alpha, crate::motion::dur::ENTER);
         // Every card under the toolbar drops in the same shared 8px on the
         // entrance role, so the site card, dialogs, welcome and permission
         // prompts all arrive the same way.
@@ -274,6 +298,8 @@ pub fn open(app: &App) {
             -crate::motion::dur::TRAVEL,
             crate::motion::dur::ENTER,
         );
+    } else {
+        scrim_alpha.set(1.0);
     }
     // Rebuilding after a zoom or permission change used to drop the keyboard
     // on the first button again. Keep the control the person was on, matched
@@ -290,7 +316,14 @@ pub fn open(app: &App) {
         card.set_can_focus(true);
         card.grab_focus();
     }
-    OPEN.with(|o| *o.borrow_mut() = Some((tab, card)));
+    OPEN.with(|o| {
+        *o.borrow_mut() = Some(OpenCard {
+            tab,
+            card,
+            scrim,
+            scrim_alpha,
+        });
+    });
 }
 
 /// Puts the site card 8px below the site-information button, with its left
@@ -323,7 +356,7 @@ fn anchor_under_button(app: &crate::app::App, card: &gtk::Box) -> i32 {
 /// margin set to the value it already has, so repeated calls settle and do
 /// not loop.
 pub fn relayout(app: &App) {
-    let Some(card) = OPEN.with(|o| o.borrow().as_ref().map(|(_, card)| card.clone())) else {
+    let Some(card) = OPEN.with(|o| o.borrow().as_ref().map(|open| open.card.clone())) else {
         return;
     };
     if !card.is_mapped() {
@@ -334,37 +367,42 @@ pub fn relayout(app: &App) {
     }
 }
 
+const MIN_CARD_WIDTH: i32 = 380;
+
+/// Pure horizontal anchor for the hidden-toolbar fallback: keeps the card's
+/// right edge inset by `PAGE_INSET` on both wide and narrow windows.
+fn hidden_toolbar_left(overlay_width: i32, card_width: i32) -> i32 {
+    (overlay_width - card_width - crate::find::PAGE_INSET).max(crate::find::PAGE_INSET)
+}
+
+/// Drawn card width derived from GTK's preferred width minus its own margins.
+fn measured_card_width(card: &gtk::Box) -> i32 {
+    let (minimum, natural) = card.preferred_width();
+    let margins = card.margin_start() + card.margin_end();
+    (natural.max(minimum) - margins).max(MIN_CARD_WIDTH)
+}
+
 /// Where the card goes: (left, top) in overlay coordinates, or None when the
 /// site-information button has no position yet.
 fn anchor_point(app: &crate::app::App, card: &gtk::Box) -> Option<(i32, i32)> {
-    const MIN_CARD_WIDTH: i32 = 380;
     const GAP: i32 = 8;
     let button = &app.ui.site_info;
     let overlay = &app.ui.overlay;
+    // Clamp with the width the card will actually be drawn at, not an
+    // assumed 380px or an unallocated 1px width. GTK's preferred width
+    // includes the widget's own margins, so subtracting both horizontal
+    // margins gives the drawn width on both first open and relayout.
+    let card_width = measured_card_width(card);
     if !button.is_mapped() {
         // The toolbar can be hidden by preference or fullscreen. A site card
-        // still needs a stable anchor, so use the page column's top-right.
-        let card_width = card.allocated_width().max(MIN_CARD_WIDTH);
-        let left = (overlay.allocated_width() - card_width - crate::find::PAGE_INSET)
-            .max(crate::find::PAGE_INSET);
-        let top = crate::find::PAGE_INSET + GAP;
+        // still needs a stable anchor, so use the page column's top-right
+        // below the active top bar with the real preferred width so PAGE_INSET
+        // is preserved on wide and narrow windows alike.
+        let left = hidden_toolbar_left(overlay.allocated_width(), card_width);
+        let top = crate::find::toolbar_band(&app.ui).max(crate::find::PAGE_TOP) + GAP;
         return Some((left, top));
     }
     let (x, y) = button.translate_coordinates(overlay, 0, button.allocated_height())?;
-    // Clamp with the width the card will actually be drawn at, not an
-    // assumed 380px. With halign Start, GTK gives the card its natural width,
-    // and that includes the CSS padding and border plus whatever the rows
-    // ask for. With the old constant, a 458px card could run past the right
-    // PAGE_INSET at narrow window sizes. The caller measures only after the
-    // content is added and shown, so the natural width is the real one.
-    // GTK's preferred width includes the widget's own margins. Without this
-    // subtraction, the margin_start set on the last pass becomes part of the
-    // width used to work out the next one, so at narrow sizes the left edge
-    // can flip between two values (for example 160, 22, 160) instead of
-    // settling. Remove both horizontal margins to get the drawn width.
-    let (minimum, natural) = card.preferred_width();
-    let margins = card.margin_start() + card.margin_end();
-    let card_width = (natural.max(minimum) - margins).max(MIN_CARD_WIDTH);
     // Both edges: the right edge stays inside PAGE_INSET, and the left edge
     // never goes past the 12px surface guide. In a window too narrow for both,
     // the left guide wins.
@@ -409,13 +447,17 @@ fn first_interactive(box_: &gtk::Box) -> Option<gtk::Button> {
 
 /// Takes the card down. The keyboard goes back to the page.
 pub fn dismiss(app: &App) {
-    let Some((_, card)) = OPEN.with(|o| o.borrow_mut().take()) else { return };
-    crate::motion::cancel(&card);
+    let Some(open) = OPEN.with(|o| o.borrow_mut().take()) else { return };
+    crate::motion::cancel(&open.card);
+    crate::motion::cancel(&open.scrim);
     permissions::focus_page(app);
     let overlay = app.ui.overlay.clone();
-    let card_for_done = card.clone();
-    crate::motion::fade_out_then(&card, crate::motion::dur::EXIT, move || {
+    let card_for_done = open.card.clone();
+    let scrim_for_done = open.scrim.clone();
+    crate::motion::fade_alpha_out(&open.scrim, &open.scrim_alpha, crate::motion::dur::EXIT);
+    crate::motion::fade_out_then(&open.card, crate::motion::dur::EXIT, move || {
         overlay.remove(&card_for_done);
+        overlay.remove(&scrim_for_done);
         for child in overlay.children() {
             if child.widget_name() == "site-card-scrim" {
                 overlay.remove(&child);
@@ -426,7 +468,7 @@ pub fn dismiss(app: &App) {
 
 /// A tab switch or a close takes the card only when it describes that tab.
 pub fn dismiss_tab(app: &App, tab: TabId) {
-    let mine = OPEN.with(|o| o.borrow().as_ref().is_some_and(|(id, _)| *id == tab));
+    let mine = OPEN.with(|o| o.borrow().as_ref().is_some_and(|open| open.tab == tab));
     if mine {
         dismiss(app);
     }
@@ -437,7 +479,7 @@ pub fn key(app: &App, event: &gtk::gdk::EventKey) -> bool {
     if event.keyval() != gtk::gdk::keys::constants::Escape {
         return false;
     }
-    let showing = OPEN.with(|o| o.borrow().as_ref().is_some_and(|(_, card)| card.is_visible()));
+    let showing = OPEN.with(|o| o.borrow().as_ref().is_some_and(|open| open.card.is_visible()));
     if !showing {
         return false;
     }
@@ -685,7 +727,6 @@ fn add_rows(card: &gtk::Box, tab: TabId, model: &Model) {
         clear_note.set_line_wrap_mode(gtk::pango::WrapMode::WordChar);
         clear_note.set_max_width_chars(48);
         clear.set_halign(gtk::Align::Start);
-        clear_block.add(&clear_note);
         clear_block.add(&clear);
         card.add(&clear_block);
     }
@@ -797,6 +838,23 @@ mod tests {
     fn the_host_is_lower_case_and_has_no_port() {
         let model = build("https://Example.com:443/x?q=1", Some(F::empty()), &[], false, 1.0, Vec::new());
         assert_eq!(model.host, "example.com");
+    }
+
+    #[test]
+    fn hidden_toolbar_anchor_preserves_right_inset_on_wide_and_narrow_windows() {
+        let inset = crate::find::PAGE_INSET;
+        for overlay_width in [1500, 1180, 900] {
+            for card_width in [380, 416, 458] {
+                let left = hidden_toolbar_left(overlay_width, card_width);
+                assert_eq!(
+                    overlay_width - (left + card_width),
+                    inset,
+                    "right gap should equal PAGE_INSET ({inset}) at overlay={overlay_width}, card={card_width}"
+                );
+            }
+        }
+        // On a very tiny window, never push past the left inset.
+        assert_eq!(hidden_toolbar_left(300, 416), inset);
     }
 
     #[test]

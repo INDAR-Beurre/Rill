@@ -1,0 +1,108 @@
+{
+  "candidate": "build/rill-spaces-f48",
+  "sha256": "63fe718bd69d81469e2f0b01ad351a96e2181c2eb919837877bea4e52b455521",
+  "release_status": "unreleased local preview",
+  "rust": {
+    "passed": 383,
+    "failed": 0,
+    "ignored": 2,
+    "release_build_warnings": 0
+  },
+  "integration": {
+    "backend": "X11 Openbox",
+    "passed": 145,
+    "failed": 0,
+    "coverage": [
+      "real keyboard layout switching",
+      "exclusive top tabs and sidebar after show_all",
+      "repeated spaces switching",
+      "blank pin and per-space active selection restart persistence",
+      "private tab exclusion",
+      "space deletion migration and Default safety"
+    ]
+  },
+  "native_wayland": {
+    "compositor": "headless Sway",
+    "passed": 30,
+    "failed": 0,
+    "input_method": "bench socket",
+    "coverage": [
+      "exclusive layouts",
+      "spaces and favicon pin selection",
+      "decoration layout",
+      "GTK warning checks"
+    ]
+  },
+  "control_sweep": {
+    "backend": "X11 Openbox",
+    "input_method": "real pointer and keyboard for Settings/window controls/import; widget activation for menu rows",
+    "passed": 29,
+    "failed": 0,
+    "coverage": [
+      "all three appearance, homepage shortcut, and decoration choices",
+      "toolbar, browsing, tabs, and suggestions switches",
+      "all six search engine choices",
+      "browser menu actions and zoom controls",
+      "bookmark bar show and hide",
+      "View Source and Print dialog cancellation",
+      "window maximize, minimize, restore, and close",
+      "first-run synthetic Chromium bookmark import"
+    ]
+  },
+  "focused_input_checks": {
+    "candidate_sha256": "63fe718bd69d81469e2f0b01ad351a96e2181c2eb919837877bea4e52b455521",
+    "stress": {
+      "backend": "X11 Openbox",
+      "passed": 158,
+      "failed": 0,
+      "idle_total_pss_mb": 161.1,
+      "idle_own_pss_mb": 99.0
+    },
+    "browser_menu_rows": {
+      "method": "real X11 pointer clicks, no widget emit_clicked",
+      "passed": 15,
+      "failed": 0
+    },
+    "settings_controls": {
+      "passed": 29,
+      "failed": 0,
+      "input_methods": [
+        "real pointer for switches and buttons",
+        "real pointer opens pickers with keyboard selection",
+        "real keyboard for View Source and Print"
+      ]
+    }
+  },
+  "screenshots": {
+    "count": 9,
+    "directory": "docs/screenshots/rill-f48",
+    "method": "unedited external X11 client-window capture",
+    "site_favicons": "cached while visiting Rust, Python, and Debian"
+  },
+  "media": {
+    "tested_candidate_sha256": "fddb9b16d80782f57048306109e5447892895d7f0124a0143c348d6100a57850",
+    "subsequent_changes": "bookmark-bar visibility and Peek test instrumentation; media engine unchanged",
+    "wikipedia": "passed",
+    "rust_website": "passed",
+    "youtube_without_video_decoders": "blocked by missing system GStreamer decoders",
+    "youtube_with_isolated_official_good_libav_plugins": {
+      "video": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+      "time_start_seconds": 1.891,
+      "time_end_seconds": 5.897,
+      "decoded_frame": [854, 480],
+      "paused": false,
+      "ready_state": 4,
+      "media_error": null
+    }
+  },
+  "unverified_environments": [
+    "KDE/KWin",
+    "Hyprland",
+    "Omarchy",
+    "other Linux distributions",
+    "physical printer output",
+    "native Wayland pointer input",
+    "hardware compositor motion smoothness"
+  ],
+  "production_certification": false
+}

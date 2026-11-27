@@ -145,8 +145,8 @@ impl Palette {
 }
 
 pub const FONT: &str =
-    "Inter, \"Adwaita Sans\", \"Noto Sans\", Cantarell, sans-serif";
-pub const MONO: &str = "\"SF Mono\", \"JetBrains Mono\", \"DejaVu Sans Mono\", monospace";
+    "\"Adwaita Sans\", \"Noto Sans\", Cantarell, Inter, sans-serif";
+pub const MONO: &str = "\"Adwaita Mono\", \"JetBrains Mono\", \"DejaVu Sans Mono\", monospace";
 
 #[cfg(test)]
 mod tests {

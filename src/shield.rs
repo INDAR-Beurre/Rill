@@ -120,11 +120,61 @@ fn ensure_rules_json() {
 
 /// How many rules a list holds.
 ///
-/// Every entry carries a `url-filter` trigger or a `selector` action, so
-/// counting both is the size of the list without parsing JSON in the launch
-/// path. The number is only ever reported, never used to decide anything.
+/// A WebKit content-blocker list is a JSON array of rule objects (each with a
+/// `trigger` and an `action`). Counting top-level rule objects directly via
+/// `serde_json` without building a `Value` tree counts every rule once —
+/// including cosmetic rules carrying both `url-filter` and `selector` — and
+/// ignores matching text inside regex or selector strings.
 fn rule_count(json: &str) -> usize {
-    json.matches("\"url-filter\"").count() + json.matches("\"selector\"").count()
+    struct RuleObj;
+    impl<'de> serde::Deserialize<'de> for RuleObj {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct ObjVisitor;
+            impl<'de> serde::de::Visitor<'de> for ObjVisitor {
+                type Value = RuleObj;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a content-blocker rule object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Self::Value, A::Error> {
+                    while map
+                        .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                        .is_some()
+                    {}
+                    Ok(RuleObj)
+                }
+            }
+            deserializer.deserialize_map(ObjVisitor)
+        }
+    }
+    struct ArrayCount(usize);
+    impl<'de> serde::Deserialize<'de> for ArrayCount {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct SeqVisitor;
+            impl<'de> serde::de::Visitor<'de> for SeqVisitor {
+                type Value = ArrayCount;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a JSON array of rule objects")
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut count = 0usize;
+                    while seq.next_element::<RuleObj>()?.is_some() {
+                        count += 1;
+                    }
+                    Ok(ArrayCount(count))
+                }
+            }
+            deserializer.deserialize_seq(SeqVisitor)
+        }
+    }
+    serde_json::from_str::<ArrayCount>(json)
+        .map(|ArrayCount(n)| n)
+        .unwrap_or(0)
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -169,6 +219,23 @@ fn lists_key() -> String {
     format!("{hash:016x}")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Load,
+    Save,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotOutcome {
+    /// Another phase (fallback compile or in-flight load/compile) still owns
+    /// this list's terminal decision, so `done` must not advance yet.
+    Pending,
+    /// A compiled filter was delivered for this list.
+    Accepted,
+    /// Every phase attempted for this list finished without a usable filter.
+    Failed,
+}
+
 struct Slot {
     /// Whether answers about this list belong in `state()`. Only the first
     /// install of the session counts; later managers get the same filters.
@@ -180,6 +247,13 @@ struct Slot {
     /// How many callbacks have been registered for this list. A wait is for
     /// the answer to its own registration, not merely for any answer.
     registered: u64,
+    /// Whether a cached store load is currently in flight.
+    load_pending: bool,
+    /// Whether a compile/save call is currently in flight.
+    save_pending: bool,
+    /// Whether the fallback compile phase has been entered (so no further
+    /// attempt will be started after pending callbacks settle).
+    save_attempted: bool,
     /// A filter for it reached the manager.
     accepted: bool,
     /// Counted into `state()`, once, however many callbacks land on it.
@@ -193,6 +267,68 @@ struct Slot {
     /// The name this list is cached under, so a refusal can say which list was
     /// refused rather than which number it happened to be.
     ident: String,
+}
+
+impl Slot {
+    fn new(tally: bool, rules: usize, ident: String) -> Self {
+        Self {
+            tally,
+            answers: 0,
+            registered: 0,
+            load_pending: false,
+            save_pending: false,
+            save_attempted: false,
+            accepted: false,
+            counted: false,
+            rules_counted: 0,
+            rules,
+            ident,
+        }
+    }
+
+    fn on_load_start(&mut self) -> u64 {
+        self.load_pending = true;
+        self.registered += 1;
+        self.registered
+    }
+
+    fn on_save_start(&mut self) -> Option<u64> {
+        self.save_attempted = true;
+        if self.accepted {
+            return None;
+        }
+        self.save_pending = true;
+        self.registered += 1;
+        Some(self.registered)
+    }
+
+    fn on_save_sync_fail(&mut self) -> SlotOutcome {
+        self.save_attempted = true;
+        self.save_pending = false;
+        if !self.accepted && !self.load_pending {
+            SlotOutcome::Failed
+        } else {
+            SlotOutcome::Pending
+        }
+    }
+
+    fn on_callback(&mut self, phase: Phase, ok: bool) -> (bool, SlotOutcome) {
+        self.answers += 1;
+        match phase {
+            Phase::Load => self.load_pending = false,
+            Phase::Save => self.save_pending = false,
+        }
+        if ok {
+            let fresh = !self.accepted;
+            self.accepted = true;
+            return (fresh, SlotOutcome::Accepted);
+        }
+        if !self.accepted && self.save_attempted && !self.load_pending && !self.save_pending {
+            (false, SlotOutcome::Failed)
+        } else {
+            (false, SlotOutcome::Pending)
+        }
+    }
 }
 
 /// What a pending callback needs: the slot it fills in, and the manager that
@@ -265,30 +401,30 @@ fn count(slot: &Mutex<Slot>, accepted: bool) {
     maybe_warn_failed();
 }
 
-/// Report a finished list, hand its filter to the manager, and free the
-/// hand-off.
+fn apply_outcome(slot: &Mutex<Slot>, outcome: SlotOutcome) {
+    match outcome {
+        SlotOutcome::Pending => {}
+        SlotOutcome::Accepted => count(slot, true),
+        SlotOutcome::Failed => count(slot, false),
+    }
+}
+
+/// Report a finished callback, hand any filter to the manager, update `state()`
+/// only on terminal outcomes, and free the hand-off.
 ///
 /// This is the only place a filter is applied, so a list that is still
 /// compiling when the launch budget runs out is applied when it lands rather
 /// than dropped: the window appearing and the shield working are separate
 /// promises, and this is the second one being kept.
-unsafe fn delivered(data: *mut c_void, filter: *mut ffi::WebKitUserContentFilter) {
+unsafe fn delivered(
+    data: *mut c_void,
+    filter: *mut ffi::WebKitUserContentFilter,
+    phase: Phase,
+) {
     let slot = (*data.cast::<Handoff>()).0.clone();
     let manager = (*data.cast::<Handoff>()).1;
-    let fresh = {
-        let mut s = slot_guard(&slot);
-        s.answers += 1;
-        let fresh = !filter.is_null() && !s.accepted;
-        if !filter.is_null() {
-            s.accepted = true;
-        }
-        fresh
-    };
-    if filter.is_null() {
-        // A miss, or a list WebKit refused. Counted, and counted once: a hit
-        // arriving later replaces the zero with the list's real rule count.
-        count(&slot, false);
-    } else {
+    let (fresh, outcome) = slot_guard(&slot).on_callback(phase, !filter.is_null());
+    if !filter.is_null() {
         // A load and a compile can both answer for one list. The manager takes
         // its own reference, so this one is given back either way; adding the
         // same filter twice would be the same rules paid for twice in memory.
@@ -301,8 +437,11 @@ unsafe fn delivered(data: *mut c_void, filter: *mut ffi::WebKitUserContentFilter
         // every compile. Found with G_DEBUG=fatal-criticals and a backtrace
         // that named this line; the boxed free is the one the type asks for.
         ffi::webkit_user_content_filter_unref(filter);
-        count(&slot, true);
     }
+    // A cache miss on `Phase::Load` before fallback compile finishes is
+    // `SlotOutcome::Pending`, so `done` never reaches `lists` while compiles
+    // are still running in the background.
+    apply_outcome(&slot, outcome);
     release(data);
 }
 
@@ -347,7 +486,7 @@ unsafe extern "C" fn saved(
         }
         glib_ffi::g_error_free(err);
     }
-    delivered(data, filter);
+    delivered(data, filter, Phase::Save);
 }
 
 unsafe extern "C" fn loaded(
@@ -366,7 +505,7 @@ unsafe extern "C" fn loaded(
         // here, and the caller compiles it now.
         glib_ffi::g_error_free(err);
     }
-    delivered(data, filter);
+    delivered(data, filter, Phase::Load);
 }
 
 /// The whole launch's budget for waiting on the store, in milliseconds.
@@ -385,13 +524,6 @@ const LOAD_LIMIT_MS: u64 = 250;
 
 /// How long a launch waits for a first compile.
 const SAVE_LIMIT_MS: u64 = 400;
-
-/// The answer number a callback registered now will produce.
-fn register(slot: &Mutex<Slot>) -> u64 {
-    let mut s = slot_guard(slot);
-    s.registered += 1;
-    s.registered
-}
 
 /// Wait for the next answer about this list, but never hold the loop for
 /// longer than the caller allows. The list is never dropped by a timeout: the
@@ -481,16 +613,7 @@ pub fn install(manager: &webkit2gtk::UserContentManager) -> bool {
         // The store key is this list's own bytes, so a hit can only ever be a
         // filter compiled from exactly these rules.
         let ident = list_ident(index, json);
-        let slot = Arc::new(Mutex::new(Slot {
-            tally,
-            answers: 0,
-            registered: 0,
-            accepted: false,
-            counted: false,
-            rules_counted: 0,
-            rules: rule_count(json),
-            ident: ident.clone(),
-        }));
+        let slot = Arc::new(Mutex::new(Slot::new(tally, rule_count(json), ident.clone())));
         let ready = match load_one(&store_path, &ident, &slot, manager, budget(stop, LOAD_LIMIT_MS)) {
             Some(true) => true,
             Some(false) => save_one(&store_path, &ident, json, &slot, manager, budget(stop, SAVE_LIMIT_MS))
@@ -537,8 +660,7 @@ fn load_one(
         return Some(false);
     };
     let data = hand_off(slot, manager)?;
-    let target = register(slot);
-    unsafe {
+    let target = unsafe {
         let store = ffi::webkit_user_content_filter_store_new(store_path.as_ptr());
         if store.is_null() {
             // Nothing was registered: the pins go back, and the caller falls
@@ -546,6 +668,7 @@ fn load_one(
             release(data);
             return Some(false);
         }
+        let target = slot_guard(slot).on_load_start();
         ffi::webkit_user_content_filter_store_load(
             store,
             ident.as_ptr(),
@@ -554,7 +677,8 @@ fn load_one(
             data,
         );
         gobject_ffi::g_object_unref(store as *mut gobject_ffi::GObject);
-    }
+        target
+    };
     wait_for(slot, target, wait);
     let s = slot_guard(slot);
     if s.accepted {
@@ -579,25 +703,37 @@ fn save_one(
     manager: &webkit2gtk::UserContentManager,
     wait: Duration,
 ) -> Option<bool> {
+    if slot_guard(slot).accepted {
+        slot_guard(slot).save_attempted = true;
+        return Some(true);
+    }
     let Ok(ident) = CString::new(ident) else {
-        count(slot, false);
+        let outcome = slot_guard(slot).on_save_sync_fail();
+        apply_outcome(slot, outcome);
         return Some(false);
     };
     let Some(data) = hand_off(slot, manager) else {
-        count(slot, false);
+        let outcome = slot_guard(slot).on_save_sync_fail();
+        apply_outcome(slot, outcome);
         return Some(false);
     };
-    let target = register(slot);
     let bytes = glib::Bytes::from(json.as_bytes());
-    unsafe {
+    let target = unsafe {
         let store = ffi::webkit_user_content_filter_store_new(store_path.as_ptr());
         if store.is_null() {
-            // Nothing will call back: give the pins back and say so once, from
-            // the caller, rather than twice from here.
+            // Nothing will call back: give the pins back and mark terminal
+            // failure if no store load is still in flight.
             release(data);
-            count(slot, false);
+            let outcome = slot_guard(slot).on_save_sync_fail();
+            apply_outcome(slot, outcome);
             return Some(false);
         }
+        let Some(target) = slot_guard(slot).on_save_start() else {
+            // The cached store load succeeded before compile started.
+            release(data);
+            gobject_ffi::g_object_unref(store as *mut gobject_ffi::GObject);
+            return Some(true);
+        };
         ffi::webkit_user_content_filter_store_save(
             store,
             ident.as_ptr(),
@@ -607,7 +743,8 @@ fn save_one(
             data,
         );
         gobject_ffi::g_object_unref(store as *mut gobject_ffi::GObject);
-    }
+        target
+    };
 
     // A list of tens of thousands of rules takes longer than a hand-written
     // one to compile. This happens once per profile, and even then the loop is
@@ -654,11 +791,59 @@ pub fn is_allowed(host: &str) -> bool {
 }
 
 /// A tiny host helper: "news.ycombinator.com" from any address.
+/// Preserves bracketed IPv6 literals (`[::1]`, `[2001:db8::1]`), strips
+/// userinfo and port, and fails safely to an empty string on malformed
+/// authorities.
 pub fn host_of(url: &str) -> String {
-    let rest = url.split("://").nth(1).unwrap_or(url);
-    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let host = host.rsplit('@').next().unwrap_or(host);
-    host.split(':').next().unwrap_or(host).to_lowercase()
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let (has_scheme, rest) = match trimmed.split_once("://") {
+        Some((_, after)) => (true, after),
+        None => (false, trimmed),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    if host_port.is_empty() {
+        return String::new();
+    }
+    if host_port.starts_with('[') {
+        let Some(end) = host_port.find(']') else {
+            return String::new();
+        };
+        let inner = &host_port[1..end];
+        let after = &host_port[end + 1..];
+        let valid_after = after.is_empty()
+            || (after.starts_with(':')
+                && after.len() > 1
+                && after[1..].chars().all(|c| c.is_ascii_digit()));
+        if !valid_after
+            || inner.is_empty()
+            || !inner.contains(':')
+            || !inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return String::new();
+        }
+        return host_port[..=end].to_ascii_lowercase();
+    }
+    if host_port.contains('[') || host_port.contains(']') {
+        return String::new();
+    }
+    let host = if let Some((host, port)) = host_port.split_once(':') {
+        if has_scheme && (port.is_empty() || !port.chars().all(|c| c.is_ascii_digit())) {
+            return String::new();
+        }
+        host
+    } else {
+        host_port
+    };
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return String::new();
+    }
+    host.to_lowercase()
 }
 
 /// The path and query after the host, for telling same-site tabs apart and
@@ -744,28 +929,163 @@ mod tests {
     }
 
     #[test]
-    fn a_rule_is_counted_by_the_key_it_is_written_with() {
+    fn a_rule_is_counted_once_per_rule_object() {
         assert_eq!(rule_count(""), 0);
+        assert_eq!(rule_count("{}"), 0);
+        assert_eq!(rule_count(r#"["url-filter","url-filter","selector"]"#), 0);
         assert_eq!(
             rule_count(r#"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}}]"#),
             1
         );
-        // One entry with both a trigger and a selector is one rule, but the
-        // count reports what the list holds, so both mentions count. The
-        // numbers are large; the point is that they are not zero.
+        // A cosmetic rule carries both `url-filter` and `selector` inside one
+        // rule object and must be counted once, not twice.
         assert_eq!(
             rule_count(
                 r#"[{"trigger":{"url-filter":".*"},"action":{"type":"css-display-none","selector":"a"}}]"#
             ),
-            2
+            1
         );
-        assert_eq!(rule_count(r#"["url-filter","url-filter","selector"]"#), 3);
+        // Key-like text inside regex or selector strings must not inflate count.
+        assert_eq!(
+            rule_count(
+                r#"[{"trigger":{"url-filter":"\"url-filter\""}, "action":{"type":"css-display-none","selector":"[data-k=\"selector\"][data-t=\"trigger\"]"}}]"#
+            ),
+            1
+        );
+        assert_eq!(
+            rule_count(
+                r#"[
+                    {"trigger":{"url-filter":"a"},"action":{"type":"block"}},
+                    {"trigger":{"url-filter":".*"},"action":{"type":"css-display-none","selector":".ad"}},
+                    {"trigger":{"url-filter":"b"},"action":{"type":"block"}}
+                ]"#
+            ),
+            3
+        );
     }
 
     #[test]
-    fn the_shield_reports_the_rules_its_lists_hold() {
-        let total: usize = rules().iter().map(|json| rule_count(json)).sum();
-        assert!(total > 2000, "the shield would report only {total} rules");
+    fn the_shield_reports_the_exact_rules_its_lists_hold() {
+        let mut parsed_total = 0usize;
+        let mut counted_total = 0usize;
+        for (index, json) in rules().iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_str(json)
+                .unwrap_or_else(|error| panic!("list {index} does not parse: {error}"));
+            let actual = parsed.as_array().map(|a| a.len()).unwrap_or(0);
+            let counted = rule_count(json);
+            assert_eq!(counted, actual, "list {index} count mismatch");
+            parsed_total += actual;
+            counted_total += counted;
+        }
+        assert_eq!(counted_total, parsed_total);
+        assert_eq!(counted_total, 15_775);
+    }
+
+    #[test]
+    fn cache_miss_never_marks_list_finished_before_compile_outcome() {
+        // Fresh-profile sequence: all 3 lists miss the compiled store, then
+        // compile asynchronously. `done` must stay 0 across all 3 cache misses,
+        // rise to 2 when 2 lists finish compiling (never finished=3 with
+        // partial rules), and reach (3, 3, 15_775) only once the 3rd compiles.
+        let counts = [1usize, 1_774, 14_000];
+        let slots: Vec<Mutex<Slot>> = counts
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| Mutex::new(Slot::new(true, n, format!("list-{i}"))))
+            .collect();
+
+        SHIELD_STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            st.lists = slots.len();
+            st.done = 0;
+            st.compiled = 0;
+        });
+
+        for slot in &slots {
+            assert_eq!(slot_guard(slot).on_load_start(), 1);
+            let (fresh, outcome) = slot_guard(slot).on_callback(Phase::Load, false);
+            assert!(!fresh);
+            assert_eq!(outcome, SlotOutcome::Pending);
+            apply_outcome(slot, outcome);
+            assert_eq!(slot_guard(slot).on_save_start(), Some(2));
+        }
+        assert_eq!(state(), (3, 0, 0));
+        assert!(!should_warn_failed(3, 0, 0));
+
+        // Lists 0 and 2 finish compiling while list 1 is still compiling.
+        for &idx in &[0usize, 2usize] {
+            let (fresh, outcome) = slot_guard(&slots[idx]).on_callback(Phase::Save, true);
+            assert!(fresh);
+            assert_eq!(outcome, SlotOutcome::Accepted);
+            apply_outcome(&slots[idx], outcome);
+        }
+        assert_eq!(state(), (3, 2, 14_001));
+
+        // List 1 finishes compiling: now all 3 are done with the full 15,775 rules.
+        let (fresh, outcome) = slot_guard(&slots[1]).on_callback(Phase::Save, true);
+        assert!(fresh);
+        assert_eq!(outcome, SlotOutcome::Accepted);
+        apply_outcome(&slots[1], outcome);
+        assert_eq!(state(), (3, 3, 15_775));
+    }
+
+    #[test]
+    fn overlapping_load_timeout_and_compile_interleavings_finish_terminally_once() {
+        // 1. Load times out, save starts, load misses while save is pending -> Pending,
+        //    then save fails -> Failed.
+        let mut s = Slot::new(true, 100, "a".into());
+        assert_eq!(s.on_load_start(), 1);
+        assert_eq!(s.on_save_start(), Some(2));
+        assert_eq!(s.on_callback(Phase::Load, false), (false, SlotOutcome::Pending));
+        assert_eq!(s.on_callback(Phase::Save, false), (false, SlotOutcome::Failed));
+
+        // 2. Load times out, save starts, save fails while load is still pending -> Pending,
+        //    then late load succeeds -> Accepted (fresh).
+        let mut s = Slot::new(true, 100, "b".into());
+        assert_eq!(s.on_load_start(), 1);
+        assert_eq!(s.on_save_start(), Some(2));
+        assert_eq!(s.on_callback(Phase::Save, false), (false, SlotOutcome::Pending));
+        assert_eq!(s.on_callback(Phase::Load, true), (true, SlotOutcome::Accepted));
+
+        // 3. Load times out, save starts, save fails while load is pending -> Pending,
+        //    then late load also misses -> Failed.
+        let mut s = Slot::new(true, 100, "c".into());
+        assert_eq!(s.on_load_start(), 1);
+        assert_eq!(s.on_save_start(), Some(2));
+        assert_eq!(s.on_callback(Phase::Save, false), (false, SlotOutcome::Pending));
+        assert_eq!(s.on_callback(Phase::Load, false), (false, SlotOutcome::Failed));
+
+        // 4. Both load and save succeed -> only the first filter is `fresh`,
+        //    and rules/done are counted once.
+        let slot = Mutex::new(Slot::new(true, 1_774, "d".into()));
+        SHIELD_STATE.with(|st| {
+            let mut st = st.borrow_mut();
+            st.lists = 1;
+            st.done = 0;
+            st.compiled = 0;
+        });
+        assert_eq!(slot_guard(&slot).on_load_start(), 1);
+        assert_eq!(slot_guard(&slot).on_save_start(), Some(2));
+        let (f1, o1) = slot_guard(&slot).on_callback(Phase::Load, true);
+        assert!(f1);
+        apply_outcome(&slot, o1);
+        let (f2, o2) = slot_guard(&slot).on_callback(Phase::Save, true);
+        assert!(!f2);
+        apply_outcome(&slot, o2);
+        assert_eq!(state(), (1, 1, 1_774));
+
+        // 5. Load times out, save fails synchronously while load is pending -> Pending,
+        //    then late load misses -> Failed.
+        let mut s = Slot::new(true, 100, "e".into());
+        assert_eq!(s.on_load_start(), 1);
+        assert_eq!(s.on_save_sync_fail(), SlotOutcome::Pending);
+        assert_eq!(s.on_callback(Phase::Load, false), (false, SlotOutcome::Failed));
+
+        // 6. Load misses immediately, then save fails synchronously -> Failed immediately.
+        let mut s = Slot::new(true, 100, "f".into());
+        assert_eq!(s.on_load_start(), 1);
+        assert_eq!(s.on_callback(Phase::Load, false), (false, SlotOutcome::Pending));
+        assert_eq!(s.on_save_sync_fail(), SlotOutcome::Failed);
     }
 
     #[test]
@@ -785,6 +1105,40 @@ mod tests {
         assert_eq!(host_of("http://127.0.0.1:8099/plain?x=1"), "127.0.0.1");
         assert_eq!(host_of("https://user:pw@example.com:443/x"), "example.com");
         assert_eq!(host_of("example.com/path"), "example.com");
+        assert_eq!(host_of("http://[::1]:8080/p"), "[::1]");
+        assert_eq!(host_of("https://[2001:DB8::1]/"), "[2001:db8::1]");
+        assert_eq!(
+            host_of("https://user:pw@[2001:DB8::1]:8443/a?b=1#c"),
+            "[2001:db8::1]"
+        );
+        assert_eq!(
+            host_of("http://[::ffff:127.0.0.1]:8080/x"),
+            "[::ffff:127.0.0.1]"
+        );
+        assert_eq!(host_of("[::1]:8080"), "[::1]");
+        assert_eq!(host_of("file:///tmp/x.html"), "");
+        assert_eq!(host_of(""), "");
+        for malformed in [
+            "http://[::1/p",
+            "http://[]/p",
+            "http://[]:8080/p",
+            "http://[::1]evil.com/p",
+            "http://[::1]:/p",
+            "http://[::1]:abc/p",
+            "http://[::1]:80:90/p",
+            "http://[example.com]/p",
+            "http://[::1*]/p",
+            "http://::1/p",
+            "http://2001:db8::1/p",
+            "http://example.com:abc/p",
+            "http://example.com:/p",
+            "http://foo]bar/p",
+            "http://a[b]/p",
+            "http://user@:8080/p",
+            "http://exa mple.com/p",
+        ] {
+            assert_eq!(host_of(malformed), "", "malformed authority {malformed:?} must fail safely");
+        }
     }
 
     #[test]

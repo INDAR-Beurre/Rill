@@ -39,6 +39,10 @@ pub fn is_peek_view(view: &WebView) -> bool {
     view.widget_name() == PEEK_VIEW
 }
 
+pub fn is_open() -> bool {
+    PEEK.with(|p| p.borrow().is_some())
+}
+
 /// Keep makes a tab with the flag of the tab the peek came from. A tab that
 /// cannot be found counts as private, the same safe default the rest uses.
 pub fn keep_private(source: Option<bool>) -> bool {
@@ -81,7 +85,9 @@ struct Peek {
     tab: TabId,
     private: bool,
     card: gtk::Box,
+    view_holder: gtk::Overlay,
     scrim: gtk::DrawingArea,
+    scrim_alpha: std::rc::Rc<std::cell::Cell<f64>>,
     view: WebView,
     /// The peek's own refusal handlers, disconnected when Keep makes it a tab.
     handlers: Vec<SignalHandlerId>,
@@ -89,6 +95,26 @@ struct Peek {
 
 thread_local! {
     static PEEK: RefCell<Option<Peek>> = const { RefCell::new(None) };
+    /// Cards/scrims currently running their EXIT fade-out after `dismiss()`.
+    /// Tracked so a mid-flight reopen, tab switch, or teardown can cancel and
+    /// remove them immediately without leaving orphan widgets on the overlay.
+    static RETIRING: RefCell<Vec<(gtk::Box, gtk::DrawingArea)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn remove_from_overlay(overlay: &gtk::Overlay, widget: &impl IsA<gtk::Widget>) {
+    if widget.parent().as_ref() == Some(overlay.upcast_ref::<gtk::Widget>()) {
+        overlay.remove(widget);
+    }
+}
+
+fn flush_retiring(app: &App) {
+    let retiring: Vec<_> = RETIRING.with(|r| r.borrow_mut().drain(..).collect());
+    for (card, scrim) in retiring {
+        crate::motion::cancel(&card);
+        crate::motion::cancel(&scrim);
+        remove_from_overlay(&app.ui.overlay, &card);
+        remove_from_overlay(&app.ui.overlay, &scrim);
+    }
 }
 
 fn take() -> Option<Peek> {
@@ -101,7 +127,11 @@ pub(crate) fn showing() -> bool {
 
 fn page_left(app: &App) -> i32 {
     if app.ui.side.is_visible() && app.ui.side.is_child_visible() {
-        app.ui.side.allocated_width().max(0)
+        app.ui
+            .stack
+            .translate_coordinates(&app.ui.overlay, 0, 0)
+            .map(|(x, _)| x.max(0))
+            .unwrap_or_else(|| app.ui.side.allocated_width().max(0))
     } else {
         0
     }
@@ -132,8 +162,9 @@ pub fn relayout(app: &App) {
 /// Takes the peek down: the card leaves the page and its view is destroyed.
 fn remove(app: &App, peek: Peek) -> String {
     crate::motion::cancel(&peek.card);
-    app.ui.overlay.remove(&peek.card);
-    app.ui.overlay.remove(&peek.scrim);
+    crate::motion::cancel(&peek.scrim);
+    remove_from_overlay(&app.ui.overlay, &peek.card);
+    remove_from_overlay(&app.ui.overlay, &peek.scrim);
     let uri = peek.view.uri().map(|u| u.to_string()).unwrap_or_default();
     // SAFETY: the view has just left its container and nothing else holds it
     // beyond this scope. close_tab destroys its views the same way.
@@ -148,6 +179,7 @@ pub fn clear_for(app: &App, tab: TabId) {
             remove(app, peek);
         }
     }
+    flush_retiring(app);
 }
 
 /// Drops whatever peek is open, on a tab switch.
@@ -155,6 +187,7 @@ pub fn clear(app: &App) {
     if let Some(peek) = take() {
         remove(app, peek);
     }
+    flush_retiring(app);
 }
 
 pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
@@ -178,13 +211,29 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
     view.set_widget_name(PEEK_VIEW);
     view.set_hexpand(true);
     view.set_vexpand(true);
-    view.set_margin_start(1);
-    view.set_margin_end(1);
-    view.set_margin_bottom(4);
     let page = if app.prefs.borrow().darken_pages { (0.043, 0.043, 0.043) } else { (1.0, 1.0, 1.0) };
     view.set_background_color(&gtk::gdk::RGBA::new(page.0, page.1, page.2, 1.0));
     app.tone_for(&view);
     let handlers = connect_refusals(&view);
+
+    let view_holder = gtk::Overlay::new();
+    view_holder.set_hexpand(true);
+    view_holder.set_vexpand(true);
+    view_holder.set_margin_start(8);
+    view_holder.set_margin_end(8);
+    view_holder.set_margin_top(4);
+    view_holder.set_margin_bottom(8);
+    view_holder.add(&view);
+    let peek_palette = *app.palette.borrow();
+    let peek_corner_colors =
+        std::rc::Rc::new(std::cell::Cell::new((peek_palette.surface(), peek_palette.hairline)));
+    let _ = crate::ui::attach_corner_masks(
+        &view_holder,
+        8.0,
+        false,
+        peek_corner_colors,
+        "peek-corner",
+    );
 
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
     card.set_widget_name(PEEK_CARD);
@@ -217,9 +266,9 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     crate::ui::class(&header, "peek-header");
     header.set_margin_start(12);
-    header.set_margin_end(8);
-    header.set_margin_top(6);
-    header.set_margin_bottom(6);
+    header.set_margin_end(12);
+    header.set_margin_top(8);
+    header.set_margin_bottom(8);
     let host = gtk::Label::new(Some(&crate::shield::host_of(url)));
     host.set_xalign(0.0);
     host.set_hexpand(true);
@@ -233,7 +282,7 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
     crate::ui::class(&close, "act");
     crate::ui::pack(&header, &close, false);
     crate::ui::pack(&card, &header, false);
-    crate::ui::pack(&card, &view, true);
+    crate::ui::pack(&card, &view_holder, true);
 
     let weak = app.weak();
     keep.connect_clicked(move |_| {
@@ -250,22 +299,31 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
 
     // A peek is a preview over the page, not another floating page. A dimmed
     // backdrop separates the card from the article and gives Close a target.
-    let scrim = crate::ui::scrim(&app.palette.borrow());
+    let (scrim, scrim_alpha) = crate::ui::scrim_with_alpha(&app.palette.borrow());
     scrim.set_widget_name("peek-scrim");
+    {
+        let weak = app.weak();
+        scrim.connect_button_press_event(move |_, _| {
+            if let Some(app) = weak.upgrade() {
+                dismiss(&app);
+            }
+            crate::gtkx::inh(true)
+        });
+    }
     app.ui.overlay.add_overlay(&scrim);
     scrim.set_hexpand(true);
     scrim.set_vexpand(true);
     app.ui.overlay.add_overlay(&card);
     card.show_all();
     scrim.show_all();
-    // The peek card arrives on the shared entrance role (180ms) and travels
-    // the shared 8px, the same as every other card, instead of its own
-    // 18px and 190ms.
+    // Fade the scrim and pop the card on the shared ENTER role (180ms, 8px
+    // travel), consistent with panels and the site card.
+    crate::motion::fade_alpha(&scrim, &scrim_alpha, crate::motion::dur::ENTER);
     crate::motion::pop_card_in(&card, top, crate::motion::dur::TRAVEL, crate::motion::dur::ENTER);
     keep.grab_focus();
     view.load_uri(url);
     PEEK.with(|p| {
-        *p.borrow_mut() = Some(Peek { tab, private, card, scrim, view, handlers });
+        *p.borrow_mut() = Some(Peek { tab, private, card, view_holder, scrim, scrim_alpha, view, handlers });
     });
 }
 
@@ -317,33 +375,48 @@ fn connect_refusals(view: &WebView) -> Vec<SignalHandlerId> {
 fn dismiss(app: &App) {
     let Some(peek) = take() else { return };
     crate::motion::cancel(&peek.card);
+    crate::motion::cancel(&peek.scrim);
     crate::permissions::focus_page(app);
     let overlay = app.ui.overlay.clone();
-    let Peek { card, scrim, view, .. } = peek;
+    let Peek { card, view_holder, scrim, scrim_alpha, view, .. } = peek;
     // Retire the page now, not after the fade. A dismissed peek must not keep
     // loading, running script or holding its WebView for the EXIT fade. The
     // card keeps its current size, so the header and frame fade out without
     // collapsing around the missing page.
     view.stop_loading();
     card.set_size_request(card.allocated_width(), card.allocated_height());
-    card.remove(&view);
+    view_holder.remove(&view);
     // SAFETY: the view has just left its container and nothing else holds it
     // beyond this scope. close_tab destroys its views the same way.
     unsafe { view.destroy() };
     drop(view);
+    // Register the retiring pair so an immediate reopen or tab teardown can
+    // cancel and remove both widgets without leaving an orphan scrim or card.
+    RETIRING.with(|r| r.borrow_mut().push((card.clone(), scrim.clone())));
     // The completion holds only weak handles, so a cancelled fade or another
     // teardown does not keep the card or the overlay alive.
     let card_weak = card.downgrade();
     let overlay_weak = overlay.downgrade();
     let scrim_weak = scrim.downgrade();
+    crate::motion::fade_alpha_out(&scrim, &scrim_alpha, crate::motion::dur::EXIT);
     crate::motion::fade_out_then(&card, crate::motion::dur::EXIT, move || {
-        if let (Some(overlay), Some(card), Some(scrim)) = (
-            overlay_weak.upgrade(),
-            card_weak.upgrade(),
-            scrim_weak.upgrade(),
-        ) {
-            overlay.remove(&card);
-            overlay.remove(&scrim);
+        let upgraded_card = card_weak.upgrade();
+        let upgraded_scrim = scrim_weak.upgrade();
+        let _ = RETIRING.try_with(|r| {
+            r.borrow_mut().retain(|(c, s)| {
+                let same_card = upgraded_card.as_ref().is_some_and(|uc| uc == c);
+                let same_scrim = upgraded_scrim.as_ref().is_some_and(|us| us == s);
+                !(same_card && same_scrim)
+            });
+        });
+        if let Some(overlay) = overlay_weak.upgrade() {
+            if let Some(card) = upgraded_card {
+                remove_from_overlay(&overlay, &card);
+            }
+            if let Some(scrim) = upgraded_scrim {
+                crate::motion::cancel(&scrim);
+                remove_from_overlay(&overlay, &scrim);
+            }
         }
     });
 }
@@ -354,15 +427,18 @@ fn dismiss(app: &App) {
 /// callbacks. The page is not loaded again.
 fn keep_peek(app: &AppRef) {
     let Some(peek) = take() else { return };
-    let Peek { private, card, scrim, view, handlers, .. } = peek;
+    let Peek { private, card, view_holder, scrim, view, handlers, .. } = peek;
     crate::motion::cancel(&card);
+    crate::motion::cancel(&scrim);
     let url = view.uri().map(|u| u.to_string()).unwrap_or_default();
-    card.remove(&view);
+    view_holder.remove(&view);
     view.set_margin_start(0);
     view.set_margin_end(0);
+    view.set_margin_top(0);
     view.set_margin_bottom(0);
-    app.ui.overlay.remove(&card);
-    app.ui.overlay.remove(&scrim);
+    remove_from_overlay(&app.ui.overlay, &card);
+    remove_from_overlay(&app.ui.overlay, &scrim);
+    flush_retiring(app);
     for id in handlers {
         view.disconnect(id);
     }
@@ -483,5 +559,16 @@ mod tests {
         // A window too small for the floor never gets negative margins.
         let (start, end, top, bottom) = card_margins(100, 100, 23, 40);
         assert!(start >= 40 && end >= 0 && bottom >= 0 && top >= 23);
+    }
+
+    #[test]
+    fn consistent_page_left_keeps_open_and_relayout_margins_identical() {
+        // With a 260px sidebar + 1px GtkPaned divider (page_left = 261), using
+        // identical page_left for open() and relayout() prevents a 1px horizontal jump.
+        let a = card_margins(1500, 918, 0, 261);
+        let b = card_margins(1500, 918, 0, 261);
+        let drifted = card_margins(1500, 918, 0, 260);
+        assert_eq!(a, b);
+        assert_ne!(a.0, drifted.0, "a 1px page_left mismatch shifts card start margin");
     }
 }

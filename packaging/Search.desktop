@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Search
+Name=Rill
 GenericName=Web Browser
-Comment=A small, quiet vertical-tab browser for Linux
-Exec=search %u
+Comment=A small, quiet native WebKit browser for Linux
+Exec=search --url %u
 Icon=search
 Terminal=false
 Categories=Network;WebBrowser;

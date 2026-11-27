@@ -4,10 +4,11 @@ use crate::app::{App, AppRef, TabId};
 use crate::layer::Layer;
 use crate::palette::Palette;
 use gtk::prelude::*;
+use webkit2gtk::WebViewExt;
 
-pub const FIELD_WIDTH: i32 = 720;
-const FIELD_HEIGHT: i32 = 64;
-const FOOTER_HEIGHT: i32 = 34;
+pub const FIELD_WIDTH: i32 = 640;
+const FIELD_HEIGHT: i32 = 52;
+const FOOTER_HEIGHT: i32 = 32;
 
 /// Field width clamped to the available page width on narrow windows.
 fn field_width_for(page: i32) -> i32 {
@@ -24,6 +25,148 @@ const LIST_RESERVE: i32 = 359;
 /// The highest the field may stand, so its top edge never reaches the lights.
 const TOP_MIN: i32 = 96;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChipKind {
+    /// Active page over verified HTTPS (`!failed && Security::Secure`): accent Lock.
+    VerifiedHttps,
+    /// Active page with failure / plain HTTP / bad or missing TLS, or explicit `http://`:
+    /// danger ShieldAlert with `.insecure`.
+    Insecure,
+    /// Explicit typed/unvisited destination (bare host or `https://` not verified on
+    /// this tab): neutral Globe, never a false verified Lock.
+    Destination,
+}
+
+impl ChipKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ChipKind::VerifiedHttps => "verified",
+            ChipKind::Insecure => "insecure",
+            ChipKind::Destination => "destination",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChipModel {
+    host: String,
+    kind: ChipKind,
+}
+
+/// Security chip for the page currently open in the active tab.
+/// Derived strictly from `tab.failed` and `sitecard::security(url, tls)`, never
+/// from the URL prefix alone.
+fn active_page_chip(
+    url: &str,
+    failed: bool,
+    tls: Option<gtk::gio::TlsCertificateFlags>,
+) -> Option<ChipModel> {
+    let host = chip_host(url);
+    if host.is_empty() {
+        return None;
+    }
+    let kind = match (failed, crate::sitecard::security(url, tls)) {
+        (false, crate::sitecard::Security::Secure) => ChipKind::VerifiedHttps,
+        (true, _)
+        | (
+            _,
+            crate::sitecard::Security::Plain
+            | crate::sitecard::Security::Problem(_)
+            | crate::sitecard::Security::Unknown,
+        ) => ChipKind::Insecure,
+        (false, crate::sitecard::Security::NotWeb) => ChipKind::Destination,
+    };
+    Some(ChipModel { host, kind })
+}
+
+/// Whether `typed` names an explicit destination (scheme URL or bare host) rather
+/// than a search query or tab-switch keyword.
+fn explicit_destination(typed: &str) -> Option<String> {
+    let trimmed = typed.trim();
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("about:") || lower.starts_with("file:") {
+        return None;
+    }
+    if trimmed.contains("://") {
+        let (scheme, _, _) = split_url(trimmed)?;
+        if !scheme.eq_ignore_ascii_case("http://") && !scheme.eq_ignore_ascii_case("https://") {
+            return None;
+        }
+        return Some(trimmed.to_string());
+    }
+    // Reject non-HTTP(S) opaque schemes such as `javascript:alert(a.b)` or
+    // `data:text/html,a.b` while still allowing host:port (e.g. `localhost:8080/x`)
+    // and paths containing colons (e.g. `example.com/wiki/Category:Rust`).
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        if looks_like_a_scheme(prefix) {
+            let port_part = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            let is_port = !port_part.is_empty() && port_part.chars().all(|c| c.is_ascii_digit());
+            if !is_port {
+                return None;
+            }
+        }
+    }
+    let hostlike = trimmed.contains('.')
+        || trimmed.starts_with("localhost")
+        || trimmed.starts_with("127.0.0.1");
+    if hostlike {
+        Some(format!("https://{trimmed}"))
+    } else {
+        None
+    }
+}
+
+fn same_origin_authority(a: &str, b: &str) -> bool {
+    match (split_url(a), split_url(b)) {
+        (Some((sa, aa, _)), Some((sb, ab, _))) => {
+            sa.eq_ignore_ascii_case(sb) && aa.eq_ignore_ascii_case(ab)
+        }
+        _ => false,
+    }
+}
+
+/// Chip shown for text currently typed in the omnibox.
+/// - Plain searches / tab-switch words (`"office"`, `"two words"`, `"yt cats"`)
+///   and empty text get `None` (never a search engine's host or lock).
+/// - Paths starting with `/` refer to the active page's host and inherit its
+///   verified/insecure chip state.
+/// - Explicit destinations (`example.com`, `https://...`, `http://...`) get a
+///   host intent chip: `Insecure` for explicit `http://`, active-page state if
+///   the origin matches the active tab, and neutral `Destination` (no lock) for
+///   any unvisited HTTPS/host destination.
+fn typed_chip(
+    current_url: &str,
+    current_failed: bool,
+    current_tls: Option<gtk::gio::TlsCertificateFlags>,
+    typed: &str,
+) -> Option<ChipModel> {
+    let trimmed = typed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('/') {
+        split_url(current_url)?;
+        return active_page_chip(current_url, current_failed, current_tls);
+    }
+    let dest = explicit_destination(trimmed)?;
+    let host = chip_host(&dest);
+    if host.is_empty() {
+        return None;
+    }
+    if same_origin_authority(&dest, current_url) {
+        return active_page_chip(current_url, current_failed, current_tls);
+    }
+    let kind = if dest.to_ascii_lowercase().starts_with("http://") {
+        ChipKind::Insecure
+    } else {
+        ChipKind::Destination
+    };
+    Some(ChipModel { host, kind })
+}
+
 #[derive(Clone)]
 pub struct Offer {
     pub title: String,
@@ -35,6 +178,7 @@ pub struct Omnibox {
     pub offers: std::cell::RefCell<Vec<Offer>>,
     column: std::cell::Cell<i32>,
     band: std::cell::Cell<i32>,
+    last_size: std::cell::Cell<(i32, i32)>,
     pub picked: std::cell::Cell<i32>,
     pub holder: gtk::Fixed,
     layer: Layer,
@@ -47,6 +191,7 @@ pub struct Omnibox {
     site_icon: gtk::Box,
     site_pill: gtk::Box,
     pub site_box: gtk::EventBox,
+    chip_kind: std::cell::Cell<Option<ChipKind>>,
     /// The footer's action label. Its verb follows the first row: an Open
     /// row switches tabs, so "Enter  open" would promise the wrong thing.
     commit: gtk::Label,
@@ -138,6 +283,95 @@ fn here_for_field(url: &str, host: &str) -> String {
     }
 }
 
+/// Split a URL into `(host_label, path_label)` for clear autocomplete rows.
+/// Keeps `http://` visible on insecure origins while presenting verified or
+/// standard `https://` hosts cleanly without protocol clutter.
+pub fn host_and_path(url: &str) -> (String, String) {
+    let Some((before, authority, rest)) = split_url(url) else {
+        return (url.to_string(), String::new());
+    };
+    let bare_authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host_label = if before.eq_ignore_ascii_case("https://") {
+        bare_authority.to_string()
+    } else {
+        format!("{before}{bare_authority}")
+    };
+    let path_label = if rest.is_empty() || rest == "/" {
+        String::new()
+    } else {
+        rest.to_string()
+    };
+    (host_label, path_label)
+}
+
+/// Reusable single-line `host + path` widget for Omnibox, Start Page, and
+/// Bookmarks Bar autocomplete suggestions.
+pub fn build_offer_url_box(url: &str) -> gtk::Box {
+    let (host_text, path_text) = host_and_path(url);
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    crate::ui::class(&line, "sgurl-row");
+    line.set_hexpand(true);
+    let host = gtk::Label::new(Some(&host_text));
+    crate::ui::class(&host, "sghost");
+    host.set_xalign(0.0);
+    host.set_width_chars(1);
+    host.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    host.set_single_line_mode(true);
+    if path_text.is_empty() {
+        crate::ui::pack(&line, &host, true);
+    } else {
+        host.set_max_width_chars(24);
+        crate::ui::pack(&line, &host, false);
+        let path = gtk::Label::new(Some(&path_text));
+        crate::ui::class(&path, "sgpath");
+        path.set_xalign(0.0);
+        path.set_width_chars(1);
+        path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        path.set_single_line_mode(true);
+        crate::ui::pack(&line, &path, true);
+    }
+    line
+}
+
+/// Build the left-hand suggestion icon: real cached site favicon for URLs when
+/// available (so bookmarks and visited pages keep their site icon), falling
+/// back to a crisp Cairo kind glyph rather than a generic letter.
+pub fn build_offer_icon(
+    app: &App,
+    url: &str,
+    kind: &str,
+    fallback_color: crate::palette::Rgb,
+) -> gtk::Box {
+    let holder = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    holder.set_size_request(18, 18);
+    holder.set_valign(gtk::Align::Center);
+    holder.set_halign(gtk::Align::Center);
+    let use_favicon = matches!(kind, "Bookmark" | "Open" | "History");
+    if use_favicon {
+        if let Some(surface) = app.favicon_for_url(url) {
+            let image = crate::ui::favicon(&surface, 16);
+            crate::ui::class(&image, "favicon");
+            crate::ui::class(&image, "sgicon-favicon");
+            image.set_halign(gtk::Align::Center);
+            image.set_valign(gtk::Align::Center);
+            crate::ui::pack(&holder, &image, true);
+            return holder;
+        }
+    }
+    let glyph = match kind {
+        "Open" => crate::icons::Icon::Tab,
+        "History" => crate::icons::Icon::Clock,
+        "Bookmark" => crate::icons::Icon::Star,
+        "Search" | "Suggest" => crate::icons::Icon::Search,
+        _ => crate::icons::Icon::Globe,
+    };
+    let mark = crate::icons::area(glyph, 15, fallback_color);
+    mark.set_size_request(18, 18);
+    mark.set_valign(gtk::Align::Center);
+    crate::ui::pack(&holder, &mark, true);
+    holder
+}
+
 /// Where the field and its list stand for a window of this height.
 #[derive(Debug, PartialEq)]
 struct Plan {
@@ -183,6 +417,8 @@ impl Omnibox {
         // kinds of suggestion must not run off the bottom of the screen.
         let list_scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         list_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        list_scroll.set_propagate_natural_width(false);
+        list_scroll.set_min_content_width(0);
         crate::ui::class(&list_scroll, "suggestscroll");
         // Visibility is explicit: `no_show_all` leaves later rows allocated
         // 1x1 even after the flags are cleared, which renders as a blank list.
@@ -197,9 +433,9 @@ impl Omnibox {
         crate::ui::class(&field, "omni");
         field.set_size_request(FIELD_WIDTH, FIELD_HEIGHT);
 
-        let magnifier = crate::icons::area(crate::icons::Icon::Search, 19, palette.accent());
+        let magnifier = crate::icons::area(crate::icons::Icon::Search, 14, palette.muted);
         crate::ui::class(&magnifier, "omni-search-icon");
-        magnifier.set_margin_start(18);
+        magnifier.set_margin_start(16);
         magnifier.set_valign(gtk::Align::Center);
         crate::ui::pack(&field, &magnifier, false);
 
@@ -249,7 +485,7 @@ impl Omnibox {
         let escape = gtk::Label::new(Some("Esc"));
         crate::ui::class(&escape, "omni-escape");
         escape.set_valign(gtk::Align::Center);
-        escape.set_margin_end(18);
+        escape.set_margin_end(16);
         crate::ui::pack(&field, &escape, false);
         block.add(&field);
 
@@ -347,7 +583,7 @@ impl Omnibox {
 
         let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         crate::ui::class(&footer, "omni-footer");
-        let guidance = gtk::Label::new(Some("↑ ↓  choose"));
+        let guidance = gtk::Label::new(Some("↑ ↓  choose   Tab  complete"));
         guidance.set_xalign(0.0);
         guidance.set_hexpand(true);
         crate::ui::pack(&footer, &guidance, true);
@@ -362,6 +598,7 @@ impl Omnibox {
             offers: std::cell::RefCell::new(Vec::new()),
             column: std::cell::Cell::new(0),
             band: std::cell::Cell::new(23),
+            last_size: std::cell::Cell::new((0, 0)),
             picked: std::cell::Cell::new(-1),
             holder,
             layer,
@@ -374,6 +611,7 @@ impl Omnibox {
             site_icon,
             site_pill,
             site_box,
+            chip_kind: std::cell::Cell::new(None),
             commit,
             list,
             list_scroll,
@@ -390,6 +628,7 @@ impl Omnibox {
 
     /// Lay out the scrim and omnibox inside the page area starting at `column` and `band`.
     pub fn layout_in(&self, width: i32, height: i32, column: i32, band: i32) {
+        self.last_size.set((width, height));
         self.column.set(column);
         let band = band.max(0);
         self.band.set(band);
@@ -403,9 +642,12 @@ impl Omnibox {
         // block is exactly as tall as the list that is really in it. The
         // anchor above it does not depend on any of that.
         let shown = self.list_scroll.get_visible();
+        self.list.set_size_request((field_width - 2).max(200), -1);
         let placed = plan(height, if shown { self.list_height_for(field_width) } else { 0 });
+        self.block.set_size_request(field_width, placed.block.max(FIELD_HEIGHT + FOOTER_HEIGHT));
         self.layer.place(&self.block, x, placed.top, field_width, placed.block.max(FIELD_HEIGHT + FOOTER_HEIGHT));
         if shown {
+            self.list_scroll.set_max_content_width(field_width);
             self.list_scroll.set_size_request(field_width, placed.list);
         }
         self.field.set_size_request(field_width, FIELD_HEIGHT);
@@ -417,40 +659,64 @@ impl Omnibox {
         self.list.preferred_height_for_width(width).0.max(0)
     }
 
-    fn set_site_chip(&self, url: &str, host: &str) {
-        if host.is_empty() {
-            self.site_box.set_no_show_all(true);
-            self.site_box.hide();
-            self.entry.set_margin_start(4);
+    /// Snapshot of the live omnibox chip for bench/UI verification.
+    pub fn chip_state(&self) -> (bool, String, &'static str) {
+        let visible = self.site_box.get_visible();
+        let host = if visible { self.site.text().to_string() } else { String::new() };
+        let kind = if visible {
+            self.chip_kind.get().map(ChipKind::as_str).unwrap_or("none")
         } else {
-            for child in self.site_icon.children() {
-                self.site_icon.remove(&child);
-            }
-            let lower = url.to_ascii_lowercase();
-            let insecure = lower.starts_with("http://");
-            let ctx = self.site_pill.style_context();
-            if insecure {
-                ctx.add_class("insecure");
-            } else {
+            "none"
+        };
+        (visible, host, kind)
+    }
+
+    fn apply_site_chip(&self, chip: Option<&ChipModel>) {
+        let ctx = self.site_pill.style_context();
+        match chip {
+            None => {
+                self.chip_kind.set(None);
                 ctx.remove_class("insecure");
+                ctx.remove_class("destination");
+                self.site_box.set_no_show_all(true);
+                self.site_box.hide();
+                self.entry.set_margin_start(4);
             }
-            if let Some(app) = crate::app::current() {
-                let palette = *app.palette.borrow();
-                let (kind, color) = if lower.starts_with("https://") {
-                    (crate::icons::Icon::Lock, palette.accent())
-                } else if insecure {
-                    (crate::icons::Icon::ShieldAlert, palette.danger)
-                } else {
-                    (crate::icons::Icon::Globe, palette.muted)
-                };
-                let glyph = crate::icons::area(kind, 13, color);
-                glyph.set_valign(gtk::Align::Center);
-                self.site_icon.add(&glyph);
+            Some(model) => {
+                self.chip_kind.set(Some(model.kind));
+                for child in self.site_icon.children() {
+                    self.site_icon.remove(&child);
+                }
+                match model.kind {
+                    ChipKind::VerifiedHttps => {
+                        ctx.remove_class("insecure");
+                        ctx.remove_class("destination");
+                    }
+                    ChipKind::Insecure => {
+                        ctx.add_class("insecure");
+                        ctx.remove_class("destination");
+                    }
+                    ChipKind::Destination => {
+                        ctx.remove_class("insecure");
+                        ctx.add_class("destination");
+                    }
+                }
+                if let Some(app) = crate::app::current() {
+                    let palette = *app.palette.borrow();
+                    let (icon, color) = match model.kind {
+                        ChipKind::VerifiedHttps => (crate::icons::Icon::Lock, palette.accent()),
+                        ChipKind::Insecure => (crate::icons::Icon::ShieldAlert, palette.danger),
+                        ChipKind::Destination => (crate::icons::Icon::Globe, palette.muted),
+                    };
+                    let glyph = crate::icons::area(icon, 13, color);
+                    glyph.set_valign(gtk::Align::Center);
+                    self.site_icon.add(&glyph);
+                }
+                self.site_box.set_no_show_all(false);
+                self.site.set_text(&model.host);
+                self.site_box.show_all();
+                self.entry.set_margin_start(0);
             }
-            self.site_box.set_no_show_all(false);
-            self.site.set_text(host);
-            self.site_box.show_all();
-            self.entry.set_margin_start(0);
         }
     }
 
@@ -493,12 +759,11 @@ impl Omnibox {
         self.layer.show();
         // The chip only exists when there is something to say about the page:
         // an empty field with a label saying "Search" says it twice.
-        let current = crate::app::current()
-            .and_then(|app| app.state.borrow().active_tab().map(|tab| tab.url.clone()))
-            .unwrap_or_default();
-        let host = chip_host(&current);
-        // The chip names where you are and its transport state whenever there is a where.
-        self.set_site_chip(&current, &host);
+        let (current, failed, tls) = active_tab_security_context();
+        let chip = active_page_chip(&current, failed, tls);
+        let host = chip.as_ref().map(|c| c.host.clone()).unwrap_or_default();
+        // The chip names where you are and its verified transport state via sitecard::security.
+        self.apply_site_chip(chip.as_ref());
         // Typing replaces the address, and the chip is already the site, so
         // the entry shows the part the chip cannot: "127.0.0.1" beside
         // "http://127.0.0.1:8099/office" says the same thing twice.
@@ -608,7 +873,11 @@ impl Omnibox {
         for (index, offer) in offers.into_iter().enumerate() {
             if offer.kind != last_kind {
                 last_kind = offer.kind.clone();
-                let head = gtk::Label::new(Some(&last_kind));
+                let head_text = match last_kind.as_str() {
+                    "Suggest" => "Suggestions",
+                    other => other,
+                };
+                let head = gtk::Label::new(Some(head_text));
                 crate::ui::class(&head, "sghead");
                 head.set_xalign(0.0);
                 head.set_margin_start(12);
@@ -633,47 +902,30 @@ impl Omnibox {
             hbox.set_margin_top(7);
             hbox.set_margin_bottom(7);
 
-            // A mark that says where the suggestion came from, rather than the
-            // first letter of its title: four history rows for one host used
-            // to show four identical "1" tiles.
-            let glyph = match offer.kind.as_str() {
-                "Open" => crate::icons::Icon::Tab,
-                "History" => crate::icons::Icon::Clock,
-                "Bookmark" => crate::icons::Icon::Star,
-                "Search" | "Suggest" => crate::icons::Icon::Search,
-                _ => crate::icons::Icon::Globe,
-            };
-            let mark = crate::icons::area(glyph, 15, tint);
-            mark.set_size_request(18, 18);
-            mark.set_valign(gtk::Align::Center);
+            let mark = build_offer_icon(app, &offer.url, &offer.kind, tint);
             crate::ui::pack(&hbox, &mark, false);
 
-            let texts = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let texts = gtk::Box::new(gtk::Orientation::Vertical, 1);
+            texts.set_hexpand(true);
             let title = gtk::Label::new(Some(&offer.title));
             crate::ui::class(&title, "sgtitle");
             title.set_xalign(0.0);
+            title.set_width_chars(1);
             title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            let url = gtk::Label::new(Some(&offer.url));
-            crate::ui::class(&url, "sgurl");
-            url.set_xalign(0.0);
-            // Ellipsize in the middle. The host at the start and the last path
-            // segment at the end are the parts that tell two suggestions
-            // apart. With End, long URLs on the same site all looked the same.
-            url.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            let url_line = build_offer_url_box(&offer.url);
             texts.add(&title);
-            texts.add(&url);
+            texts.add(&url_line);
             crate::ui::pack(&hbox, &texts, true);
 
-            // Most rows get no right-hand kind label. The group head above the
-            // row and the glyph on its left already say where it came from, so
-            // "History" under a "History" head would only add noise. An open-tab
-            // row is the one exception: picking it switches to a tab that is
-            // already open instead of loading the address again, and nothing
-            // else on the row says so (Gemini R60 polish). The hint uses the
-            // existing .sgkind style (src/css.rs:229), which had no user until now.
-            if offer.kind == "Open" {
-                let hint = gtk::Label::new(Some("Switch to tab"));
+            let kind_hint = match offer.kind.as_str() {
+                "Open" => Some("Switch to tab"),
+                "Bookmark" => Some("Bookmark"),
+                _ => None,
+            };
+            if let Some(hint_text) = kind_hint {
+                let hint = gtk::Label::new(Some(hint_text));
                 crate::ui::class(&hint, "sgkind");
+                hint.set_hexpand(false);
                 hint.set_valign(gtk::Align::Center);
                 crate::ui::pack(&hbox, &hint, false);
             }
@@ -732,7 +984,15 @@ impl Omnibox {
                     break;
                 }
             }
-            let width = self.list_scroll.allocated_width().max(720);
+            let overlay_w = crate::app::current()
+                .map(|app| app.ui.overlay.allocated_width().max(app.ui.window.allocated_width()))
+                .unwrap_or(FIELD_WIDTH);
+            let target_w = field_width_for((overlay_w - self.column.get()).max(0));
+            let width = if self.list_scroll.allocated_width() > 1 {
+                self.list_scroll.allocated_width().min(target_w).max(200)
+            } else {
+                target_w.max(200)
+            };
             let height = self.list_height_for(width).max(48);
             self.list.size_allocate(&gtk::Allocation::new(0, 0, width, height));
         }
@@ -753,11 +1013,16 @@ impl Omnibox {
     /// laid out against 1x1 and stood in the corner until something else
     /// forced an allocation.
     fn relayout(&self) {
-        let Some(window) = self.holder.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()) else {
+        let (cached_w, cached_h) = self.last_size.get();
+        let (width, height) = if cached_w > 1 && cached_h > 1 {
+            (cached_w, cached_h)
+        } else if let Some(overlay) = self.holder.parent() {
+            (overlay.allocated_width(), overlay.allocated_height())
+        } else if let Some(window) = self.holder.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()) {
+            (window.allocated_width(), window.allocated_height())
+        } else {
             return;
         };
-        let width = window.allocated_width();
-        let height = window.allocated_height();
         if self.visible.get() && width > 1 && height > 1 {
             self.holder.set_size_request(width, height);
             self.layout(width, height);
@@ -785,6 +1050,18 @@ impl Omnibox {
     /// screenshot of a pick document the state before it.
     fn mark_picked(&self) {
         let picked = self.picked.get();
+        let verb = if picked >= 0
+            && self
+                .offers
+                .borrow()
+                .get(picked as usize)
+                .is_some_and(|offer| offer.kind == "Open")
+        {
+            "Enter  switch"
+        } else {
+            "Enter  open"
+        };
+        self.commit.set_text(verb);
         for (index, row) in self.rows.borrow().iter().enumerate() {
             let wanted = index as i32 == picked;
             let has = row.style_context().has_class("picked");
@@ -828,15 +1105,9 @@ impl Omnibox {
     /// every keystroke: the chip names the host of whatever the field now resolves
     /// to, and disappears when there is no host to name (a search, or nothing).
     pub fn chip_for_text(&self, typed: &str) {
-        let target = crate::app::current()
-            .map(|app| {
-                let current = app.state.borrow().active_tab().map(|tab| tab.url.clone()).unwrap_or_default();
-                let whole = whole_address(&current, typed);
-                crate::app::resolve(&app, &whole)
-            })
-            .unwrap_or_default();
-        let host = chip_host(&target);
-        self.set_site_chip(&target, &host);
+        let (current, failed, tls) = active_tab_security_context();
+        let chip = typed_chip(&current, failed, tls, typed);
+        self.apply_site_chip(chip.as_ref());
     }
 
     pub fn picked_is_open_tab(&self) -> bool {
@@ -851,6 +1122,52 @@ impl Omnibox {
         }
         self.offers.borrow().get(picked as usize).map(|offer| offer.url.clone())
     }
+
+    /// Autocomplete the highlighted (or first) suggestion into the entry so
+    /// the user can refine the URL or query with Tab before pressing Enter.
+    pub fn complete_picked(&self) -> bool {
+        let offers = self.offers.borrow();
+        if offers.is_empty() {
+            return false;
+        }
+        let idx = if self.picked.get() >= 0 {
+            (self.picked.get() as usize).min(offers.len() - 1)
+        } else {
+            0
+        };
+        let offer = &offers[idx];
+        let completion = if matches!(offer.kind.as_str(), "Search" | "Suggest") {
+            offer
+                .title
+                .strip_prefix("Search for \"")
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(&offer.title)
+                .to_string()
+        } else {
+            offer.url.clone()
+        };
+        drop(offers);
+        self.entry.set_text(&completion);
+        self.entry.set_position(-1);
+        self.chip_for_text(&completion);
+        true
+    }
+}
+
+/// Reads `(url, failed, tls_flags)` for the active tab.
+fn active_tab_security_context() -> (String, bool, Option<gtk::gio::TlsCertificateFlags>) {
+    let Some(app) = crate::app::current() else {
+        return (String::new(), false, None);
+    };
+    let active = {
+        let state = app.state.borrow();
+        state.active_tab().map(|tab| (tab.id, tab.url.clone(), tab.failed))
+    };
+    let Some((id, url, failed)) = active else {
+        return (String::new(), false, None);
+    };
+    let tls = app.view(id).and_then(|view| view.tls_info()).map(|(_, flags)| flags);
+    (url, failed, tls)
 }
 
 /// The field shows a path when the chip already names the site, so Return on
@@ -896,8 +1213,13 @@ fn choose(app: &App, target: &str, beside: bool, open_row: bool) {
     // goes to that tab, so picking it does not make a second copy of the page.
     let open = if open_row {
         let state = app.state.borrow();
-        let tabs: Vec<(TabId, &str, bool)> =
-            state.tabs.iter().map(|tab| (tab.id, tab.url.as_str(), tab.private)).collect();
+        let active_space = state.active_space_id();
+        let tabs: Vec<(TabId, &str, bool)> = state
+            .tabs
+            .iter()
+            .filter(|tab| tab.space_id == active_space)
+            .map(|tab| (tab.id, tab.url.as_str(), tab.private))
+            .collect();
         same_privacy_tab(&tabs, state.active, target)
     } else {
         None
@@ -1126,5 +1448,210 @@ mod tests {
         assert_eq!(field_width_for(1268), FIELD_WIDTH);
         assert_eq!(field_width_for(400), 376);
         assert_eq!(field_width_for(200), 260);
+    }
+
+    #[test]
+    fn active_page_chip_requires_verified_tls_and_not_failed_for_lock() {
+        use gtk::gio::TlsCertificateFlags as F;
+        assert_eq!(
+            active_page_chip("https://example.com/a", false, Some(F::empty())),
+            Some(ChipModel { host: "example.com".into(), kind: ChipKind::VerifiedHttps })
+        );
+        // Failed HTTPS page must never claim a verified lock even if TLS flags were empty or absent.
+        assert_eq!(
+            active_page_chip("https://expired.badssl.com/account", true, None),
+            Some(ChipModel { host: "expired.badssl.com".into(), kind: ChipKind::Insecure })
+        );
+        assert_eq!(
+            active_page_chip("https://expired.badssl.com/account", true, Some(F::empty())),
+            Some(ChipModel { host: "expired.badssl.com".into(), kind: ChipKind::Insecure })
+        );
+        // Expired certificate without failed flag is still insecure.
+        assert_eq!(
+            active_page_chip("https://expired.badssl.com/", false, Some(F::EXPIRED)),
+            Some(ChipModel { host: "expired.badssl.com".into(), kind: ChipKind::Insecure })
+        );
+        // Missing TLS info on HTTPS is Unknown -> insecure, never Lock.
+        assert_eq!(
+            active_page_chip("https://example.com/", false, None),
+            Some(ChipModel { host: "example.com".into(), kind: ChipKind::Insecure })
+        );
+        // Plain HTTP is insecure.
+        assert_eq!(
+            active_page_chip("http://127.0.0.1:8099/office", false, None),
+            Some(ChipModel { host: "127.0.0.1".into(), kind: ChipKind::Insecure })
+        );
+        // Non-web pages get no chip.
+        assert_eq!(active_page_chip("", false, None), None);
+        assert_eq!(active_page_chip("about:blank", false, None), None);
+        assert_eq!(active_page_chip("file:///tmp/x.html", false, None), None);
+    }
+
+    #[test]
+    fn typed_chip_hides_on_plain_searches_and_never_locks_unvisited_hosts() {
+        use gtk::gio::TlsCertificateFlags as F;
+        let current = "http://127.0.0.1:8099/office";
+        // Plain searches and open-tab keywords must NOT display duckduckgo.com or any lock!
+        assert_eq!(typed_chip(current, false, None, "office"), None);
+        assert_eq!(typed_chip(current, false, None, "rust browser"), None);
+        assert_eq!(typed_chip(current, false, None, "yt cats"), None);
+        assert_eq!(typed_chip(current, false, None, ""), None);
+        assert_eq!(typed_chip(current, false, None, "   "), None);
+
+        // Current-host path inherits active page security state.
+        assert_eq!(
+            typed_chip(current, false, None, "/pricing"),
+            Some(ChipModel { host: "127.0.0.1".into(), kind: ChipKind::Insecure })
+        );
+        assert_eq!(
+            typed_chip("https://example.com/a", false, Some(F::empty()), "/b"),
+            Some(ChipModel { host: "example.com".into(), kind: ChipKind::VerifiedHttps })
+        );
+        assert_eq!(
+            typed_chip("https://expired.badssl.com/a", true, Some(F::EXPIRED), "/b"),
+            Some(ChipModel { host: "expired.badssl.com".into(), kind: ChipKind::Insecure })
+        );
+
+        // Explicit unvisited destinations show neutral Destination intent, NEVER VerifiedHttps Lock.
+        assert_eq!(
+            typed_chip(current, false, None, "example.com"),
+            Some(ChipModel { host: "example.com".into(), kind: ChipKind::Destination })
+        );
+        assert_eq!(
+            typed_chip(current, false, None, "https://example.com/docs"),
+            Some(ChipModel { host: "example.com".into(), kind: ChipKind::Destination })
+        );
+        // Explicit plain HTTP destination is Insecure.
+        assert_eq!(
+            typed_chip("https://example.com/a", false, Some(F::empty()), "http://other.test/x"),
+            Some(ChipModel { host: "other.test".into(), kind: ChipKind::Insecure })
+        );
+    }
+
+    #[test]
+    fn explicit_destination_restricts_to_http_and_https_and_matches_resolver() {
+        use gtk::gio::TlsCertificateFlags as F;
+        let current = "https://example.com/a";
+        let engine = |q: &str| crate::store::Prefs::default().search_url(q);
+
+        // Non-HTTP(S) schemes must never produce a destination chip.
+        for non_http in [
+            "ftp://example.com/",
+            "FTP://example.com/file",
+            "javascript://example.com/%0aalert(1)",
+            "JAVASCRIPT://example.com/",
+            "javascript:alert(document.domain)",
+            "data://example.com/x",
+            "data:text/html,example.com",
+            "blob://example.com/uuid",
+            "mailto:user@example.com",
+            "chrome://settings",
+            "custom+proto://host.test/path",
+            "file:///tmp/index.html",
+            "FILE:///tmp/index.html",
+            "about:blank",
+            "ABOUT:blank",
+            "http://",
+            "https://",
+        ] {
+            assert_eq!(
+                explicit_destination(non_http),
+                None,
+                "{non_http:?} must not produce an explicit HTTP(S) destination"
+            );
+            assert_eq!(
+                typed_chip(current, false, Some(F::empty()), non_http),
+                None,
+                "{non_http:?} must not render a chip"
+            );
+        }
+
+        // Disallowed :// schemes also remain refused by the app resolver -> scheme_is_allowed path.
+        for disallowed in [
+            "ftp://example.com/",
+            "FTP://example.com/file",
+            "javascript://example.com/%0aalert(1)",
+            "JAVASCRIPT://example.com/",
+            "chrome://settings",
+            "custom+proto://host.test/path",
+        ] {
+            let resolved = crate::app::plain_target(disallowed, &engine);
+            assert!(
+                !crate::web::scheme_is_allowed(&resolved, true),
+                "resolver output {resolved:?} for {disallowed:?} must be refused by scheme_is_allowed"
+            );
+        }
+
+        // Bare host:port and paths with colons still resolve as HTTPS destinations.
+        assert_eq!(
+            explicit_destination("localhost:8080/a"),
+            Some("https://localhost:8080/a".to_string())
+        );
+        assert_eq!(
+            explicit_destination("example.com/wiki/Category:Rust"),
+            Some("https://example.com/wiki/Category:Rust".to_string())
+        );
+
+        // Uppercase and mixed-case canonical HTTP(S) schemes remain supported and
+        // preserve verified/destination/insecure chip classification.
+        assert_eq!(
+            typed_chip(current, false, Some(F::empty()), "HTTPS://Example.COM/docs"),
+            Some(ChipModel { host: "example.com".into(), kind: ChipKind::VerifiedHttps })
+        );
+        assert_eq!(
+            typed_chip(current, false, Some(F::empty()), "HTTPS://Other.Test/docs"),
+            Some(ChipModel { host: "other.test".into(), kind: ChipKind::Destination })
+        );
+        assert_eq!(
+            typed_chip(current, false, Some(F::empty()), "HTTP://Example.COM/a"),
+            Some(ChipModel { host: "example.com".into(), kind: ChipKind::Insecure })
+        );
+        assert_eq!(
+            typed_chip(current, false, Some(F::empty()), "Http://[::1]:8080/p"),
+            Some(ChipModel { host: "[::1]".into(), kind: ChipKind::Insecure })
+        );
+        assert_eq!(
+            typed_chip(current, false, Some(F::empty()), "HtTpS://[2001:DB8::1]/p"),
+            Some(ChipModel { host: "[2001:db8::1]".into(), kind: ChipKind::Destination })
+        );
+
+        for allowed in [
+            "HTTPS://Example.COM/docs",
+            "HTTP://Example.COM/a",
+            "https://other.test/x",
+            "http://[::1]:8080/p",
+            "example.com/path",
+            "localhost:8099",
+        ] {
+            let resolved = crate::app::plain_target(allowed, &engine);
+            assert!(
+                crate::web::scheme_is_allowed(&resolved, true),
+                "supported input {allowed:?} -> {resolved:?} must remain allowed"
+            );
+            assert!(
+                typed_chip(current, false, Some(F::empty()), allowed).is_some(),
+                "supported input {allowed:?} must still produce a chip"
+            );
+        }
+    }
+
+    #[test]
+    fn host_and_path_splits_https_http_and_root_cleanly() {
+        assert_eq!(
+            host_and_path("https://en.wikipedia.org/wiki/Linux_kernel"),
+            ("en.wikipedia.org".into(), "/wiki/Linux_kernel".into())
+        );
+        assert_eq!(
+            host_and_path("https://example.com/"),
+            ("example.com".into(), "".into())
+        );
+        assert_eq!(
+            host_and_path("http://127.0.0.1:8080/plain"),
+            ("http://127.0.0.1:8080".into(), "/plain".into())
+        );
+        assert_eq!(
+            host_and_path("https://user:pass@example.org/docs"),
+            ("example.org".into(), "/docs".into())
+        );
     }
 }

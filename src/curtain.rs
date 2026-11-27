@@ -8,7 +8,7 @@ use webkit2gtk::{
 
 /// Isolated script world for the element picker so page JavaScript cannot spoof
 /// or intercept `searchHide` messages or tamper with picker state.
-const CURTAIN_WORLD: &str = "search-curtain";
+pub(crate) const CURTAIN_WORLD: &str = "search-curtain";
 pub fn selectors(app: &App, host: &str) -> Vec<String> {
     app.state
         .borrow()
@@ -17,6 +17,28 @@ pub fn selectors(app: &App, host: &str) -> Vec<String> {
         .cloned()
         .unwrap_or_default()
 }
+
+/// Effective selectors for one tab on one host. A private tab checks its own
+/// ephemeral per-tab overrides first (which may be empty after a private
+/// `unhide_all`), leaving normal persisted rules untouched.
+pub fn effective_selectors(app: &App, id: TabId, host: &str) -> Vec<String> {
+    let private = app.state.borrow().tab(id).is_some_and(|t| t.private);
+    if private {
+        if let Some(list) = app
+            .private_hidden
+            .borrow()
+            .get(&id)
+            .and_then(|hosts| hosts.get(host))
+        {
+            return list.clone();
+        }
+    }
+    if !app.prefs.borrow().curtain {
+        return Vec::new();
+    }
+    selectors(app, host)
+}
+
 pub fn css_for(app: &App, host: &str) -> String {
     if !app.prefs.borrow().curtain {
         return String::new();
@@ -24,10 +46,11 @@ pub fn css_for(app: &App, host: &str) -> String {
     let list = selectors(app, host);
     css_from(&list)
 }
+
 /// One rule per selector rather than a comma list: a selector the page broke
 /// then costs only itself, not every other thing hidden on the site, and each
 /// one carries its own brackets so nothing can be smuggled past the rule.
-fn css_from(list: &[String]) -> String {
+pub(crate) fn css_from(list: &[String]) -> String {
     if list.is_empty() {
         return String::new();
     }
@@ -38,13 +61,320 @@ fn css_from(list: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-/// The style sheet the next document of the given manager will wear.
-pub fn sync_manager(app: &AppRef, manager: &webkit2gtk::UserContentManager, host: &str) {
-    let css = css_for(app, host);
-    replace_sheet(manager, &css);
+
+/// Normalizes a host for WebKit `UserContentURLPattern` matching.
+///
+/// WebKit match patterns use `<scheme>://<host><path>` with no port component
+/// and match `<host>` against the URL's host across all ports. Rejecting empty
+/// hosts and wildcard/separator characters guarantees no caller can smuggle a
+/// cross-origin wildcard pattern into a stylesheet's allow list.
+pub(crate) fn normalize_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let host = if trimmed.starts_with('[') {
+        let end = trimmed.find(']')?;
+        let after = &trimmed[end + 1..];
+        let valid_after = after.is_empty()
+            || (after.starts_with(':')
+                && after.len() > 1
+                && after[1..].chars().all(|c| c.is_ascii_digit()));
+        if !valid_after {
+            return None;
+        }
+        let inner = &trimmed[1..end];
+        if inner.is_empty()
+            || !inner.contains(':')
+            || !inner.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return None;
+        }
+        &trimmed[..=end]
+    } else {
+        let mut parts = trimmed.split(':');
+        let h = parts.next().unwrap_or("");
+        if let Some(port) = parts.next() {
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) || parts.next().is_some() {
+                return None;
+            }
+        }
+        h
+    };
+    if host.is_empty()
+        || host.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, '*' | '/' | '?' | '#' | '@' | '\\' | ',' | ';')
+        })
+    {
+        return None;
+    }
+    Some(host.to_string())
 }
 
-/// The style sheet the next document of the shared manager will wear.
+/// Strict per-host WebKit allow list patterns (`http://<host>/*`, `https://<host>/*`).
+/// Returns empty when `host` is invalid so no unscoped wildcard sheet is ever built.
+pub(crate) fn allow_list_for(host: &str) -> Vec<String> {
+    let Some(host) = normalize_host(host) else {
+        return Vec::new();
+    };
+    vec![format!("http://{host}/*"), format!("https://{host}/*")]
+}
+
+/// Pure `(manager_id, host)` sheet registry so multi-host scoping, private
+/// manager isolation, and cleanup can be unit-tested without a GTK display.
+#[cfg(test)]
+pub(crate) struct ScopedRegistry<S> {
+    managers: std::collections::HashMap<usize, std::collections::HashMap<String, S>>,
+}
+
+#[cfg(test)]
+impl<S> ScopedRegistry<S> {
+    pub(crate) fn new() -> Self {
+        Self { managers: std::collections::HashMap::new() }
+    }
+
+    pub(crate) fn replace(&mut self, manager_id: usize, host: &str, sheet: Option<S>) -> Option<S> {
+        let Some(host) = normalize_host(host) else {
+            return None;
+        };
+        let previous = self
+            .managers
+            .get_mut(&manager_id)
+            .and_then(|hosts| hosts.remove(&host));
+        if let Some(sheet) = sheet {
+            self.managers.entry(manager_id).or_default().insert(host, sheet);
+        } else if self.managers.get(&manager_id).is_some_and(|hosts| hosts.is_empty()) {
+            self.managers.remove(&manager_id);
+        }
+        previous
+    }
+
+    pub(crate) fn clear_manager(&mut self, manager_id: usize) -> Vec<S> {
+        self.managers
+            .remove(&manager_id)
+            .map(|hosts| hosts.into_values().collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, manager_id: usize, host: &str) -> Option<&S> {
+        let host = normalize_host(host)?;
+        self.managers.get(&manager_id)?.get(&host)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn manager_len(&self, manager_id: usize) -> usize {
+        self.managers.get(&manager_id).map_or(0, |h| h.len())
+    }
+}
+
+struct ManagerSheets {
+    weak: glib::WeakRef<webkit2gtk::UserContentManager>,
+    sheets: std::collections::HashMap<String, UserStyleSheet>,
+}
+
+// The curtain tracks every sheet it installs by `(manager, host)` so shared
+// content managers never leak one host's selectors onto another host or
+// clobber another live tab's sheet, and dark-page tone sheets remain untouched.
+// Holding a weak reference to each manager also prunes closed private managers
+// and prevents pointer-reuse collisions.
+thread_local! {
+    static ADDED: std::cell::RefCell<std::collections::HashMap<usize, ManagerSheets>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Captures the exact tab, host, privacy class, navigation epoch, and
+/// `UserContentManager` identity that armed element-hide mode, so delayed
+/// `searchHide` callbacks never read a different active tab or cross-tab
+/// manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HideOrigin {
+    pub tab_id: TabId,
+    pub host: String,
+    pub private: bool,
+    pub nav_epoch: u64,
+    pub manager_key: Option<usize>,
+}
+
+/// Live snapshot of the originating tab at callback or delayed-application time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HideTargetSnapshot<'a> {
+    pub private: bool,
+    pub host: &'a str,
+    pub nav_epoch: u64,
+    pub manager_key: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HideDecision {
+    ApplyPrivate,
+    ApplyNormal,
+    Cancel,
+}
+
+/// Validates that a `searchHide` message arriving from `source_manager_key`
+/// belongs to the armed `HideOrigin` and that the originating tab is still on
+/// the same host, privacy class, navigation epoch, and manager.
+pub(crate) fn validate_hide_source(
+    hide_mode: bool,
+    origin: Option<&HideOrigin>,
+    source_manager_key: usize,
+    snapshot: Option<HideTargetSnapshot<'_>>,
+) -> Option<HideOrigin> {
+    if !hide_mode {
+        return None;
+    }
+    let origin = origin?;
+    if origin.host.is_empty() || origin.manager_key != Some(source_manager_key) {
+        return None;
+    }
+    match validate_hide_target(origin, snapshot) {
+        HideDecision::ApplyPrivate | HideDecision::ApplyNormal => Some(origin.clone()),
+        HideDecision::Cancel => None,
+    }
+}
+
+/// Validates that the originating tab is still alive and unchanged at
+/// delayed-application time (after the 10ms timeout).
+pub(crate) fn validate_hide_target(
+    origin: &HideOrigin,
+    snapshot: Option<HideTargetSnapshot<'_>>,
+) -> HideDecision {
+    if origin.host.is_empty() {
+        return HideDecision::Cancel;
+    }
+    let Some(snap) = snapshot else {
+        return HideDecision::Cancel;
+    };
+    if snap.private != origin.private
+        || snap.nav_epoch != origin.nav_epoch
+        || snap.host != origin.host
+    {
+        return HideDecision::Cancel;
+    }
+    if origin.manager_key.is_some() && snap.manager_key != origin.manager_key {
+        return HideDecision::Cancel;
+    }
+    if origin.private {
+        HideDecision::ApplyPrivate
+    } else {
+        HideDecision::ApplyNormal
+    }
+}
+
+pub(crate) fn manager_key(manager: &webkit2gtk::UserContentManager) -> usize {
+    use glib::translate::ToGlibPtr;
+    let raw: *mut webkit2gtk::ffi::WebKitUserContentManager = manager.to_glib_none().0;
+    raw as usize
+}
+
+fn prune_dead(added: &mut std::collections::HashMap<usize, ManagerSheets>) {
+    added.retain(|_, entry| entry.weak.upgrade().is_some());
+}
+
+fn replace_sheet(manager: &webkit2gtk::UserContentManager, host: &str, css: &str) {
+    let Some(host) = normalize_host(host) else {
+        return;
+    };
+    let key = manager_key(manager);
+    let previous = ADDED.with(|added| {
+        let mut map = added.borrow_mut();
+        prune_dead(&mut map);
+        // If a freed private manager's address was reused, drop the stale entry
+        // instead of removing its sheets from the brand-new manager.
+        let same_instance = map
+            .get(&key)
+            .is_some_and(|entry| entry.weak.upgrade().as_ref() == Some(manager));
+        if !same_instance {
+            map.remove(&key);
+            return None;
+        }
+        let prev = map.get_mut(&key).and_then(|entry| entry.sheets.remove(&host));
+        if map.get(&key).is_some_and(|entry| entry.sheets.is_empty()) {
+            map.remove(&key);
+        }
+        prev
+    });
+    if let Some(previous) = previous {
+        manager.remove_style_sheet(&previous);
+    }
+    if let Some(sheet) = sheet_for(&host, css) {
+        manager.add_style_sheet(&sheet);
+        ADDED.with(|added| {
+            let mut map = added.borrow_mut();
+            let entry = map.entry(key).or_insert_with(|| {
+                let weak = glib::WeakRef::new();
+                weak.set(Some(manager));
+                ManagerSheets { weak, sheets: std::collections::HashMap::new() }
+            });
+            entry.sheets.insert(host, sheet);
+        });
+    }
+}
+
+/// Removes all curtain sheets tracked for one content manager (e.g. when the
+/// curtain preference is turned off or a private view is retired).
+pub fn clear_manager(manager: &webkit2gtk::UserContentManager) {
+    let key = manager_key(manager);
+    let removed = ADDED.with(|added| {
+        let mut map = added.borrow_mut();
+        prune_dead(&mut map);
+        let same_instance = map
+            .get(&key)
+            .is_some_and(|entry| entry.weak.upgrade().as_ref() == Some(manager));
+        if !same_instance {
+            map.remove(&key);
+            return Vec::new();
+        }
+        map.remove(&key)
+            .map(|entry| entry.sheets.into_values().collect())
+            .unwrap_or_default()
+    });
+    for sheet in removed {
+        manager.remove_style_sheet(&sheet);
+    }
+}
+
+/// Drops tracking state for a manager whose view is closing/rebuilding.
+pub fn forget_manager(manager: &webkit2gtk::UserContentManager) {
+    clear_manager(manager);
+}
+
+/// The style sheet the next document of the given manager will wear for `host`.
+pub fn sync_manager(app: &AppRef, manager: &webkit2gtk::UserContentManager, host: &str) {
+    if !app.prefs.borrow().curtain {
+        clear_manager(manager);
+        return;
+    }
+    let css = css_for(app, host);
+    replace_sheet(manager, host, &css);
+}
+
+/// Syncs the curtain stylesheet for one tab on `manager` and `host`, honoring
+/// private-tab ephemeral overrides without touching persisted rules.
+pub fn sync_for_tab(app: &AppRef, id: TabId, manager: &webkit2gtk::UserContentManager, host: &str) {
+    let private = app.state.borrow().tab(id).is_some_and(|t| t.private);
+    if private {
+        let list = effective_selectors(app, id, host);
+        replace_sheet(manager, host, &css_from(&list));
+        return;
+    }
+    sync_manager(app, manager, host);
+}
+
+/// Updates a private tab's dedicated manager for one host with an explicit
+/// ephemeral selector list.
+pub fn sync_private_sheet(
+    manager: &webkit2gtk::UserContentManager,
+    host: &str,
+    selectors: &[String],
+) {
+    replace_sheet(manager, host, &css_from(selectors));
+}
+
+/// The style sheet the next document of the shared manager will wear for `host`.
 pub fn sync(app: &AppRef, host: &str) {
     // Same key the view will be made with, or the sheet lands on the manager
     // the page does not use.
@@ -52,58 +382,95 @@ pub fn sync(app: &AppRef, host: &str) {
     let manager = crate::web::shared_manager(app, shielded);
     sync_manager(app, &manager, host);
 }
-// The curtain puts one sheet on a manager and takes its own back off. Clearing
-// every sheet also cleared the dark page's, so turning the curtain off used to
-// leave a dark desktop with a white page. What the curtain added last is held
-// here, so it can be taken off by identity instead.
-thread_local! {
-    static ADDED: std::cell::RefCell<std::collections::HashMap<usize, UserStyleSheet>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+
+/// Propagates a persisted host rule change (such as normal `unhide_all`) across
+/// every currently live shared content manager.
+pub fn sync_shared_managers_for_host(app: &AppRef, host: &str) {
+    for manager in crate::web::live_shared_managers() {
+        sync_manager(app, &manager, host);
+    }
 }
 
-fn replace_sheet(manager: &webkit2gtk::UserContentManager, css: &str) {
-    use glib::translate::ToGlibPtr;
-    // The manager is the key: a sheet belongs to one manager, and a new
-    // generation of managers is a new sheet list. The set of managers is two
-    // or three for the life of the process, so the map cannot grow.
-    let raw: *mut webkit2gtk::ffi::WebKitUserContentManager = manager.to_glib_none().0;
-    let key = raw as usize;
-    let previous = ADDED.with(|added| added.borrow_mut().remove(&key));
-    if let Some(previous) = previous {
-        // A key whose manager is long gone simply holds nothing to remove.
-        manager.remove_style_sheet(&previous);
-    }
-    if let Some(sheet) = sheet_for(css) {
-        manager.add_style_sheet(&sheet);
-        ADDED.with(|added| added.borrow_mut().insert(key, sheet));
+/// Clears curtain stylesheets from every live shared content manager.
+pub fn clear_all_shared_managers() {
+    for manager in crate::web::live_shared_managers() {
+        clear_manager(&manager);
     }
 }
-/// The sheet the curtain wants on a manager: one carrying its own css, or none
-/// when there is nothing to hide.
-fn sheet_for(css: &str) -> Option<UserStyleSheet> {
+
+/// Synchronizes every live shared and private content manager plus live
+/// immediate `<style>` elements after `prefs.curtain` changes.
+/// - When `curtain` is OFF: clears all live shared managers, removes immediate
+///   styles from all live normal views, and re-syncs private views (clearing
+///   inherited persisted sheets/styles while preserving explicit per-tab
+///   private overrides).
+/// - When `curtain` is ON: re-applies per-tab curtain sheets to every live tab.
+pub fn apply_curtain_pref(app: &AppRef) {
+    let enabled = app.prefs.borrow().curtain;
+    let tabs: Vec<(TabId, String, bool)> = app
+        .state
+        .borrow()
+        .tabs
+        .iter()
+        .map(|t| (t.id, crate::shield::host_of(&t.url), t.private))
+        .collect();
+    if !enabled {
+        clear_all_shared_managers();
+        for (id, host, private) in tabs {
+            let Some(view) = app.view(id) else { continue };
+            if private {
+                if let Some(manager) = view.user_content_manager() {
+                    clear_manager(&manager);
+                    if !host.is_empty() {
+                        sync_for_tab(app, id, &manager, &host);
+                    }
+                }
+                if host.is_empty() || effective_selectors(app, id, &host).is_empty() {
+                    clear_immediate_styles(&view);
+                }
+            } else {
+                clear_immediate_styles(&view);
+            }
+        }
+    } else {
+        for (id, _, _) in tabs {
+            apply_for_tab(app, id);
+        }
+    }
+}
+
+/// The sheet the curtain wants on a manager for one host: always scoped by a
+/// non-empty per-host allow list so rules never bleed across origins.
+fn sheet_for(host: &str, css: &str) -> Option<UserStyleSheet> {
     if css.is_empty() {
         return None;
     }
+    let allow = allow_list_for(host);
+    if allow.is_empty() {
+        return None;
+    }
+    let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
     Some(UserStyleSheet::new(
         css,
         UserContentInjectedFrames::AllFrames,
         UserStyleLevel::User,
-        &[],
+        &allow_refs,
         &[],
     ))
 }
+
 pub fn apply_for_tab(app: &App, id: TabId) {
     let Some(app_ref) = crate::app::current() else { return };
-    let host = app
+    let (host, private) = app
         .state
         .borrow()
         .tab(id)
-        .map(|t| crate::shield::host_of(&t.url))
+        .map(|t| (crate::shield::host_of(&t.url), t.private))
         .unwrap_or_default();
     if !host.is_empty() {
         if let Some(manager) = app.view(id).and_then(|v| v.user_content_manager()) {
-            sync_manager(&app_ref, &manager, &host);
-        } else {
+            sync_for_tab(&app_ref, id, &manager, &host);
+        } else if !private {
             sync(&app_ref, &host);
         }
     }
@@ -131,8 +498,32 @@ pub fn apply_immediately(view: &webkit2gtk::WebView, app: &App, host: &str) {
         "(() => {{ let s = document.getElementById('{id}'); if (!s) {{ s = document.createElement('style'); s.id = '{id}'; (document.head || document.documentElement).appendChild(s); }} s.textContent = {text}; }})();",
         id = STYLE_ID
     );
-    crate::js::run(view, &js, |_| {});
+    crate::js::run_in_world(view, CURTAIN_WORLD, &js, |_| {});
 }
+/// Applies a private tab's ephemeral hidden selectors to the live document
+/// inside `CURTAIN_WORLD` without persisting anything.
+pub fn apply_immediate_private(view: &webkit2gtk::WebView, selectors: &[String]) {
+    let css = css_from(selectors);
+    if css.is_empty() {
+        clear_immediate_styles(view);
+        return;
+    }
+    let text = serde_json::to_string(&css).unwrap_or_else(|_| "\"\"".into());
+    let js = format!(
+        "(() => {{ let s = document.getElementById('__search_hidden_private'); if (!s) {{ s = document.createElement('style'); s.id = '__search_hidden_private'; (document.head || document.documentElement).appendChild(s); }} s.textContent = {text}; }})();"
+    );
+    crate::js::run_in_world(view, CURTAIN_WORLD, &js, |_| {});
+}
+
+/// Removes any immediately injected curtain style tags from the current page
+/// (used when a private tab unhides elements without touching persisted rules).
+pub fn clear_immediate_styles(view: &webkit2gtk::WebView) {
+    let js = format!(
+        "(() => {{ for (const id of ['{STYLE_ID}', '__search_hidden_private']) {{ const el = document.getElementById(id); if (el) el.remove(); }} }})();"
+    );
+    crate::js::run_in_world(view, CURTAIN_WORLD, &js, |_| {});
+}
+
 /// The id the injected style element wears, so the next navigation rewrites it
 /// instead of adding a second one.
 const STYLE_ID: &str = "__search_hidden";
@@ -245,13 +636,16 @@ pub fn pick(_app: &App, view: &webkit2gtk::WebView, on: bool) {
 /// Exercises the isolated picker world for the bench suite: turns hide mode on
 /// and posts `selector` from `CURTAIN_WORLD`, matching a real picker click.
 pub(crate) fn pick_selector(app: &AppRef, selector: &str) -> Result<(), &'static str> {
-    let Some(view) = app.view(app.active_id()) else {
+    let active = app.active_id();
+    let Some(view) = app.view(active) else {
         return Err("no page");
     };
     let Some(clean) = sanitized(selector) else {
         return Err("selector refused");
     };
-    app.state.borrow_mut().hide_mode = true;
+    if app.arm_hide_mode(active).is_none() {
+        return Err("no host");
+    }
     let payload = serde_json::to_string(&clean).unwrap_or_else(|_| "\"\"".into());
     let js = format!("window.webkit.messageHandlers.searchHide.postMessage({payload});");
     view.evaluate_javascript(
@@ -268,11 +662,8 @@ pub(crate) fn pick_selector(app: &AppRef, selector: &str) -> Result<(), &'static
 pub fn install(app: &AppRef, manager: &webkit2gtk::UserContentManager) {
     manager.register_script_message_handler_in_world("searchHide", CURTAIN_WORLD);
     let weak = app.weak();
-    manager.connect_script_message_received(Some("searchHide"), move |_, value| {
+    manager.connect_script_message_received(Some("searchHide"), move |source_manager, value| {
         let Some(app) = weak.upgrade() else { return };
-        if !app.state.borrow().hide_mode {
-            return;
-        }
         let selector = value
             .js_value()
             .map(|value| value.to_str().to_string())
@@ -280,26 +671,21 @@ pub fn install(app: &AppRef, manager: &webkit2gtk::UserContentManager) {
         // Refused here as well as at the sheet: a selector this app cannot
         // write is not one worth storing, and the page chose it.
         let Some(selector) = sanitized(&selector) else { return };
-        let host = app
-            .state
-            .borrow()
-            .active_tab()
-            .map(|t| crate::shield::host_of(&t.url))
-            .unwrap_or_default();
-        if !host.is_empty() {
-            // Never call back into the view from inside its own message
-            // callback: that is a page waiting on the browser waiting on the
-            // page. The work is put on the loop and done after this returns.
-            glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
-                if let Some(app) = crate::app::current() {
-                    if app.state.borrow().hide_mode {
-                        app.hide_selector(&host, &selector);
-                        app.state.borrow_mut().hide_mode = false;
-                    }
-                }
-                glib::ControlFlow::Break
-            });
-        }
+        let source_key = manager_key(source_manager);
+        let Some(origin) = app.take_verified_hide_origin(source_key) else {
+            return;
+        };
+        // Never call back into the view from inside its own message callback:
+        // that is a page waiting on the browser waiting on the page. The work
+        // is deferred and strictly bound to the originating tab and host so
+        // tab switches, navigation, or closing cannot apply to the wrong target.
+        let weak_delayed = app.weak();
+        glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+            if let Some(app) = weak_delayed.upgrade() {
+                app.hide_selector_for_origin(&origin, &selector);
+            }
+            glib::ControlFlow::Break
+        });
     });
 }
 

@@ -33,16 +33,26 @@ pub struct FindBar {
 /// reader's exit pill. That pill is fixed at the same PAGE_TOP/PAGE_INSET
 /// corner (assets/reader.js), so without this Find covers it.
 pub fn toolbar_band(ui: &crate::ui::Ui) -> i32 {
-    let toolbar = if !ui.toolbar.is_visible() || !ui.toolbar.is_mapped() {
-        0
-    } else {
+    let chrome_bottom = if ui.viewport_frame.is_visible() && ui.viewport_frame.is_mapped() {
+        ui.viewport_frame
+            .translate_coordinates(&ui.overlay, 0, 0)
+            .map(|(_, y)| y.max(0))
+            .unwrap_or(0)
+    } else if ui.toolbar.is_visible() && ui.toolbar.is_mapped() {
         ui.toolbar
             .translate_coordinates(&ui.overlay, 0, ui.toolbar.allocated_height())
             .map(|(_, y)| y.max(0))
             .unwrap_or(0)
+    } else if ui.topbar.is_visible() && ui.topbar.is_mapped() {
+        ui.topbar
+            .translate_coordinates(&ui.overlay, 0, ui.topbar.allocated_height())
+            .map(|(_, y)| y.max(0))
+            .unwrap_or(0)
+    } else {
+        0
     };
     let reading = crate::app::current().map(|app| app.reading.get()).unwrap_or(false);
-    toolbar + if reading { READER_EXIT_CLEARANCE } else { 0 }
+    chrome_bottom + if reading { READER_EXIT_CLEARANCE } else { 0 }
 }
 
 /// The reader exit pill is at least 28px tall (assets/reader.js min-height).

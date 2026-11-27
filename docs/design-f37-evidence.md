@@ -24,7 +24,7 @@ Follows the independent read-only F36 benchmark review (mean **9.06/10**, 8/18 a
 - `tools/extensions.py`: all extension checks passed.
 - `tools/test_ui.py` (`SEARCH_TEST_BACKEND=x11`): passed (zero GTK criticals, zero invalid allocations).
 - `tools/compare.py --all build/council/design-f37-light`: passed at `1500×918`.
-- `tools/stress.py`: 142/142 passed (`188.1MB` resident, `98.3MB` own for one idle tab).
+- `tools/stress.py`: 142/142 passed (`188.1 MB` warm total PSS, `190.4 MB` cold total PSS, `98.3 MB` own anonymous PSS, `462.1 MB` RSS, `6` processes including `glycin-svg` + 2 `bwrap` idle regression for one idle tab; original ~100 MB total-PSS target remains unmet; archived at `docs/benchmarks/stress-report-f37.json`).
 - Captures:
   - Wide light (`1500×918`): `build/council/design-f37-light` — 38/38 + pixel gates (`pixel light scrim`, `pixel settings scroll` 37,409px).
   - Wide dark (`1500×918`): `build/council/design-f37-dark` — 38/38 + pixel gates (`pixel dark corner [26,24,22]`, `pixel settings scroll` 37,241px).

@@ -72,6 +72,20 @@ pub fn shared_manager(app: &AppRef, shielded: bool) -> UserContentManager {
     manager
 }
 
+/// All currently live shared content managers (shielded and unshielded) for
+/// the active extension generation. Used to propagate per-host curtain updates
+/// or removals without rebuilding managers.
+pub(crate) fn live_shared_managers() -> Vec<UserContentManager> {
+    let generation = crate::extensions::generation();
+    MANAGERS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|(_, gen, _)| *gen == generation)
+            .map(|(_, _, manager)| manager.clone())
+            .collect()
+    })
+}
+
 /// One content manager, with everything that should be in every page of this
 /// kind: the blocker, the curtain, and the extensions' own scripts and sheets.
 fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
@@ -80,11 +94,11 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
         crate::shield::install(&manager);
     }
     curtain::install(app, &manager);
-    // Leaving reading mode from the page. Only "off" is trusted: the script
-    // sends it after it has taken the reader out, so any other word is the
-    // page guessing and must not clear the tab's state. Nothing is sent back
-    // into the view from here.
-    manager.register_script_message_handler("searchReader");
+    // Leaving reading mode from the page's exit button. Registered strictly
+    // inside `READER_WORLD` so page scripts in the main world cannot post to
+    // it, and still verified by probing `READER_WORLD` state on each reading
+    // tab before clearing host membership.
+    manager.register_script_message_handler_in_world("searchReader", crate::reader::READER_WORLD);
     let weak = app.weak();
     manager.connect_script_message_received(Some("searchReader"), move |_, value| {
         let Some(app) = weak.upgrade() else { return };
@@ -92,9 +106,6 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
         if said.trim() != "off" {
             return;
         }
-        // A shared manager cannot identify its sender. Treat this untrusted
-        // page message only as a request to probe current reader state. Never
-        // clear membership from the message alone: page JavaScript can send it.
         let ids: Vec<_> = app.reading_tabs.borrow().iter().copied().collect();
         for id in ids {
             let Some(view) = app.view(id) else {
@@ -103,14 +114,21 @@ fn build_manager(app: &AppRef, shielded: bool) -> UserContentManager {
             };
             let uri = view.uri().map(|value| value.to_string());
             let app = app.clone();
-            crate::js::run(&view, "!!window.__searchReaderOn", move |value| {
+            crate::js::run_in_world(&view, crate::reader::READER_WORLD, crate::reader::STATE_PROBE, move |value| {
                 if value.as_deref() != Ok("false") { return; }
                 let same_document = app.view(id)
                     .and_then(|view| view.uri())
                     .map(|value| value.to_string()) == uri;
                 if !same_document { return; }
                 app.reading_tabs.borrow_mut().remove(&id);
-                if app.active_id() == id { app.reading.set(false); }
+                if app.active_id() == id {
+                    app.reading.set(false);
+                    app.refresh_helm();
+                    app.layout_layers(
+                        gtk::prelude::WidgetExt::allocated_width(&app.ui.overlay),
+                        gtk::prelude::WidgetExt::allocated_height(&app.ui.overlay),
+                    );
+                }
             });
         }
     });
@@ -326,6 +344,9 @@ pub fn shared_context() -> WebContext {
         .website_data_manager(&manager)
         .memory_pressure_settings(&page_memory_pressure())
         .build();
+    let favicon_dir = cache.join("webkit-favicons");
+    ensure_private_dir(&favicon_dir);
+    context.set_favicon_database_directory(Some(&favicon_dir.to_string_lossy()));
     context.set_cache_model(cache_model());
     if let Some(cookies) = context.cookie_manager() {
         cookies.set_persistent_storage(
@@ -472,7 +493,7 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                         if let Some(manager) = view.user_content_manager() {
                             let host = crate::shield::host_of(&uri);
                             if !host.is_empty() {
-                                curtain::sync_manager(&app, &manager, &host);
+                                curtain::sync_for_tab(&app, tab, &manager, &host);
                             }
                         } else {
                             curtain::sync_for_url(&app, &uri);
@@ -808,7 +829,30 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 return true;
             }
             let main_frame = action.frame_name().map(|name| name == "_main").unwrap_or(true);
-            if scheme_is_allowed(&uri, false) {
+            let allowed_file = uri.trim().to_ascii_lowercase().starts_with("file://")
+                && weak.upgrade().is_some_and(|app| {
+                    is_live(&app, tab, view) && {
+                        let tab_url = app
+                            .state
+                            .borrow()
+                            .tab(tab)
+                            .map(|t| t.url.clone());
+                        let view_uri = view.uri().map(|u| u.to_string());
+                        allow_file_navigation(
+                            main_frame,
+                            action.is_redirect(),
+                            matches!(
+                                action.navigation_type(),
+                                webkit2gtk::NavigationType::Other
+                                    | webkit2gtk::NavigationType::Reload
+                            ),
+                            view_uri.as_deref(),
+                            tab_url.as_deref(),
+                            &uri,
+                        )
+                    }
+                });
+            if scheme_is_allowed(&uri, false) || allowed_file {
                 return false;
             }
             // Only the page the address bar is showing gets an explanation. A
@@ -1301,6 +1345,31 @@ pub fn scheme_is_allowed(uri: &str, user_entered: bool) -> bool {
         || lower.starts_with("blob:")
 }
 
+/// Permit main-frame `file://` navigation only when explicitly initiated by
+/// browser/user navigation (`app::navigate`, extension options pages, or view-source)
+/// or following a link from an already-local `file://` page — never from a remote
+/// document, subframe, or HTTP redirect.
+fn allow_file_navigation(
+    main_frame: bool,
+    is_redirect: bool,
+    from_browser_load: bool,
+    current_view_uri: Option<&str>,
+    tab_url: Option<&str>,
+    target_uri: &str,
+) -> bool {
+    if !main_frame || is_redirect {
+        return false;
+    }
+    let target = target_uri.trim();
+    if !target.to_ascii_lowercase().starts_with("file://") {
+        return false;
+    }
+    if from_browser_load && tab_url.is_some_and(|u| u.trim() == target) {
+        return true;
+    }
+    current_view_uri.is_some_and(|u| u.trim().to_ascii_lowercase().starts_with("file://"))
+}
+
 /// What the engine says when it stops a page's process, in the browser's words.
 fn reason_for_termination(reason: webkit2gtk::WebProcessTerminationReason) -> String {
     use webkit2gtk::WebProcessTerminationReason as Reason;
@@ -1350,8 +1419,16 @@ fn reason_for_status(status: u32) -> String {
 
 /// A failure's reason, in the words a person would use.
 fn message_for(error: &glib::Error) -> String {
-    let text = error.message().to_lowercase();
-    if text.contains("name or service not known")
+    message_for_text(error.message())
+}
+
+/// Pure text mapping for `message_for` so unit tests can assert real WebKit /
+/// GLib TLS and network error strings end-to-end with the error classifier.
+pub(crate) fn message_for_text(raw: &str) -> String {
+    let text = raw.to_lowercase();
+    if text.contains("certificate") || text.contains("tls") || text.contains("ssl") {
+        "The site's security could not be verified.".to_string()
+    } else if text.contains("name or service not known")
         || text.contains("resolve")
         || text.contains("not found")
         || text.contains("dns")
@@ -1361,8 +1438,6 @@ fn message_for(error: &glib::Error) -> String {
         "The site refused the connection.".to_string()
     } else if text.contains("timed out") || text.contains("timeout") {
         "The site took too long to answer.".to_string()
-    } else if text.contains("certificate") || text.contains("tls") || text.contains("ssl") {
-        "The site's security could not be verified.".to_string()
     } else if text.contains("restricted network port") {
         "That address is not one a page may open.".to_string()
     } else if text.contains("network is unreachable") || text.contains("network") {
@@ -1598,6 +1673,38 @@ mod filename_tests {
         assert!(scheme_is_allowed(" https://example.com ", false));
         assert!(!scheme_is_allowed("mailto:person@example.com", false));
         assert!(!scheme_is_allowed("javascript:alert(1)", true));
+        assert!(super::allow_file_navigation(
+            true,
+            false,
+            true,
+            None,
+            Some("file:///tmp/options.html"),
+            "file:///tmp/options.html"
+        ));
+        assert!(!super::allow_file_navigation(
+            true,
+            false,
+            true,
+            Some("https://evil.example/"),
+            Some("https://evil.example/"),
+            "file:///etc/passwd"
+        ));
+        assert!(!super::allow_file_navigation(
+            true,
+            true,
+            true,
+            None,
+            Some("file:///tmp/options.html"),
+            "file:///etc/passwd"
+        ));
+        assert!(!super::allow_file_navigation(
+            false,
+            false,
+            true,
+            Some("file:///tmp/options.html"),
+            Some("file:///tmp/options.html"),
+            "file:///etc/passwd"
+        ));
     }
 
     #[test]

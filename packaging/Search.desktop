@@ -10,4 +10,4 @@ Categories=Network;WebBrowser;
 MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;
 StartupNotify=true
 StartupWMClass=search
-Keywords=web;browser;privacy;vertical tabs;WebKit;
+Keywords=web;browser;privacy;vertical tabs;WebKit;Rill;

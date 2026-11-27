@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="320" viewBox="0 0 1440 320" role="img" aria-labelledby="title description">
-  <title id="title">Search for Linux</title>
+  <title id="title">Rill for Linux</title>
   <desc id="description">Go somewhere interesting. A native Linux browser with an editorial start page, vertical tabs, and a shared WebKit engine.</desc>
   <defs>
     <clipPath id="planet"><circle cx="1220" cy="166" r="118"/></clipPath>
@@ -7,7 +7,7 @@
   <rect width="1440" height="320" fill="#f1efe9"/>
   <path d="M46 70h1008M46 266h1008" fill="none" stroke="#c1bdb2"/>
   <g font-family="DejaVu Sans Mono,monospace" font-size="12" letter-spacing="2" fill="#595a52">
-    <text x="46" y="48">SEARCH / FOR LINUX</text>
+    <text x="46" y="48">RILL / FOR LINUX</text>
     <text x="868" y="48">RUST + WEBKIT</text>
     <text x="46" y="296">VERTICAL TABS</text>
     <text x="265" y="296">LOCAL FIRST</text>

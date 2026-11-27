@@ -6,7 +6,7 @@
   <name>Rill</name>
   <summary>A small, quiet native WebKit browser for Linux</summary>
   <description>
-    <p>Rill (internal package name: search) is a Rust and WebKitGTK browser with native top tabs, an optional vertical tab sidebar, reading mode and local-first history.</p>
+    <p>Rill is a Rust and WebKitGTK browser with native top tabs, an optional vertical tab sidebar, reading mode and local-first history.</p>
     <p>It uses the shared system WebKit engine rather than bundling Chromium.</p>
   </description>
   <launchable type="desktop-id">Search.desktop</launchable>

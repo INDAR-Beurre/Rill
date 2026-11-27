@@ -18,10 +18,10 @@ chmod +x Rill-1.1.0-x86_64.AppImage
 ./Rill-1.1.0-x86_64.AppImage
 ```
 
-Open a web address directly (in the current build, use `--url`):
+Open a web address directly with `--url`:
 
 ```sh
-./build/rill --url https://example.com
+./Rill-1.1.0-x86_64.AppImage --url https://example.com
 ```
 
 Settings, tabs, history and bookmarks use the normal XDG user folders (`search`). Launching
@@ -111,7 +111,7 @@ The packager bundles DejaVu Sans, Adwaita fonts, and **Liberation Serif**
 (all four faces for serif fallback and web rendering; browser chrome uses clean
 sans-serif `Inter` / `Adwaita Sans` / `Noto Sans` / `Cantarell`). Liberation
 Serif is licensed under the **SIL Open Font License 1.1**, separately from
-Search's MIT license.
+Rill's MIT license.
 
 `tools/appimage.sh` requires all four `LiberationSerif-*.ttf` faces and the
 corresponding OFL license file to be present, copying the license to

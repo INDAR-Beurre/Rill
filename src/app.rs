@@ -10,7 +10,10 @@ use crate::ui::{self, TabRow, Ui};
 use crate::web;
 use gtk::gdk::prelude::*;
 use gtk::prelude::*;
-use webkit2gtk::{FindControllerExt, PrintOperationExt, UserContentManagerExt, WebInspectorExt, WebViewExt};
+use webkit2gtk::{
+    BackForwardListExt, BackForwardListItemExt, FindControllerExt, PrintOperationExt,
+    UserContentManagerExt, WebInspectorExt, WebViewExt,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
@@ -156,6 +159,9 @@ pub struct Tab {
     pub can_back: bool,
     pub can_forward: bool,
     pub failed: bool,
+    /// The tab's WebView suffered a `web-process-terminated` event (crash or
+    /// memory-limit termination) and must be rebuilt cleanly on recovery.
+    pub process_terminated: bool,
     pub asleep: bool,
     pub muted: bool,
     pub keep_awake: bool,
@@ -241,6 +247,7 @@ impl Tab {
             can_back: false,
             can_forward: false,
             failed: false,
+            process_terminated: false,
             asleep: false,
             muted: false,
             keep_awake: false,
@@ -270,6 +277,7 @@ impl Tab {
             can_back: self.can_back,
             can_forward: self.can_forward,
             failed: self.failed,
+            process_terminated: self.process_terminated,
             asleep: self.asleep,
             muted: self.muted,
             keep_awake: self.keep_awake,
@@ -321,9 +329,69 @@ pub struct DownloadRec {
     pub missing: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErrorPage {
     pub reason: String,
     pub url: String,
+    /// True when this failure originated from `web-process-terminated` (crash
+    /// or memory-limit termination) rather than a normal network/HTTP/TLS error.
+    pub terminated: bool,
+}
+
+/// Pure state-transition rule for recording a tab failure. Returns `true` when
+/// the tab's error view should be rendered or updated.
+///
+/// A `web-process-terminated` event supersedes an earlier generic `load-failed`
+/// entry on the same tab (WebKit can emit `load-failed` milliseconds before
+/// `web-process-terminated` when a page process dies mid-load). A late
+/// `load-failed` never overwrites an already-recorded failure.
+pub(crate) fn record_error_page(
+    errors: &mut BTreeMap<TabId, ErrorPage>,
+    id: TabId,
+    reason: &str,
+    url: &str,
+    terminated: bool,
+) -> bool {
+    match errors.get_mut(&id) {
+        Some(existing) => {
+            if existing.url.is_empty() && !url.is_empty() {
+                existing.url = url.to_string();
+            }
+            if terminated && !existing.terminated {
+                existing.reason = reason.to_string();
+                if !url.is_empty() {
+                    existing.url = url.to_string();
+                }
+                existing.terminated = true;
+                true
+            } else {
+                false
+            }
+        }
+        None => {
+            errors.insert(
+                id,
+                ErrorPage {
+                    reason: reason.to_string(),
+                    url: url.to_string(),
+                    terminated,
+                },
+            );
+            true
+        }
+    }
+}
+
+/// Choose the URL to load when recovering a crashed or failed tab: prefer the
+/// stored error URL, falling back to the tab's recorded URL.
+pub(crate) fn recovery_target_url(error_url: Option<&str>, tab_url: Option<&str>) -> String {
+    for candidate in [error_url, tab_url].into_iter().flatten() {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    String::new()
 }
 
 /// A window a page asked for without a click and was refused. Kept per tab so
@@ -636,6 +704,10 @@ pub struct App {
     pub top_pin_signature: RefCell<Option<(String, bool, u64, Vec<(TabId, String, String, bool, bool)>)>>,
     /// True while a column fold/unfold animation is driving the paned position.
     pub folding_anim: Cell<bool>,
+    /// Most recently created tab ID awaiting its one-shot entrance reveal.
+    fresh_tab: Cell<Option<TabId>>,
+    /// Per-space dot morph progress `[0.0, 1.0]` for liquid space indicator transitions.
+    space_dot_progress: RefCell<std::collections::HashMap<String, Rc<Cell<f64>>>>,
     /// Per-private-tab ephemeral hidden-element overrides keyed by `(TabId, host)`.
     /// Never persisted to `hidden.json`; cleared when the private tab closes.
     pub private_hidden:
@@ -1086,6 +1158,8 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         pin_signature: RefCell::new(None),
         top_pin_signature: RefCell::new(None),
         folding_anim: Cell::new(false),
+        fresh_tab: Cell::new(None),
+        space_dot_progress: RefCell::new(std::collections::HashMap::new()),
         private_hidden: RefCell::new(std::collections::HashMap::new()),
         last_layout: RefCell::new((0, 0)),
         reading: std::cell::Cell::new(false),
@@ -1096,6 +1170,14 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     // this slot. Wired first and installed after, all of them got an empty
     // handle: clicks, keys on the controls and the drag did nothing at all.
     install_self(&app);
+    if let Some(settings) = gtk::Settings::default() {
+        let weak = app.weak();
+        settings.connect_gtk_enable_animations_notify(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.apply_style();
+            }
+        });
+    }
     app.sync_tab_layout();
     app.sync_toolbar_items();
     app.ui.strip.connect_button_press_event({
@@ -1263,6 +1345,11 @@ impl App {
             corner.queue_draw();
         }
         self.ui.start.queue_dither_redraw();
+        self.ui.stack.set_transition_duration(if crate::motion::enabled() {
+            crate::motion::dur::MICRO as u32
+        } else {
+            0
+        });
     }
 
     /// Re-read the desktop's answer, for the look that follows it. Called when
@@ -1399,6 +1486,7 @@ impl App {
             state.tabs.insert(at, tab);
             id
         };
+        self.fresh_tab.set(Some(id));
         if background {
             self.render();
         } else {
@@ -1512,10 +1600,21 @@ impl App {
             let shown = popup.clone();
             dismiss.connect_clicked(move |_| {
                 if let Some(app) = weak.upgrade() {
-                    if card_for_dismiss.parent().is_some() {
-                        app.ui.overlay.remove(&card_for_dismiss);
-                    }
                     forget_blocked(&app, tab, &shown);
+                    if card_for_dismiss.parent().is_some() {
+                        let overlay = app.ui.overlay.clone();
+                        let card_done = card_for_dismiss.clone();
+                        crate::motion::float_toast_out_then(
+                            &card_for_dismiss,
+                            crate::motion::dur::TRAVEL,
+                            crate::motion::dur::EXIT,
+                            move || {
+                                if card_done.parent().is_some() {
+                                    overlay.remove(&card_done);
+                                }
+                            },
+                        );
+                    }
                 } else {
                     card_for_dismiss.hide();
                 }
@@ -1540,10 +1639,21 @@ impl App {
                 return glib::ControlFlow::Continue;
             }
             if let Some(app) = weak.upgrade() {
-                if card_for_timer.parent().is_some() {
-                    app.ui.overlay.remove(&card_for_timer);
-                }
                 forget_blocked(&app, tab, &shown);
+                if card_for_timer.parent().is_some() {
+                    let overlay = app.ui.overlay.clone();
+                    let card_done = card_for_timer.clone();
+                    crate::motion::float_toast_out_then(
+                        &card_for_timer,
+                        crate::motion::dur::TRAVEL,
+                        crate::motion::dur::EXIT,
+                        move || {
+                            if card_done.parent().is_some() {
+                                overlay.remove(&card_done);
+                            }
+                        },
+                    );
+                }
             } else {
                 card_for_timer.hide();
             }
@@ -1559,6 +1669,7 @@ impl App {
     pub fn open_tab_switcher(&self) {
         TAB_SWITCHER.with(|mode| mode.set(true));
         self.omni.show(&self.ui, true);
+        crate::ui::class(&self.ui.location, "omni-open");
         self.ui.overlay.reorder_overlay(&self.omni.holder, -1);
         let (w, h) = (
             self.ui.overlay.allocated_width().max(self.ui.window.allocated_width()),
@@ -1612,6 +1723,17 @@ impl App {
 
     pub fn tab_reading(&self, id: TabId) -> bool {
         self.reading_tabs.borrow().contains(&id)
+    }
+
+    /// User-initiated tab selection (clicking a tab/pin or pressing Ctrl+Tab /
+    /// Ctrl+1..9) dismisses any full-surface Settings/Extensions view so the
+    /// chosen tab is revealed immediately, while programmatic `select()` keeps
+    /// focus safety intact.
+    pub fn select_from_user(&self, id: TabId) {
+        if self.panels.try_borrow().is_ok_and(|p| p.is_full_surface()) {
+            self.close_panels();
+        }
+        self.select(id);
     }
 
     pub fn select(&self, id: TabId) {
@@ -1742,6 +1864,7 @@ impl App {
         // does not hand focus back to the field that is closing.
         if self.omni.visible.get() {
             self.omni.hide(&self.ui);
+            self.ui.location.style_context().remove_class("omni-open");
         }
         self.render();
         // Focus goes through the shared layer policy, not straight to the
@@ -1779,9 +1902,9 @@ impl App {
                 let top = adjust.value();
                 let page = adjust.page_size();
                 if (y as f64) < top {
-                    adjust.set_value((y as f64).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                    crate::motion::scroll_to(&self.ui.rows_scroll, &adjust, y as f64, crate::motion::dur::ENTER);
                 } else if (y + height) as f64 > top + page {
-                    adjust.set_value(((y + height) as f64 - page).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                    crate::motion::scroll_to(&self.ui.rows_scroll, &adjust, (y + height) as f64 - page, crate::motion::dur::ENTER);
                 }
             }
         }
@@ -1793,9 +1916,9 @@ impl App {
                 let page = adjust.page_size();
                 if page > 1.0 {
                     if (x as f64) < left {
-                        adjust.set_value((x as f64).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                        crate::motion::scroll_to(&self.ui.top_tabs_scroll, &adjust, x as f64, crate::motion::dur::ENTER);
                     } else if (x + width) as f64 > left + page {
-                        adjust.set_value(((x + width) as f64 - page).clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())));
+                        crate::motion::scroll_to(&self.ui.top_tabs_scroll, &adjust, (x + width) as f64 - page, crate::motion::dur::ENTER);
                     }
                 }
             }
@@ -1847,6 +1970,22 @@ impl App {
         // A closed tab's refused window is nothing to offer any more, and a
         // later tab reusing nothing of it must not inherit its card.
         self.state.borrow_mut().blocked.remove(&id);
+        let closing_widget: Option<gtk::Widget> = if !BATCH_CLOSE_SUPPRESS.with(Cell::get) && crate::motion::enabled() {
+            let state = self.state.borrow();
+            state.tab(id).and_then(|t| {
+                if self.ui.side.is_visible() && self.ui.side.is_child_visible() {
+                    t.row.as_ref().map(|r| r.event.clone().upcast())
+                } else {
+                    t.top_tab.as_ref().map(|r| r.event.clone().upcast())
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(widget) = closing_widget.as_ref() {
+            let palette = *self.palette.borrow();
+            crate::motion::spawn_tab_close_ghost(&self.ui.overlay, widget, palette.surface(), palette.hairline);
+        }
         let (index, was_active, was_private, closed_space) = {
             let state = self.state.borrow();
             match state.position(id) {
@@ -2110,6 +2249,9 @@ impl App {
         if let Some(old) = self.ui.stack.child_by_name(&name) {
             self.ui.stack.remove(&old);
         }
+        if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
+            tab.process_terminated = false;
+        }
         self.ensure_view(id);
         if let Some(view) = self.view(id) {
             if id == self.active_id() {
@@ -2118,6 +2260,40 @@ impl App {
                 // (omnibox, find bar, panel) is open on top of it.
                 self.restore_page_focus();
             }
+        }
+    }
+
+    /// Replaces a tab's `WebView` after its web process terminated, preserving
+    /// its back/forward `WebViewSessionState` when available and leaving the
+    /// caller in charge of initiating the next load or back navigation.
+    fn replace_terminated_view(&self, id: TabId) {
+        let name = format!("tab-{id}");
+        let saved_session = if let Some(view) = self.view(id) {
+            let session = view.session_state();
+            let private = self.state.borrow().tab(id).is_some_and(|t| t.private);
+            if private {
+                if let Some(manager) = view.user_content_manager() {
+                    curtain::forget_manager(&manager);
+                }
+            }
+            self.retire_page_layers(id);
+            self.ui.stack.remove(&view);
+            // SAFETY: the view was just removed from its container and is not
+            // referenced again after this scope.
+            unsafe { view.destroy() };
+            session
+        } else {
+            None
+        };
+        if let Some(old) = self.ui.stack.child_by_name(&name) {
+            self.ui.stack.remove(&old);
+        }
+        if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
+            tab.process_terminated = false;
+        }
+        self.create_view(id, false);
+        if let (Some(view), Some(session)) = (self.view(id), saved_session) {
+            view.restore_session_state(&session);
         }
     }
 
@@ -2292,10 +2468,36 @@ impl App {
             self.bmark_rows.borrow_mut().push(row.clone());
             self.ui.bmark_suggest.add(&row);
         }
+        let was_visible = self.ui.bmark_layer.root.is_visible();
+        crate::motion::cancel(&self.ui.bmark_layer.root);
+        crate::motion::cancel(&self.ui.bmark_card);
+        self.ui.bmark_layer.root.set_opacity(1.0);
+        self.ui.bmark_card.set_opacity(1.0);
         self.ui.bmark_layer.root.set_no_show_all(false);
         self.ui.bmark_layer.show();
         self.ui.bmark_card.show_all();
         self.layout_bmark_autocomplete();
+        if !was_visible {
+            let overlay_w = self.ui.overlay.allocated_width().max(self.ui.window.allocated_width()).max(380);
+            let card_w = 360.min((overlay_w - 24).max(240));
+            let (bx, by) = self
+                .ui
+                .bmark_search_box
+                .translate_coordinates(&self.ui.overlay, 0, 0)
+                .unwrap_or((overlay_w - card_w - 12, 68));
+            let bw = self.ui.bmark_search_box.allocated_width().max(210);
+            let bh = self.ui.bmark_search_box.allocated_height().max(24);
+            let x = (bx + bw - card_w).clamp(12, (overlay_w - card_w - 12).max(12));
+            let y = by + bh + 4;
+            crate::motion::slide_in_fixed(
+                &self.ui.bmark_layer.root,
+                &self.ui.bmark_card,
+                x,
+                y,
+                -crate::motion::dur::TRAVEL_SM,
+                crate::motion::dur::ENTER,
+            );
+        }
     }
 
     fn open_bmark_target(&self, target: &str) {
@@ -2309,11 +2511,22 @@ impl App {
     }
 
     pub fn close_bmark_autocomplete(&self, clear_entry: bool) {
-        self.ui.bmark_layer.root.hide();
         self.bmark_picked.set(-1);
         if clear_entry && !self.ui.bmark_search.text().is_empty() {
             self.ui.bmark_search.set_text("");
         }
+        if !self.ui.bmark_layer.root.is_visible() {
+            return;
+        }
+        crate::motion::cancel(&self.ui.bmark_card);
+        let root = self.ui.bmark_layer.root.clone();
+        let card = self.ui.bmark_card.clone();
+        crate::motion::fade_out_then(&self.ui.bmark_layer.root, crate::motion::dur::EXIT, move || {
+            root.hide();
+            root.set_no_show_all(true);
+            root.set_opacity(1.0);
+            card.set_opacity(1.0);
+        });
     }
 
     pub fn step_bmark_suggest(&self, delta: i32) {
@@ -2367,6 +2580,7 @@ impl App {
         self.render_pins();
         self.render_bmarks();
         self.render_rows();
+        self.fresh_tab.set(None);
         self.refresh_helm();
         let (blank, has_error, active_private) = {
             let state = self.state.borrow();
@@ -2471,6 +2685,7 @@ impl App {
             for child in current {
                 self.ui.side_spaces.remove(&child);
             }
+            self.space_dot_progress.borrow_mut().clear();
             for space in &spaces {
                 let button = gtk::ToggleButton::new();
                 crate::ui::class(&button, "space-dot");
@@ -2486,21 +2701,39 @@ impl App {
                         window.set_pass_through(true);
                     }
                 });
+                let initial_t = if space.id == active_id { 1.0 } else { 0.0 };
+                let dot_t = Rc::new(Cell::new(initial_t));
+                self.space_dot_progress
+                    .borrow_mut()
+                    .insert(space.id.clone(), dot_t.clone());
                 let weak_button = button.downgrade();
+                let dot_draw = dot_t;
                 dot.connect_draw(move |area, context| {
                     if let Some(button) = weak_button.upgrade() {
                         let color = button.style_context().color(button.state_flags());
-                        context.set_source_rgba(color.red(), color.green(), color.blue(), color.alpha());
-                        context.arc(
-                            area.allocated_width() as f64 / 2.0,
-                            area.allocated_height() as f64 / 2.0,
-                            if button.is_active() { 3.5 } else { 2.5 },
-                            0.0,
-                            std::f64::consts::TAU,
-                        );
-                        if button.is_active() {
+                        let pos = dot_draw.get();
+                        let fill_t = pos.clamp(0.0, 1.0);
+                        let radius = crate::motion::lerp(2.5, 4.0, pos).clamp(2.0, 4.5);
+                        let cx = area.allocated_width() as f64 / 2.0;
+                        let cy = area.allocated_height() as f64 / 2.0;
+                        if fill_t > 0.02 {
+                            context.set_source_rgba(
+                                color.red(),
+                                color.green(),
+                                color.blue(),
+                                color.alpha() * fill_t,
+                            );
+                            context.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
                             let _ = context.fill();
-                        } else {
+                        }
+                        if fill_t < 0.98 {
+                            context.set_source_rgba(
+                                color.red(),
+                                color.green(),
+                                color.blue(),
+                                color.alpha() * (1.0 - fill_t * 0.6),
+                            );
+                            context.arc(cx, cy, radius.min(3.2), 0.0, std::f64::consts::TAU);
                             context.set_line_width(1.2);
                             let _ = context.stroke();
                         }
@@ -2544,7 +2777,20 @@ impl App {
                 if let Some(access) = button.accessible() {
                     gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
                 }
-                button.queue_draw();
+                if let (Some(dot_cell), Some(dot_widget)) = (
+                    self.space_dot_progress.borrow().get(&space.id).cloned(),
+                    button.child(),
+                ) {
+                    crate::motion::tween_cell(
+                        &dot_widget,
+                        &dot_cell,
+                        if active { 1.0 } else { 0.0 },
+                        crate::motion::dur::MICRO,
+                        true,
+                    );
+                } else {
+                    button.queue_draw();
+                }
             }
         }
         drop(_space_dot_guard);
@@ -2628,7 +2874,11 @@ impl App {
                     let prelit = |w: &gtk::Widget| w.state_flags().contains(gtk::StateFlags::PRELIGHT);
                     let hovered = prelit(event.upcast_ref::<gtk::Widget>())
                         || close.parent().as_ref().map(prelit).unwrap_or(false);
-                    close.set_opacity(ui::close_opacity(id == active, hovered));
+                    crate::motion::fade_opacity_to(
+                        &close,
+                        ui::close_opacity(id == active, hovered),
+                        crate::motion::dur::MICRO,
+                    );
                 }
             }
             self.scroll_active_into_view();
@@ -2780,7 +3030,7 @@ impl App {
                     }
                     let keyval = event.keyval();
                     if keyval == key::Return || keyval == key::KP_Enter || keyval == key::space {
-                        app.select(id);
+                        app.select_from_user(id);
                         crate::gtkx::inh(true)
                     } else if keyval == key::Delete || keyval == key::KP_Delete {
                         app.close_tab(id);
@@ -2799,7 +3049,7 @@ impl App {
                         match button.button() {
                             1 => {
                                 if single {
-                                    app.select(id);
+                                    app.select_from_user(id);
                                 }
                                 return crate::gtkx::inh(true);
                             }
@@ -2833,7 +3083,11 @@ impl App {
                 let close = row.close.clone();
                 row.event.connect_enter_notify_event(move |_, _| {
                     if let Some(app) = weak.upgrade() {
-                        close.set_opacity(ui::close_opacity(app.active_id() == id, true));
+                        crate::motion::fade_opacity_to(
+                            &close,
+                            ui::close_opacity(app.active_id() == id, true),
+                            crate::motion::dur::MICRO,
+                        );
                     }
                     crate::gtkx::inh(false)
                 });
@@ -2846,7 +3100,11 @@ impl App {
                         return crate::gtkx::inh(false);
                     }
                     if let Some(app) = weak.upgrade() {
-                        close.set_opacity(ui::close_opacity(app.active_id() == id, false));
+                        crate::motion::fade_opacity_to(
+                            &close,
+                            ui::close_opacity(app.active_id() == id, false),
+                            crate::motion::dur::MICRO,
+                        );
                     }
                     crate::gtkx::inh(false)
                 });
@@ -2861,8 +3119,16 @@ impl App {
                 });
             }
             ui::pack(&self.ui.rows, &row.event, false);
+            let is_fresh = self.fresh_tab.get() == Some(tab.id);
+            let fresh_event = is_fresh.then(|| row.event.clone());
             if let Some(slot) = self.state.borrow_mut().tab_mut(tab.id) {
                 slot.row = Some(row);
+            }
+            if let Some(ev) = fresh_event {
+                if self.ui.side.is_visible() && self.ui.side.is_child_visible() {
+                    ev.show_all();
+                    crate::motion::reveal_tab(&ev, true);
+                }
             }
         }
         self.ui.rows.show_all();
@@ -3118,7 +3384,7 @@ impl App {
                     }
                     let keyval = event.keyval();
                     if keyval == key::Return || keyval == key::KP_Enter || keyval == key::space {
-                        app.select(id);
+                        app.select_from_user(id);
                         crate::gtkx::inh(true)
                     } else if keyval == key::Delete || keyval == key::KP_Delete {
                         app.close_tab(id);
@@ -3137,7 +3403,7 @@ impl App {
                         match button.button() {
                             1 => {
                                 if single {
-                                    app.select(id);
+                                    app.select_from_user(id);
                                 }
                                 return crate::gtkx::inh(true);
                             }
@@ -3392,7 +3658,7 @@ impl App {
                     }
                     let keyval = event.keyval();
                     if keyval == key::Return || keyval == key::KP_Enter || keyval == key::space {
-                        app.select(id);
+                        app.select_from_user(id);
                         crate::gtkx::inh(true)
                     } else if keyval == key::Delete || keyval == key::KP_Delete {
                         app.close_tab(id);
@@ -3411,7 +3677,7 @@ impl App {
                         match button.button() {
                             1 => {
                                 if single {
-                                    app.select(id);
+                                    app.select_from_user(id);
                                 }
                                 return crate::gtkx::inh(true);
                             }
@@ -3523,7 +3789,11 @@ impl App {
                     let prelit = |w: &gtk::Widget| w.state_flags().contains(gtk::StateFlags::PRELIGHT);
                     let hovered = prelit(event.upcast_ref::<gtk::Widget>())
                         || close.parent().as_ref().map(prelit).unwrap_or(false);
-                    close.set_opacity(ui::close_opacity(id == active, hovered));
+                    crate::motion::fade_opacity_to(
+                        &close,
+                        ui::close_opacity(id == active, hovered),
+                        crate::motion::dur::MICRO,
+                    );
                 }
             }
             self.scroll_active_into_view();
@@ -3683,7 +3953,7 @@ impl App {
                     }
                     let keyval = event.keyval();
                     if keyval == key::Return || keyval == key::KP_Enter || keyval == key::space {
-                        app.select(id);
+                        app.select_from_user(id);
                         crate::gtkx::inh(true)
                     } else if keyval == key::Delete || keyval == key::KP_Delete {
                         app.close_tab(id);
@@ -3702,7 +3972,7 @@ impl App {
                         match button.button() {
                             1 => {
                                 if single {
-                                    app.select(id);
+                                    app.select_from_user(id);
                                 }
                                 return crate::gtkx::inh(true);
                             }
@@ -3729,7 +3999,11 @@ impl App {
                 let close = chip.close.clone();
                 chip.event.connect_enter_notify_event(move |_, _| {
                     if let Some(app) = weak.upgrade() {
-                        close.set_opacity(ui::close_opacity(app.active_id() == id, true));
+                        crate::motion::fade_opacity_to(
+                            &close,
+                            ui::close_opacity(app.active_id() == id, true),
+                            crate::motion::dur::MICRO,
+                        );
                     }
                     crate::gtkx::inh(false)
                 });
@@ -3740,7 +4014,11 @@ impl App {
                         return crate::gtkx::inh(false);
                     }
                     if let Some(app) = weak.upgrade() {
-                        close.set_opacity(ui::close_opacity(app.active_id() == id, false));
+                        crate::motion::fade_opacity_to(
+                            &close,
+                            ui::close_opacity(app.active_id() == id, false),
+                            crate::motion::dur::MICRO,
+                        );
                     }
                     crate::gtkx::inh(false)
                 });
@@ -3754,8 +4032,16 @@ impl App {
                 });
             }
             ui::pack(&self.ui.top_tabs, &chip.event, false);
+            let is_fresh = self.fresh_tab.get() == Some(id);
+            let fresh_event = is_fresh.then(|| chip.event.clone());
             if let Some(slot) = self.state.borrow_mut().tab_mut(id) {
                 slot.top_tab = Some(chip);
+            }
+            if let Some(ev) = fresh_event {
+                if self.ui.topbar.is_visible() {
+                    ev.show_all();
+                    crate::motion::reveal_tab(&ev, false);
+                }
             }
         }
         self.ui.top_tabs.show_all();
@@ -3785,7 +4071,8 @@ impl App {
                     .count(),
             )
         };
-        self.ui.back.set_sensitive(back);
+        let full_panel = self.panels.try_borrow().is_ok_and(|p| p.is_full_surface());
+        self.ui.back.set_sensitive(back || full_panel);
         self.ui.forward.set_sensitive(forward);
         self.ui.reload.set_sensitive(!url.is_empty());
         self.ui.reader.set_sensitive(!url.is_empty());
@@ -3850,6 +4137,8 @@ impl App {
         if kept { context.add_class("kept"); } else { context.remove_class("kept"); }
         let context = self.ui.reader.style_context();
         if self.reading.get() { context.add_class("reading"); } else { context.remove_class("reading"); }
+        let loc_ctx = self.ui.location.style_context();
+        if loading { loc_ctx.add_class("loading"); } else { loc_ctx.remove_class("loading"); }
         let context = self.ui.reload.style_context();
         if context.has_class("stopping") != loading {
             if let Some(child) = self.ui.reload.child() {
@@ -4255,12 +4544,12 @@ impl App {
             let frac = self.ui.progress_frac.clone();
             let frac_done = self.ui.progress_frac.clone();
             crate::motion::animate(
-                // The bar fills its last stretch on MICRO, then clears on the
-                // shared EXIT role like every other layer that leaves.
+                // The bar fills its last stretch on MICRO with the liquid
+                // curve, then clears on the shared EXIT role like every other layer.
                 &self.ui.progress,
                 crate::motion::dur::MICRO,
                 move |t| {
-                    let eased = crate::motion::ease_out_cubic(t);
+                    let eased = crate::motion::ease_liquid(t);
                     frac.set(crate::motion::lerp(from, 1.0, eased));
                     progress.queue_draw();
                 },
@@ -4289,14 +4578,13 @@ impl App {
         }
         let progress = self.ui.progress.clone();
         let frac = self.ui.progress_frac.clone();
-        // Each step of the load bar is a small state change, so it moves on
-        // the shared MICRO role, the same as its final stretch, instead of
-        // its own 150ms.
+        // Incremental page-load steps chase smoothly on ENTER with ease_liquid
+        // so progress advances as a continuous fluid sweep rather than stiff hops.
         crate::motion::animate(
             &self.ui.progress,
-            crate::motion::dur::MICRO,
+            crate::motion::dur::ENTER,
             move |t| {
-                let eased = crate::motion::ease_out_cubic(t);
+                let eased = crate::motion::ease_liquid(t);
                 frac.set(crate::motion::lerp(from, value, eased));
                 progress.queue_draw();
             },
@@ -4440,15 +4728,52 @@ impl App {
         {
             self.cancel_hide_mode();
         }
-        if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
-            tab.url = url.clone();
-            tab.asleep = false;
-            tab.nav_epoch = tab.nav_epoch.wrapping_add(1);
+        let was_terminated = {
+            let mut state = self.state.borrow_mut();
+            // Starting a fresh navigation supersedes any prior error or crash
+            // page on this tab so mid-load renders never snap back to the old
+            // error and a subsequent failure on the new address is shown.
+            state.errors.remove(&id);
+            if let Some(tab) = state.tab_mut(id) {
+                tab.url = url.clone();
+                tab.asleep = false;
+                tab.failed = false;
+                tab.nav_epoch = tab.nav_epoch.wrapping_add(1);
+                tab.process_terminated
+            } else {
+                false
+            }
+        };
+        if id == self.active_id() && self.panels.try_borrow().is_ok_and(|p| p.is_full_surface()) {
+            self.close_panels();
         }
-        self.create_view(id, false);
+        let rebuilt_terminated = was_terminated && self.view(id).is_some();
+        if rebuilt_terminated {
+            self.replace_terminated_view(id);
+        } else {
+            self.create_view(id, false);
+        }
         curtain::apply_for_tab(self, id);
         if let Some(view) = self.view(id) {
-            web::load(&view, &url);
+            let restored_current = if rebuilt_terminated {
+                let target_uri = web::normalize_load_uri(&url);
+                view.back_forward_list()
+                    .and_then(|list| list.current_item())
+                    .filter(|item| {
+                        let Some(target) = target_uri.as_deref() else {
+                            return false;
+                        };
+                        item.uri().as_deref() == Some(target)
+                            || item.original_uri().as_deref() == Some(target)
+                    })
+            } else {
+                None
+            };
+            if let Some(item) = restored_current {
+                view.go_to_back_forward_list_item(&item);
+            } else {
+                web::load(&view, &url);
+            }
             // A background tab loads without taking the screen: the tab bar
             // says which tab is on top, and it must agree with what is shown.
             if id == self.active_id() {
@@ -4459,6 +4784,9 @@ impl App {
             }
         }
         self.update_row_title(id);
+        if id == self.active_id() {
+            self.refresh_helm();
+        }
         // Nothing is being typed at a page that just arrived: a field left open
         // over it hides the very page that was just asked for.
         if self.omni.visible.get() && self.omni.entry.text() != url {
@@ -4476,12 +4804,27 @@ impl App {
     }
 
     pub fn go_back(&self) {
+        if self.panels.try_borrow().is_ok_and(|p| p.is_full_surface()) {
+            self.close_panels();
+            return;
+        }
         let active = self.active_id();
-        let on_home = self
-            .state
-            .borrow()
-            .tab(active)
-            .is_some_and(|tab| tab.url.is_empty());
+        let (on_home, was_error, was_terminated) = {
+            let mut state = self.state.borrow_mut();
+            let was_error = state.errors.remove(&active).is_some();
+            let (on_home, was_terminated) = if let Some(tab) = state.tab_mut(active) {
+                if was_error {
+                    tab.failed = false;
+                }
+                (tab.url.is_empty(), tab.process_terminated)
+            } else {
+                (false, false)
+            };
+            (on_home, was_error, was_terminated)
+        };
+        if was_terminated && self.view(active).is_some() {
+            self.replace_terminated_view(active);
+        }
         if let Some(view) = self.view(active) {
             if on_home {
                 if let Some(uri) = view.uri().map(|u| u.to_string()).filter(|u| !u.is_empty() && u != "about:blank") {
@@ -4495,6 +4838,10 @@ impl App {
                     self.schedule_session();
                     return;
                 }
+            }
+            if was_error {
+                self.ui.stack.set_visible_child_name(&format!("tab-{active}"));
+                self.refresh_helm();
             }
             view.go_back();
         }
@@ -4510,6 +4857,9 @@ impl App {
     /// minimal Start Page when none is set, while preserving private/regular
     /// tab isolation.
     pub fn go_home(&self) {
+        if self.panels.try_borrow().is_ok_and(|p| p.is_full_surface()) {
+            self.close_panels();
+        }
         let custom_home = self.prefs.borrow().home_url.clone();
         if crate::tab_actions::is_web_url(&custom_home) {
             self.navigate_active(&custom_home);
@@ -4568,17 +4918,29 @@ impl App {
     }
 
     pub fn reload_tab(&self, id: TabId) {
-        if self.state.borrow().errors.contains_key(&id) {
-            let url = self
-                .state
-                .borrow()
-                .errors
-                .get(&id)
-                .map(|error| error.url.clone())
-                .unwrap_or_default();
-            self.state.borrow_mut().errors.remove(&id);
+        let (needs_recovery, url) = {
+            let state = self.state.borrow();
+            let err = state.errors.get(&id);
+            let tab = state.tab(id);
+            let needs_recovery = err.is_some() || tab.is_some_and(|t| t.process_terminated);
+            let url = recovery_target_url(
+                err.map(|e| e.url.as_str()),
+                tab.map(|t| t.url.as_str()),
+            );
+            (needs_recovery, url)
+        };
+        if needs_recovery {
+            {
+                let mut state = self.state.borrow_mut();
+                state.errors.remove(&id);
+                if let Some(tab) = state.tab_mut(id) {
+                    tab.failed = false;
+                }
+            }
             if !url.is_empty() {
                 self.navigate(id, &url);
+            } else {
+                self.render();
             }
             return;
         }
@@ -4588,7 +4950,6 @@ impl App {
                 view.reload();
             }
             None => {
-                let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
                 self.navigate(id, &url);
             }
         }
@@ -4822,6 +5183,11 @@ impl App {
         }
         self.render();
         self.ui.start.queue_dither_redraw();
+        self.ui.stack.set_transition_duration(if crate::motion::enabled() {
+            crate::motion::dur::MICRO as u32
+        } else {
+            0
+        });
     }
 
     pub fn set_roomy_tabs(&self, on: bool) {
@@ -5111,16 +5477,56 @@ impl App {
     }
 
     pub fn set_sidebar_visible(&self, on: bool) {
+        let was_sidebar = {
+            let prefs = self.prefs.borrow();
+            prefs.sidebar && !prefs.column_folded
+        };
         {
             let mut prefs = self.prefs.borrow_mut();
             prefs.sidebar = on;
             prefs.column_folded = false;
             prefs.save();
         }
+        crate::motion::cancel(&self.ui.paned);
+        crate::motion::cancel(&self.ui.body);
+        crate::motion::cancel(&self.ui.topbar);
+        self.folding_anim.set(false);
+        self.ui.body.set_opacity(1.0);
+        self.ui.topbar.set_opacity(1.0);
         self.close_main_menu();
         self.close_space_switcher();
         self.sync_tab_layout();
         self.render();
+        if crate::motion::enabled() && was_sidebar != on && !self.fullscreen.get() {
+            if on {
+                let target_w = self.prefs.borrow().side_width.round() as i32;
+                let start_w = (target_w / 3).max(crate::ui::STRIP_WIDTH);
+                self.folding_anim.set(true);
+                self.ui.paned.set_position(start_w);
+                let weak = self.weak();
+                crate::motion::slide_paned(
+                    &self.ui.paned,
+                    start_w,
+                    target_w,
+                    crate::motion::dur::LAYOUT,
+                    move || {
+                        if let Some(app) = weak.upgrade() {
+                            app.folding_anim.set(false);
+                            let (w, h) = (
+                                app.ui.overlay.allocated_width(),
+                                app.ui.overlay.allocated_height(),
+                            );
+                            if w > 1 && h > 1 {
+                                app.layout_layers(w, h);
+                            }
+                        }
+                    },
+                );
+                crate::motion::fade_in(&self.ui.body, crate::motion::dur::ENTER);
+            } else {
+                crate::motion::fade_in(&self.ui.topbar, crate::motion::dur::ENTER);
+            }
+        }
         self.ui.window.queue_resize();
         let (w, h) = (self.ui.overlay.allocated_width(), self.ui.overlay.allocated_height());
         if w > 1 && h > 1 {
@@ -5302,7 +5708,7 @@ impl App {
         }
         let index = ids.iter().position(|id| *id == active).unwrap_or(0);
         let next = if forwards { (index + 1) % ids.len() } else { (index + ids.len() - 1) % ids.len() };
-        self.select(ids[next]);
+        self.select_from_user(ids[next]);
     }
 
     pub fn jump(&self, number: usize) {
@@ -5312,10 +5718,10 @@ impl App {
         };
         if number == 9 {
             if let Some(last) = ids.last() {
-                self.select(*last);
+                self.select_from_user(*last);
             }
         } else if let Some(id) = ids.get(number.saturating_sub(1)) {
-            self.select(*id);
+            self.select_from_user(*id);
         }
     }
 
@@ -5541,6 +5947,7 @@ impl App {
         // query, which asked the search engine and filled the list with its
         // suggestions before the real text replaced them.
         self.omni.show(&self.ui, over);
+        crate::ui::class(&self.ui.location, "omni-open");
         self.omni.entry.set_placeholder_text(Some("Search or enter address"));
         self.ui.overlay.reorder_overlay(&self.omni.holder, -1);
         let (w, h) = (
@@ -5576,6 +5983,7 @@ impl App {
         // page keeps its view but leaves it unmapped, and in that case the
         // helper falls back to the stack.
         self.omni.hide(&self.ui);
+        self.ui.location.style_context().remove_class("omni-open");
         self.restore_page_focus();
     }
 
@@ -6006,7 +6414,20 @@ impl App {
         let column = self.side_width();
         self.omni.layout_in(width, height, column, 0);
         self.layout_bmark_autocomplete();
+        let viewport_rect = {
+            let vw = self.ui.viewport_frame.allocated_width();
+            let vh = self.ui.viewport_frame.allocated_height();
+            if vw > 40 && vh > 40 {
+                self.ui
+                    .viewport_frame
+                    .translate_coordinates(&self.ui.overlay, 0, 0)
+                    .map(|(vx, vy)| (vx, vy, vw, vh))
+            } else {
+                None
+            }
+        };
         if let Ok(panels) = self.panels.try_borrow() {
+            panels.set_viewport_rect(viewport_rect);
             panels.layout_with_column(width, height, column);
         }
         if let Ok(find) = self.find.try_borrow() {
@@ -6071,6 +6492,8 @@ impl App {
             let mut panels = self.panels.borrow_mut();
             panels.open_panel(&app, kind);
             self.ui.overlay.reorder_overlay(&panels.holder, -1);
+            drop(panels);
+            self.refresh_helm();
         }
     }
 
@@ -6080,6 +6503,8 @@ impl App {
             let mut panels = self.panels.borrow_mut();
             panels.open_panel_filtered(&app, kind, filter);
             self.ui.overlay.reorder_overlay(&panels.holder, -1);
+            drop(panels);
+            self.refresh_helm();
         }
     }
 
@@ -6089,7 +6514,7 @@ impl App {
                 let panels = self.panels.borrow();
                 let open = panels.open == Some(PanelKind::Settings);
                 let filter = panels.filter.borrow().clone();
-                let scroll = panels.scroll.vadjustment().value();
+                let scroll = panels.scroll_for_open().vadjustment().value();
                 (open, filter, scroll)
             };
             if was_open {
@@ -6098,7 +6523,7 @@ impl App {
                 } else {
                     self.open_panel_filtered(PanelKind::Settings, &saved_filter);
                 }
-                let scroll_ref = self.panels.borrow().scroll.clone();
+                let scroll_ref = self.panels.borrow().scroll_for_open();
                 glib::idle_add_local_once(move || {
                     let adj = scroll_ref.vadjustment();
                     let max_val = (adj.upper() - adj.page_size()).max(0.0);
@@ -6148,6 +6573,7 @@ impl App {
     pub fn close_panels(&self) {
         crate::addons_catalog::cancel_pending();
         self.panels.borrow_mut().close(&self.ui);
+        self.refresh_helm();
         self.restore_page_focus();
     }
 
@@ -7140,6 +7566,15 @@ impl App {
         self.pin_signature.replace(None);
         self.top_pin_signature.replace(None);
         self.select(target_tab);
+        if crate::motion::enabled() {
+            if self.ui.side.is_visible() && self.ui.side.is_child_visible() {
+                crate::motion::fade_from(&self.ui.rows, 0.25, 1.0, crate::motion::dur::MICRO);
+                crate::motion::fade_from(&self.ui.side_space_label, 0.25, 1.0, crate::motion::dur::MICRO);
+            } else if self.ui.topbar.is_visible() {
+                crate::motion::fade_from(&self.ui.top_tabs, 0.25, 1.0, crate::motion::dur::MICRO);
+                crate::motion::fade_from(&self.ui.top_space_label, 0.25, 1.0, crate::motion::dur::MICRO);
+            }
+        }
         true
     }
 
@@ -7721,6 +8156,7 @@ impl App {
         });
         *self.space_popover.borrow_mut() = Some(popover.clone());
         popover.popup();
+        crate::motion::reveal_popover(&popover, &container, popover.position());
         search_entry.grab_focus();
     }
 
@@ -8198,6 +8634,7 @@ impl App {
             }
             if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
                 tab.asleep = true;
+                tab.process_terminated = false;
                 slept += 1;
             }
         }
@@ -10132,6 +10569,7 @@ impl App {
         });
         *self.menu_popover.borrow_mut() = Some(popover.clone());
         popover.popup();
+        crate::motion::reveal_popover(&popover, &scroller, popover.position());
     }
 
     pub fn flash_toast(&self, message: &str) {
@@ -10174,11 +10612,16 @@ impl App {
                 if toast_for_timer.parent().is_some() {
                     let overlay = app.ui.overlay.clone();
                     let toast_done = toast_for_timer.clone();
-                    crate::motion::fade_out_then(&toast_for_timer, crate::motion::dur::EXIT, move || {
-                        if toast_done.parent().is_some() {
-                            overlay.remove(&toast_done);
-                        }
-                    });
+                    crate::motion::float_toast_out_then(
+                        &toast_for_timer,
+                        crate::motion::dur::TRAVEL,
+                        crate::motion::dur::EXIT,
+                        move || {
+                            if toast_done.parent().is_some() {
+                                overlay.remove(&toast_done);
+                            }
+                        },
+                    );
                 }
             } else {
                 toast_for_timer.hide();
@@ -10193,32 +10636,50 @@ impl App {
 
     /// A page that will not open, explained by the browser.
     pub fn show_error(&self, id: TabId, reason: &str, url: &str) {
-        {
+        self.show_error_inner(id, reason, url, false);
+    }
+
+    /// A page whose WebKit web process terminated (crash or memory limit).
+    /// Supersedes any generic `load-failed` error from the same load and marks
+    /// the tab's view for clean rebuild on recovery.
+    pub fn show_process_terminated(&self, id: TabId, reason: &str, url: &str) {
+        self.show_error_inner(id, reason, url, true);
+    }
+
+    fn show_error_inner(&self, id: TabId, reason: &str, url: &str, terminated: bool) {
+        let (display_reason, display_url) = {
             let mut state = self.state.borrow_mut();
-            // A tab holds its own failure: a 404 in one tab must not paint over
-            // the page in another, and Try again must reload the right one.
-            match state.errors.get_mut(&id) {
-                Some(existing) => {
-                    if existing.url.is_empty() && !url.is_empty() {
-                        existing.url = url.to_string();
-                    }
-                    return;
-                }
-                None => {
-                    state.errors.insert(
-                        id,
-                        ErrorPage { reason: reason.to_string(), url: url.to_string() },
-                    );
+            if terminated {
+                if let Some(tab) = state.tab_mut(id) {
+                    tab.process_terminated = true;
+                    tab.loading = false;
+                    tab.failed = true;
                 }
             }
+            // A tab holds its own failure: a failure or crash in one tab must
+            // not paint over the page in another, and Try again must reload the
+            // right one.
+            if !record_error_page(&mut state.errors, id, reason, url, terminated) {
+                return;
+            }
+            let effective = state
+                .errors
+                .get(&id)
+                .map(|entry| (entry.reason.clone(), entry.url.clone()))
+                .unwrap_or_else(|| (reason.to_string(), url.to_string()));
             if let Some(tab) = state.tab_mut(id) {
-                if !url.is_empty() && tab.url != url {
-                    tab.url = url.to_string();
+                if !effective.1.is_empty() && tab.url != effective.1 {
+                    tab.url = effective.1.clone();
                 }
-                tab.title = error_tab_title(reason, url);
+                tab.title = error_tab_title(&effective.0, &effective.1);
                 tab.failed = true;
+                if terminated {
+                    tab.loading = false;
+                    tab.process_terminated = true;
+                }
             }
-        }
+            effective
+        };
         self.update_row_title(id);
         if id != self.active_id() {
             // Not the page being looked at: the error is remembered above and
@@ -10226,17 +10687,22 @@ impl App {
             self.render_rows();
             return;
         }
-        self.render_error_page(reason, url);
+        self.render_error_page(&display_reason, &display_url);
         // A child added to a stack after the window was shown still has to be
         // told it is visible before it can be the visible child.
         self.ui.errorpage.show_all();
         self.ui.stack.set_visible_child_name("error");
+        self.refresh_helm();
         self.ui.window.check_resize();
         self.ui.overlay.check_resize();
         self.ui.error_holder.queue_resize();
         let error_visible = self.ui.stack.visible_child_name().as_deref() == Some("error");
-        if should_focus_error_back(true, error_visible, reason, self.overlay_blocks_page_focus(id))
-        {
+        if should_focus_error_back(
+            true,
+            error_visible,
+            &display_reason,
+            self.overlay_blocks_page_focus(id),
+        ) {
             self.ui.error_back.grab_focus();
         }
     }
@@ -10304,21 +10770,25 @@ impl App {
         }
     }
 
-    /// The failed address, asked for again. For a server error or a dead
-    /// connection the address is still the right one, so this is the whole
-    /// retry; a 4xx goes the other way, through error_pressed.
+    /// The failed address, asked for again. For a server error, dead
+    /// connection, or crashed web process the address is still the right one,
+    /// so this clears the error and navigates (rebuilding a terminated WebView
+    /// cleanly); a 4xx goes the other way, through error_pressed.
     pub fn retry(&self) {
         let id = self.active_id();
-        let url = self
-            .state
-            .borrow()
-            .errors
-            .get(&id)
-            .map(|error| error.url.clone())
-            .unwrap_or_default();
-        self.state.borrow_mut().errors.remove(&id);
+        let url = {
+            let mut state = self.state.borrow_mut();
+            let err_url = state.errors.remove(&id).map(|error| error.url);
+            let tab_url = state.tab_mut(id).map(|tab| {
+                tab.failed = false;
+                tab.url.clone()
+            });
+            recovery_target_url(err_url.as_deref(), tab_url.as_deref())
+        };
         if !url.is_empty() {
             self.navigate(id, &url);
+        } else {
+            self.render();
         }
     }
 
@@ -10331,7 +10801,8 @@ impl App {
     /// there is nowhere to go back to.
     pub fn error_back_pressed(&self) {
         let id = self.active_id();
-        let can_back = self
+        let view_can_back = self.view(id).is_some_and(|view| view.can_go_back());
+        let tab_can_back = self
             .state
             .borrow()
             .tabs
@@ -10339,7 +10810,7 @@ impl App {
             .find(|tab| tab.id == id)
             .map(|tab| tab.can_back)
             .unwrap_or(false);
-        if can_back {
+        if view_can_back || (tab_can_back && self.view(id).is_some()) {
             self.go_back();
         } else {
             self.open_omni(true);
@@ -10432,8 +10903,9 @@ impl App {
             self.ui.window.check_resize();
             self.ui.overlay.check_resize();
             self.ui.start.root.check_resize();
+            self.ui.bmark_layer.root.check_resize();
             let panels = self.panels.borrow();
-            panels.scroll.check_resize();
+            panels.scroll_for_open().check_resize();
             panels.holder.check_resize();
             drop(panels);
             let mut events = 0;
@@ -10575,7 +11047,8 @@ impl App {
             let (red, green, blue, alpha) = crate::ui::scrim_colour(&self.palette.borrow());
             let omni_scrim_visible = self.omni.scrim.is_visible();
             let panels_scrim_visible = self.panels.borrow().scrim.is_visible();
-            if self.omni.visible.get() || self.panels.borrow().open.is_some() {
+            let panels_uses_scrim = self.panels.borrow().uses_scrim();
+            if self.omni.visible.get() || panels_uses_scrim {
                 context.set_source_rgba(red, green, blue, alpha);
                 context.rectangle(0.0, 0.0, width as f64, height as f64);
                 let _ = context.fill();
@@ -11836,6 +12309,93 @@ mod tests {
         // that what it parses is never a client error: a 404's reload must not
         // come from an address that happens to have three digits in it.
         assert_eq!(error_copy("There is nothing at 127.0.0.1:8099 (going nowhere).").1, "Try again");
+    }
+
+    #[test]
+    fn crash_supersedes_load_failed_and_stays_isolated_per_tab() {
+        let mut errors = BTreeMap::new();
+        // Generic load-failed arrives first on tab 1.
+        assert!(record_error_page(
+            &mut errors,
+            1,
+            "The page could not be loaded.",
+            "https://www.youtube.com/",
+            false,
+        ));
+        // Duplicate load-failed does not overwrite it.
+        assert!(!record_error_page(
+            &mut errors,
+            1,
+            "The site refused the connection.",
+            "https://www.youtube.com/",
+            false,
+        ));
+        assert_eq!(errors[&1].reason, "The page could not be loaded.");
+        assert!(!errors[&1].terminated);
+
+        // WebProcess termination arrives next and supersedes the generic load failure.
+        assert!(record_error_page(
+            &mut errors,
+            1,
+            "The page crashed.",
+            "",
+            true,
+        ));
+        assert_eq!(errors[&1].reason, "The page crashed.");
+        assert_eq!(errors[&1].url, "https://www.youtube.com/");
+        assert!(errors[&1].terminated);
+
+        // A late load-failed never overwrites the crash reason.
+        assert!(!record_error_page(
+            &mut errors,
+            1,
+            "The page could not be loaded.",
+            "https://www.youtube.com/",
+            false,
+        ));
+        assert_eq!(errors[&1].reason, "The page crashed.");
+
+        // Sibling tab 2 stays unaffected and holds its own error independently.
+        assert!(!errors.contains_key(&2));
+        assert!(record_error_page(
+            &mut errors,
+            2,
+            "The site refused the connection.",
+            "http://127.0.0.1:1/",
+            false,
+        ));
+        assert_eq!(errors[&1].reason, "The page crashed.");
+        assert_eq!(errors[&2].reason, "The site refused the connection.");
+
+        // Navigating away clears the old error so a new failure renders cleanly.
+        errors.remove(&1);
+        assert!(record_error_page(
+            &mut errors,
+            1,
+            "The site refused the connection.",
+            "http://127.0.0.1:1/new",
+            false,
+        ));
+        assert_eq!(errors[&1].reason, "The site refused the connection.");
+        assert_eq!(errors[&1].url, "http://127.0.0.1:1/new");
+        assert!(!errors[&1].terminated);
+    }
+
+    #[test]
+    fn recovery_target_url_prefers_error_url_then_tab_url() {
+        assert_eq!(
+            recovery_target_url(Some("https://www.youtube.com/watch?v=1"), Some("https://www.youtube.com/")),
+            "https://www.youtube.com/watch?v=1"
+        );
+        assert_eq!(
+            recovery_target_url(Some("  "), Some("https://github.com/")),
+            "https://github.com/"
+        );
+        assert_eq!(
+            recovery_target_url(None, Some("https://example.com/")),
+            "https://example.com/"
+        );
+        assert_eq!(recovery_target_url(None, None), "");
     }
 }
 

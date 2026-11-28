@@ -428,6 +428,58 @@ def verify_apprun_space_paths(suite: Suite) -> None:
         )
 
 
+def verify_apprun_dmabuf_env(suite: Suite) -> None:
+    """Verify packaging/AppRun leaves WEBKIT_DISABLE_DMABUF_RENDERER unset by default and preserves explicit values."""
+    with tempfile.TemporaryDirectory(prefix="rill-apprun-dmabuf-") as tmp:
+        td = Path(tmp)
+        appdir = td / "AppDir"
+        (appdir / "usr/bin").mkdir(parents=True)
+        script = appdir / "AppRun"
+        shutil.copy2(ROOT / "packaging/AppRun", script)
+        stub = appdir / "usr/bin/search"
+        stub.write_text(
+            "#!/bin/sh\n"
+            "if [ \"${WEBKIT_DISABLE_DMABUF_RENDERER+x}\" = x ]; then\n"
+            "  printf 'SET:%s\\n' \"$WEBKIT_DISABLE_DMABUF_RENDERER\" > \"$RILL_TEST_OUT\"\n"
+            "else\n"
+            "  printf 'UNSET\\n' > \"$RILL_TEST_OUT\"\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+
+        cases = [
+            ("unset", None, "UNSET"),
+            ("zero", "0", "SET:0"),
+            ("one", "1", "SET:1"),
+            ("empty", "", "SET:"),
+            ("custom", "custom-value", "SET:custom-value"),
+        ]
+        ok = True
+        details = []
+        for label, val, expected in cases:
+            out_file = td / f"out-{label}.txt"
+            env = os.environ.copy()
+            env.pop("WEBKIT_DISABLE_DMABUF_RENDERER", None)
+            if val is not None:
+                env["WEBKIT_DISABLE_DMABUF_RENDERER"] = val
+            env["RILL_TEST_OUT"] = str(out_file)
+            res = subprocess.run([str(script)], env=env, capture_output=True, text=True)
+            actual = (
+                out_file.read_text(encoding="utf-8").rstrip("\r\n")
+                if out_file.exists()
+                else f"<missing:rc={res.returncode}>"
+            )
+            if res.returncode != 0 or actual != expected:
+                ok = False
+                details.append(f"{label}:got={actual!r},want={expected!r},rc={res.returncode}")
+        suite.check(
+            "guard:AppRun:dmabuf-passthrough",
+            ok,
+            ", ".join(details) if details else "unset stays unset; explicit 0/1/empty/custom values preserved",
+        )
+
+
 def verify_recipes_and_metadata(suite: Suite, version: str) -> None:
     # 1. Historic Rill 1.1.0 artifact preserved untouched.
     if HISTORIC_110_APPIMAGE.is_file():
@@ -522,6 +574,7 @@ def verify_recipes_and_metadata(suite: Suite, version: str) -> None:
         "XDG_DATA_DIRS preserves system share paths when unset",
     )
     verify_apprun_space_paths(suite)
+    verify_apprun_dmabuf_env(suite)
 
     # 7. Uninstall safety: no rm targeting ~/.config/search or ~/.local/share/search.
     for rel in [

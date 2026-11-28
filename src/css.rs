@@ -140,9 +140,10 @@ button.mark:disabled {{ opacity: 0.35; }}
 
 .toptabs-scroll, .toptabs-scroll viewport {{ background-color: transparent; border: none; }}
 .toptab {{ border-radius: {r_pill}px; border: 1px solid transparent; background-color: transparent; min-height: 28px; color: {muted}; }}
-.toptab:hover {{ background-color: {sidehover}; color: {ink}; }}
+.toptab:hover {{ background-color: {sidehover}; color: {ink}; box-shadow: {pillhover}; }}
+.toptab:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
 .toptab.live {{ background-color: {surface}; border-color: {divider}; box-shadow: {tabshadow}; color: {ink}; }}
-.toptab.live:hover {{ background-color: {card}; }}
+.toptab.live:hover {{ background-color: {card}; border-color: {fieldborder}; }}
 .toptab.drag-over, .toppin.drag-over, .row.drag-over, .pin.drag-over {{ border-color: {accent}; background-color: {tint}; }}
 .toptab.dragging, .toppin.dragging, .row.dragging, .pin.dragging {{ opacity: 0.55; }}
 .toptab-title {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {rowfg}; }}
@@ -151,34 +152,42 @@ button.mark:disabled {{ opacity: 0.35; }}
 .toptab.keep-awake {{ border-color: {accent}; }}
 .toptab.private.live {{ border-color: {fieldborder}; }}
 .toppin {{ border: 1px solid transparent; border-radius: {r_sm}px; background-color: transparent; min-width: 30px; min-height: 30px; }}
-.toppin:hover {{ background-color: {sidehover}; }}
+.toppin:hover {{ background-color: {sidehover}; border-color: {divider}; box-shadow: {pillhover}; }}
+.toppin:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
 .toppin.live {{ background-color: {surface}; border-color: {divider}; box-shadow: {tabshadow}; }}
 .toppin.keep-awake, .pin.keep-awake {{ border-color: {accent}; }}
 .toppin.private.live, .pin.private.live {{ border-color: {fieldborder}; }}
-button.space-pill {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 2px 6px; min-height: 24px; color: {muted}; }}
-button.space-pill:hover {{ background-color: {hover}; }}
+button.space-pill {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 2px 8px; min-height: 24px; color: {muted}; }}
+button.space-pill:hover {{ background-color: {hover}; border-color: {divider}; color: {ink}; }}
+button.space-pill:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
 .space-pill-label {{ font-family: {font}; font-size: {caption}px; font-weight: 500; color: {muted}; }}
 button.space-dot, button.space-menu-button {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 0; min-height: 26px; min-width: 26px; color: {faint}; box-shadow: none; }}
 button.space-dot:hover, button.space-menu-button:hover {{ background-color: {sidehover}; color: {ink}; }}
-button.space-dot.active {{ color: {ink}; background-color: {sidehover}; }}
+button.space-dot:active, button.space-menu-button:active {{ background-color: {wash}; }}
+button.space-dot.active {{ color: {accent}; background-color: {tint}; border-color: {divider}; }}
 .space-meta {{ font-family: {font}; font-size: {caption}px; color: {muted}; }}
 button.act.danger {{ color: {dangerink}; border-color: {divider}; }}
 button.act.danger:hover {{ background-color: {danger}; color: #FFFFFF; border-color: {danger}; }}
 button.top-newtab {{ min-width: 28px; min-height: 28px; border-radius: {r_pill}px; padding: 0; color: {muted}; }}
 button.top-newtab:hover {{ background-color: {sidehover}; color: {ink}; }}
+button.top-newtab:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
 
 button.newtab-row {{ background-color: transparent; border: none; color: {muted}; border-radius: {r_pill}px; padding: 6px 12px; min-height: 20px; }}
 button.newtab-row label.newtab-label {{ color: {muted}; font-size: {small}px; font-weight: 500; }}
 button.newtab-row:hover {{ background-color: {sidehover}; color: {ink}; }}
+button.newtab-row:active {{ background-color: {wash}; }}
 button.sidebar-action {{ color: {muted}; padding: 6px 12px; border-radius: {r_pill}px; min-height: 20px; }}
 button.sidebar-action label {{ font-size: {small}px; color: {muted}; }}
 button.sidebar-action:hover, button.sidebar-tool:hover {{ background-color: {sidehover}; color: {ink}; }}
 button.sidebar-tool {{ min-width: 24px; min-height: 24px; border-radius: {r_pill}px; padding: 0; }}
 button.chrome-tool {{ min-width: 28px; min-height: 28px; border-radius: {r_pill}px; padding: 0; }}
+button.chrome-tool:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
 button.chrome-tool.kept, button.chrome-tool.reading {{ color: {accent}; background-color: transparent; }}
 button.chrome-tool.kept:hover, button.chrome-tool.reading:hover {{ background-color: {tint}; }}
-.location {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 0 4px; min-height: 30px; }}
-.location:hover {{ border-color: {fieldborder}; }}
+.location {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 0 4px; min-height: 30px; box-shadow: none; }}
+.location:hover {{ border-color: {fieldborder}; box-shadow: {pillhover}; }}
+.location.loading {{ border-color: {fieldborder}; }}
+.location.omni-open {{ border-color: {accent}; box-shadow: {focusring}; }}
 button.site-info {{ padding: 4px 8px; color: {muted}; border-radius: {r_pill}px; min-width: 26px; min-height: 26px; }}
 button.site-info.protected {{ color: {accent}; }}
 button.address-button {{ border-radius: {r_pill}px; padding: 4px 12px 4px 4px; }}
@@ -187,14 +196,15 @@ button.address-button:hover {{ background-color: transparent; }}
 .address-path {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .control {{ min-width: 26px; min-height: 26px; border-radius: {r_pill}px; background-color: transparent; color: {muted}; }}
 .control:hover {{ background-color: {hover}; color: {ink}; }}
+.control:active {{ background-color: {wash}; }}
 .control.shut:hover {{ background-color: {danger}; color: #FFFFFF; }}
 window.unfocused .control {{ opacity: 0.6; }}
 
 .row {{ border-radius: {r_pill}px; border: 1px solid transparent; background-color: transparent; min-height: {row_height}px; color: {muted}; }}
-.row:hover {{ background-color: {sidehover}; }}
-.row.live {{ background-color: {surface}; border: 1px solid {divider}; box-shadow: none; color: {ink}; }}
-.row.live:hover {{ background-color: {card}; }}
-.row:active {{ background-color: {wash}; }}
+.row:hover {{ background-color: {sidehover}; box-shadow: {pillhover}; }}
+.row.live {{ background-color: {surface}; border: 1px solid {divider}; box-shadow: {tabshadow}; color: {ink}; }}
+.row.live:hover {{ background-color: {card}; border-color: {fieldborder}; }}
+.row:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
 .rowtitle {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {rowfg}; }}
 .liveword {{ color: {ink}; font-weight: 600; }}
 .row-subtitle {{ font-family: {font}; font-size: {caption}px; color: {faint}; }}
@@ -222,10 +232,12 @@ viewport {{ background-color: transparent; }}
 .viewport, .blank, .error-page {{ background-color: transparent; }}
 .progress {{ color: {accent}; background-color: transparent; }}
 .bmarkbar {{ background-color: {ground}; padding-top: 0; padding-bottom: 0; }}
-.bmark {{ font-family: {font}; font-size: {caption}px; font-weight: 500; color: {muted}; padding: 3px 10px; min-height: 22px; border-radius: {r_pill}px; }}
-.bmark:hover {{ background-color: {hover}; color: {ink}; }}
-.bmark-search {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 0 10px; min-height: 24px; }}
-.bmark-search.focused {{ border-color: {fieldborder}; }}
+.bmark {{ font-family: {font}; font-size: {caption}px; font-weight: 500; color: {muted}; padding: 3px 10px; min-height: 22px; border-radius: {r_pill}px; border: 1px solid transparent; }}
+.bmark:hover {{ background-color: {hover}; color: {ink}; border-color: {divider}; }}
+.bmark:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
+.bmark-search {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 0 10px; min-height: 24px; box-shadow: none; }}
+.bmark-search:hover {{ border-color: {fieldborder}; }}
+.bmark-search.focused {{ border-color: {accent}; box-shadow: {focusring}; }}
 .bmark-search entry {{ background-color: transparent; border: none; outline: none; box-shadow: none; padding: 2px 0; min-height: 0; font-family: {font}; font-size: {caption}px; color: {ink}; }}
 .bmark-search entry:focus {{ border: none; outline: none; box-shadow: none; }}
 .bmark-suggest-card {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_lg}px; box-shadow: 0 8px 24px {shadow}; }}
@@ -246,10 +258,10 @@ viewport {{ background-color: transparent; }}
 .start-private-badge {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {ink}; }}
 .start-private-note {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_lg}px; padding: 10px 16px; box-shadow: {startshadow}; }}
 .start-private-copy {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
-.start-search {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 5px 7px 5px 16px; box-shadow: {startshadow}; }}
-.start-search.focused {{ border-color: {fieldborder}; box-shadow: {startshadowfocus}; }}
+.start-search {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 5px 7px 5px 18px; box-shadow: {startshadow}; }}
+.start-search:hover {{ border-color: {fieldborder}; }}
+.start-search.focused {{ border-color: {accent}; box-shadow: {startshadowfocus}; }}
 .start-search.has-text {{ border-color: {accent}; }}
-.start-search-icon {{ margin-left: 2px; color: {muted}; }}
 .start-search entry {{ border: none; outline: none; box-shadow: none; background-color: transparent; font-family: {font}; font-size: {body}px; color: {ink}; padding: 6px 0; }}
 .start-search entry:focus {{ border: none; outline: none; box-shadow: none; }}
 button.start-search-submit {{ background-color: transparent; color: {muted}; border: none; border-radius: {r_pill}px; min-width: 30px; min-height: 30px; padding: 6px; }}
@@ -270,14 +282,15 @@ button.start-search-submit:hover .start-arrow {{ color: {ink}; }}
 button.start-chip {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px 6px 8px; min-height: 34px; box-shadow: {startshadow}; }}
 button.start-chip.start-chip-icon-only {{ padding: 0; min-width: 44px; min-height: 44px; border-radius: {r_pill}px; }}
 button.start-chip.start-chip-detailed {{ padding: 6px 16px 6px 10px; min-height: 42px; }}
-button.start-chip:hover {{ background-color: {hover}; border-color: {fieldborder}; }}
-button.start-chip:active {{ background-color: {wash}; }}
+button.start-chip:hover {{ background-color: {hover}; border-color: {fieldborder}; box-shadow: {startshadowfocus}; }}
+button.start-chip:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
 .start-chip-title {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {ink}; }}
 .start-chip-url {{ font-family: {font}; font-size: {caption}px; color: {muted}; }}
 
 .omni-block {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_xl}px; box-shadow: 0 10px 28px {shadow}; }}
+.omni-block.focused {{ border-color: {fieldborder}; box-shadow: 0 12px 32px {shadow}, {focusring}; }}
 .omni {{ background-color: transparent; border-radius: {r_xl}px {r_xl}px 0 0; border-bottom: 1px solid {divider}; color: {ink}; }}
-.omni.focused {{ border-bottom-color: {divider}; }}
+.omni.focused {{ border-bottom-color: {fieldborder}; }}
 .omni entry {{ background-color: transparent; border: none; box-shadow: none; padding: 0; }}
 .omni entry:focus {{ outline: none; border: none; box-shadow: none; }}
 .omnitext {{ font-family: {font}; font-size: {start_entry}px; color: {ink}; }}
@@ -303,32 +316,46 @@ button.start-chip:active {{ background-color: {wash}; }}
 .sgkind {{ font-family: {font}; font-size: {caption}px; color: {faint}; }}
 
 .panel {{ background-color: {surface}; border-radius: {r_xl}px; border: 1px solid {divider}; box-shadow: 0 10px 28px {shadow}; }}
+.panel.panel-fullpage {{ background-color: {surface}; border-radius: {r_lg}px; border: 1px solid {divider}; box-shadow: none; }}
 .panel .head, .panel-heading {{ font-family: {font}; font-size: {panel_heading}px; font-weight: 600; letter-spacing: -0.4px; color: {ink}; }}
 .panel .sub, .panel-description {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel .panel-rail {{ background-color: {ground}; border-right: 1px solid {divider}; border-radius: 19px 0 0 19px; }}
+.panel.panel-fullpage .panel-rail {{ border-radius: 15px 0 0 15px; }}
 .panel .panel-rail-brand {{ font-family: {font}; font-size: {panel_rail_brand}px; font-weight: 600; letter-spacing: -0.3px; color: {ink}; }}
 .panel button.tab {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 6px 12px; min-height: 22px; color: {muted}; }}
 .panel button.tab label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.tab:hover {{ background-color: {hover}; }}
 .panel button.tab:checked {{ background-color: {tint}; border-color: transparent; color: {accent}; box-shadow: none; }}
 .panel button.tab:checked label {{ color: {ink}; font-weight: 600; }}
-.panel-section {{ background-color: transparent; border: none; border-top: 1px solid {divider}; padding-top: 12px; }}
-.panel-setting-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
-.panel-setting-row:last-child {{ border-bottom: none; }}
-.panel-appearance {{ padding: 4px 0 4px; }}
+.panel .settings-toc {{ border-top: 1px solid {divider}; margin-top: 10px; padding-top: 12px; }}
+.panel .settings-toc-heading {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; margin-bottom: 4px; padding-left: 10px; }}
+.panel button.settings-toc-item {{ background-color: transparent; border: none; border-radius: {r_sm}px; padding: 5px 10px; min-height: 20px; color: {muted}; }}
+.panel button.settings-toc-item label {{ font-family: {font}; font-size: {small}px; color: {muted}; font-weight: 400; }}
+.panel button.settings-toc-item:hover {{ background-color: {hover}; }}
+.panel button.settings-toc-item:hover label {{ color: {ink}; }}
+.panel button.settings-toc-item.active-section {{ background-color: {hover}; }}
+.panel button.settings-toc-item.active-section label {{ color: {ink}; font-weight: 600; }}
+.panel-section {{ background-color: transparent; border: none; border-top: 1px solid {divider}; padding-top: 20px; }}
+.panel-section.first-section {{ border-top: none; padding-top: 4px; }}
+.panel-setting-row {{ padding: 12px 0; border-bottom: 1px solid {divider}; }}
+.panel-setting-row:last-child, .panel-setting-row.panel-keyword-form {{ border-bottom: none; }}
+.panel-appearance {{ padding: 6px 0 8px; }}
 .panel entry, .dlbar entry, popover.browser-menu entry {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px; font-family: {font}; font-size: {body}px; color: {ink}; }}
 .panel entry:focus, .dlbar entry:focus, popover.browser-menu entry:focus {{ border-color: {fieldborder}; }}
 .panel entry text, .dlbar entry text, popover.browser-menu entry text {{ color: {ink}; font-family: {font}; font-size: {body}px; }}
-.panel .panel-filter-box {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 5px 12px; }}
+.panel .panel-filter-box {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px; }}
 .panel .panel-filter-box.focused {{ border-color: {fieldborder}; }}
 .panel .panel-filter-icon {{ color: {muted}; }}
 .panel .panel-filter-box entry.panel-filter {{ background-color: transparent; border: none; box-shadow: none; padding: 2px 0; min-height: 0; }}
 .panel .panel-filter-box entry.panel-filter:focus {{ border: none; outline: none; box-shadow: none; }}
-.panel .ptrow {{ border-radius: {r_md}px; padding: 8px 12px; border: 1px solid transparent; }}
+.panel .ptrow {{ border-radius: {r_md}px; padding: 10px 12px; border: 1px solid transparent; }}
 .panel .ptrow:hover {{ background-color: {hover}; }}
 .panel .ptitle {{ font-family: {font}; font-size: {body}px; color: {ink}; font-weight: 500; }}
 .panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.panelclose {{ min-width: 28px; min-height: 28px; border-radius: {r_pill}px; }}
+.panel button.panel-back-btn {{ background-color: transparent; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 5px 14px 5px 10px; min-height: 28px; color: {ink}; }}
+.panel button.panel-back-btn:hover {{ background-color: {hover}; border-color: {fieldborder}; }}
+.panel button.panel-back-btn label {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {ink}; }}
 .panel-empty-icon {{ color: {muted}; }}
 .panel-empty-title {{ font-family: {font}; font-size: {panel_empty_title}px; font-weight: 600; color: {ink}; }}
 .panel-empty-description, .empty {{ font-family: {font}; font-size: {small}px; color: {emptyfg}; }}
@@ -343,9 +370,9 @@ button.start-chip:active {{ background-color: {wash}; }}
 .peek-header {{ border-bottom: 1px solid {divider}; }}
 .keycap, .keyhint {{ font-family: {mono}; font-size: {caption}px; color: {muted}; background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 2px 9px; }}
 .extensionnote {{ padding: 12px 14px; background-color: {ground}; border-radius: {r_lg}px; }}
-.compat-badge {{ font-family: {font}; font-size: {caption}px; font-weight: 600; padding: 2px 9px; border-radius: {r_pill}px; background-color: {wash}; color: {muted}; border: 1px solid {divider}; }}
-.compat-badge.content {{ background-color: {tint}; color: {ink}; border-color: {accent}; }}
-.compat-badge.unsupported {{ color: {dangerink}; border-color: {dangerink}; background-color: transparent; }}
+.compat-badge {{ font-family: {font}; font-size: {caption}px; font-weight: 500; padding: 1px 0; border-radius: 0; background-color: transparent; color: {muted}; border: none; }}
+.compat-badge.content {{ color: {ink}; }}
+.compat-badge.unsupported {{ color: {dangerink}; }}
 .panel box, .panel stack, .panel scrolledwindow {{ background-color: transparent; }}
 .panel .panel-rail {{ background-color: {ground}; }}
 .panel-rail-caption, .panel-rail-hint .settingdesc {{ font-family: {font}; font-size: {caption}px; color: {faint}; }}
@@ -353,6 +380,7 @@ button.start-chip:active {{ background-color: {wash}; }}
 .panel button.panel-nav-item.on {{ background-color: {tint}; border-color: transparent; color: {accent}; box-shadow: none; }}
 .panel button.panel-nav-item.on .panel-nav-icon {{ color: {accent}; }}
 .panel.panel-compact .panel-rail {{ border-right: none; border-bottom: 1px solid {divider}; border-radius: 19px 19px 0 0; }}
+.panel.panel-fullpage.panel-compact .panel-rail {{ border-radius: 15px 15px 0 0; }}
 .panel.panel-compact button.panel-nav-item {{ min-width: 0; padding: 6px 12px; border-radius: {r_pill}px; }}
 .panel.panel-compact button.panel-nav-item.on {{ background-color: {tint}; box-shadow: none; }}
 .panel .purl.dl-failed {{ color: {dangerink}; font-weight: 600; }}
@@ -360,7 +388,7 @@ progressbar.dl-progress {{ min-height: 4px; margin-top: 4px; }}
 progressbar.dl-progress trough {{ background-color: {wash}; border: none; border-radius: {r_pill}px; min-height: 4px; }}
 progressbar.dl-progress progress {{ background-color: {accent}; border: none; border-radius: {r_pill}px; min-height: 4px; }}
 .panel.panel-compact .panel-heading {{ font-size: {panel_heading_compact}px; letter-spacing: -0.3px; }}
-.panel .panel-section-heading {{ font-family: {font}; font-size: {body}px; font-weight: 600; color: {ink}; margin: 0; }}
+.panel .panel-section-heading {{ font-family: {font}; font-size: {title}px; font-weight: 600; letter-spacing: -0.2px; color: {ink}; margin: 0; }}
 .panel-section-description {{ font-size: {small}px; color: {muted}; }}
 .panel .panel-appearance-option {{ background-color: transparent; border: 1px solid {divider}; padding: 8px; border-radius: {r_md}px; }}
 .panel .panel-appearance-option:hover {{ background-color: {hover}; }}
@@ -504,8 +532,9 @@ button.welcome-skip-link:focus {{ outline: 2px solid {accent}; outline-offset: 2
 .density-roomy .location {{ min-height: 34px; }}
 .density-roomy button.chrome-tool {{ min-width: 32px; min-height: 32px; }}
 .customize-preset-group {{ margin-top: 2px; }}
-.customize-order-row {{ padding: 5px 10px; border-radius: {r_md}px; background-color: {ground}; border: 1px solid {divider}; }}
-.customize-order-row.customize-order-required {{ border-color: {fieldborder}; }}
+.customize-order-row {{ padding: 7px 2px; border-radius: 0; background-color: transparent; border: none; border-bottom: 1px solid {divider}; }}
+.customize-order-row:last-child {{ border-bottom: none; }}
+.customize-order-row.customize-order-required {{ border-bottom-color: {divider}; }}
 .customize-order-label {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {ink}; }}
 button.customize-order-btn {{ padding: 3px 10px; min-height: 22px; }}
 button.customize-stepper-btn {{ min-width: 28px; min-height: 26px; padding: 2px 8px; }}
@@ -515,8 +544,11 @@ entry selection, label selection, textview selection {{ background-color: {tint}
 scrollbar, scrollbar trough {{ background-color: transparent; border: none; }}
 scrollbar slider {{ background-color: {fieldborder}; border: none; border-radius: {r_pill}px; min-width: 6px; min-height: 6px; margin: 2px; }}
 scrollbar slider:hover {{ background-color: {muted}; }}
-button, .control, .row, .toptab, .toppin, .pin, .tile, .colstrip, menuitem, .sgrow {{ transition: background-color {micro}ms {ease}, color {micro}ms {ease}, border-color {micro}ms {ease}, opacity {micro}ms {ease}, box-shadow {micro}ms {ease}; }}
-.rowtitle, .toptab-title, .row-subtitle, .favicon {{ transition: color {micro}ms {ease}, opacity {micro}ms {ease}; }}
+button, .control, .row, .toptab, .toppin, .pin, .tile, .colstrip, menuitem, .sgrow, .bmark, .ptrow, .panel-appearance-option, button.welcome-choice, button.welcome-btn-primary, button.welcome-btn-secondary, button.space-pill, button.space-dot, button.space-menu-button, button.start-chip, button.start-search-submit, popover.browser-menu button.menu-row {{ transition: background-color {micro}ms {ease}, color {micro}ms {ease}, border-color {micro}ms {ease}, opacity {micro}ms {ease}, box-shadow {micro}ms {ease}; }}
+.location, .start-search, .bmark-search, .omni-block, .omni, .panel .panel-filter-box, .panel entry, .dlbar entry, popover.browser-menu entry, .omnisite-pill {{ transition: background-color {micro}ms {ease}, border-color {micro}ms {ease}, box-shadow {micro}ms {ease}, color {micro}ms {ease}; }}
+.rowtitle, .toptab-title, .row-subtitle, .favicon, .pinletter, .space-pill-label, .start-search-icon, .start-arrow, .panel-nav-icon, .welcome-choice-icon {{ transition: color {micro}ms {ease}, opacity {micro}ms {ease}; }}
+scrollbar slider, .shell separator, paned separator {{ transition: background-color {micro}ms {ease}, opacity {micro}ms {ease}; }}
+progressbar.dl-progress progress {{ transition: background-color {micro}ms {ease}, min-width {micro}ms {ease}; }}
 .panel switch {{ transition: background-color {micro}ms {ease}; }}
 .panel switch slider {{ transition: background-color {micro}ms {ease}; }}
 "#,
@@ -524,22 +556,22 @@ button, .control, .row, .toptab, .toppin, .pin, .tile, .colstrip, menuitem, .sgr
         r_xl = r_xl,
         r_lg = r_lg,
         r_md = r_md,
-        // CSS transitions share the MICRO role and the cubic-out curve that
-        // motion::ease_out_cubic uses, so hover states and code-driven fades
-        // finish together.
+        // CSS transitions share the MICRO role and the coherent Rill 1.3
+        // liquid ease-out curve (`motion::curve::CSS_LIQUID`), so hover,
+        // focus, pressed, and procedural GdkFrameClock motion feel unified.
         // A reduced-motion desktop gets the final state immediately. This is
         // the CSS half of motion::enabled(), which gates procedural tweens.
         micro = {
-        // CSS generation also runs in unit tests without a display. Only ask
-        // the motion engine for GTK's preference when a display exists.
-        let animated = if gtk::is_initialized() {
-            crate::motion::enabled()
-        } else {
-            true
-        };
-        if animated { crate::motion::dur::MICRO } else { 0 }
-    },
-        ease = "cubic-bezier(0.215, 0.61, 0.355, 1)",
+            // CSS generation also runs in unit tests without a display. Only ask
+            // the motion engine for GTK's preference when a display exists.
+            let animated = if gtk::is_initialized() {
+                crate::motion::enabled()
+            } else {
+                true
+            };
+            if animated { crate::motion::dur::MICRO } else { 0 }
+        },
+        ease = crate::motion::curve::CSS_LIQUID,
         ground = palette.ground.hex(),
         card = palette.card.hex(),
         surface = palette.surface().hex(),
@@ -560,9 +592,12 @@ button, .control, .row, .toptab, .toppin, .pin, .tile, .colstrip, menuitem, .sgr
         wash = palette.wash.hex(),
         hover = palette.hover.hex(),
         sidehover = palette.side_hover.hex(),
-        tabshadow = if dark { "none" } else { "0 1px 2px rgba(32,30,26,0.06)" },
-        startshadow = if dark { "none" } else { "0 1px 4px rgba(32,30,26,0.06)" },
-        startshadowfocus = if dark { "none" } else { "0 2px 8px rgba(32,30,26,0.09)" },
+        tabshadow = if dark { "0 1px 3px rgba(0,0,0,0.28)" } else { "0 1px 3px rgba(32,30,26,0.08)" },
+        pillhover = if dark { "0 1px 2px rgba(0,0,0,0.18)" } else { "0 1px 3px rgba(32,30,26,0.05)" },
+        pressshadow = if dark { "inset 0 1px 2px rgba(0,0,0,0.34)" } else { "inset 0 1px 2px rgba(32,30,26,0.10)" },
+        focusring = if dark { "0 0 0 2px rgba(246,146,104,0.24)" } else { "0 0 0 2px rgba(183,69,37,0.16)" },
+        startshadow = if dark { "0 1px 3px rgba(0,0,0,0.22)" } else { "0 1px 4px rgba(32,30,26,0.06)" },
+        startshadowfocus = if dark { "0 2px 10px rgba(0,0,0,0.34), 0 0 0 2px rgba(246,146,104,0.22)" } else { "0 3px 12px rgba(32,30,26,0.10), 0 0 0 2px rgba(183,69,37,0.14)" },
         tilebg = palette.side_tile.hex(),
         pinlive = palette.side_pin_live.hex(),
         accent = palette.accent().hex(),
@@ -574,6 +609,7 @@ button, .control, .row, .toptab, .toppin, .pin, .tile, .colstrip, menuitem, .sgr
         caption = scale.caption,
         small = scale.small,
         body = scale.body,
+        title = scale.title,
         brand = scale.brand,
         blank_title = scale.blank_title,
         start_entry = scale.start_entry,
@@ -728,6 +764,24 @@ mod tests {
                         &sheet[index.saturating_sub(60)..(index + 24).min(sheet.len())]
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn motion_css_uses_explicit_properties_and_shared_liquid_curve() {
+        for look in [Look::Light, Look::Dark] {
+            let palette = Palette::for_look(look, false);
+            let sheet = build(&palette, 48);
+            assert!(
+                sheet.contains(crate::motion::curve::CSS_LIQUID),
+                "stylesheet must use shared motion::curve::CSS_LIQUID"
+            );
+            assert!(!sheet.contains("transition: all"), "never use blanket transition: all");
+            assert!(!sheet.contains("transform:"), "GTK3 CSS rejects transform properties");
+            assert!(!sheet.contains("@media"), "GTK3 CSS does not support @media queries");
+            for selector in [".omni-block.focused", ".location.omni-open", ".start-search.focused", "progressbar.dl-progress progress"] {
+                assert!(sheet.contains(selector), "missing motion selector {selector}");
             }
         }
     }

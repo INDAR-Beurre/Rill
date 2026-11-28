@@ -57,6 +57,69 @@ pub struct StartPage {
     shown: RefCell<Option<VisibleContent>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LinkDisposition {
+    CurrentTab,
+    NewBackgroundTab,
+    NewForegroundTab,
+}
+
+/// Pure click disposition policy for links clicked from the Rill start page.
+/// Ordinary primary/left clicks always navigate in the current tab; Ctrl/Cmd,
+/// middle-click, and Shift preserve standard new-tab modifier behavior.
+pub fn start_link_disposition(
+    button: u32,
+    ctrl: bool,
+    meta: bool,
+    shift: bool,
+) -> Option<LinkDisposition> {
+    match button {
+        2 => Some(if shift {
+            LinkDisposition::NewForegroundTab
+        } else {
+            LinkDisposition::NewBackgroundTab
+        }),
+        1 => {
+            if ctrl || meta {
+                Some(if shift {
+                    LinkDisposition::NewForegroundTab
+                } else {
+                    LinkDisposition::NewBackgroundTab
+                })
+            } else if shift {
+                Some(LinkDisposition::NewForegroundTab)
+            } else {
+                Some(LinkDisposition::CurrentTab)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn event_link_disposition(event: &gtk::gdk::EventButton) -> Option<LinkDisposition> {
+    let state = event.state();
+    let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let meta = state.contains(gtk::gdk::ModifierType::META_MASK)
+        || state.contains(gtk::gdk::ModifierType::SUPER_MASK);
+    let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+    start_link_disposition(event.button(), ctrl, meta, shift)
+}
+
+fn open_start_url(app: &crate::app::App, url: &str, private: bool, disposition: LinkDisposition) {
+    if url.is_empty() {
+        return;
+    }
+    match disposition {
+        LinkDisposition::CurrentTab => app.navigate_active(url),
+        LinkDisposition::NewBackgroundTab => {
+            app.new_tab(Some(url), private, true);
+        }
+        LinkDisposition::NewForegroundTab => {
+            app.new_tab(Some(url), private, false);
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Debug)]
 struct Link {
     title: String,
@@ -107,7 +170,7 @@ impl StartPage {
             let mode_ctx = bookmarks_mode.clone();
             dither.connect_button_press_event(move |_, event| {
                 if event.button() == 3 && !private_ctx.get() {
-                    open_bookmark_mode_menu(mode_ctx.get(), event);
+                    open_bookmark_mode_menu(mode_ctx.get(), None, event);
                     return crate::gtkx::inh(true);
                 }
                 crate::gtkx::inh(false)
@@ -138,9 +201,7 @@ impl StartPage {
         let search_field = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         style(&search_field, "start-search");
         search_field.set_hexpand(true);
-        let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let search_icon = mark(Icon::Search, 14, palette.muted, "start-search-icon");
-        search_row.pack_start(&search_icon, false, false, 0);
+        let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let search = gtk::Entry::new();
         style(&search, "start-search-entry");
         search.set_width_chars(1);
@@ -189,7 +250,7 @@ impl StartPage {
                     let chosen = offers_act.borrow().get(idx as usize).cloned();
                     if let Some(offer) = chosen {
                         if let Some(sb) = suggest_act.upgrade() {
-                            visible(&sb, false);
+                            crate::motion::hide_inline(&sb, crate::motion::dur::EXIT);
                         }
                         picked_act.set(-1);
                         if let Some(app) = crate::app::current() {
@@ -202,7 +263,7 @@ impl StartPage {
                     return;
                 }
                 if let Some(sb) = suggest_act.upgrade() {
-                    visible(&sb, false);
+                    crate::motion::hide_inline(&sb, crate::motion::dur::EXIT);
                 }
                 picked_act.set(-1);
                 if let Some(app) = crate::app::current() {
@@ -252,7 +313,7 @@ impl StartPage {
                     }
                     Some("Escape") if shown => {
                         if let Some(sb) = suggest_key.upgrade() {
-                            visible(&sb, false);
+                            crate::motion::hide_inline(&sb, crate::motion::dur::EXIT);
                         }
                         picked_key.set(-1);
                         crate::suggest::stop();
@@ -459,7 +520,7 @@ impl StartPage {
     }
 
     pub fn hide_suggest(&self) {
-        visible(&self.suggest_box, false);
+        crate::motion::hide_inline(&self.suggest_box, crate::motion::dur::EXIT);
         self.picked.set(-1);
     }
 
@@ -623,15 +684,34 @@ impl StartPage {
                         return;
                     }
                     if let Some(app) = crate::app::current() {
-                        app.navigate_active(&target);
+                        open_start_url(&app, &target, false, LinkDisposition::CurrentTab);
                     }
                 });
+                let target_press = link.url.clone();
                 let private_ctx = self.private.clone();
                 let mode_ctx = self.bookmarks_mode.clone();
                 button.connect_button_press_event(move |_, event| {
-                    if event.button() == 3 && !private_ctx.get() {
-                        open_bookmark_mode_menu(mode_ctx.get(), event);
+                    if private_ctx.get() {
+                        return crate::gtkx::inh(false);
+                    }
+                    if event.button() == 3 {
+                        open_bookmark_mode_menu(mode_ctx.get(), Some(&target_press), event);
                         return crate::gtkx::inh(true);
+                    }
+                    match event_link_disposition(event) {
+                        Some(LinkDisposition::NewBackgroundTab) => {
+                            if let Some(app) = crate::app::current() {
+                                open_start_url(&app, &target_press, false, LinkDisposition::NewBackgroundTab);
+                            }
+                            return crate::gtkx::inh(true);
+                        }
+                        Some(LinkDisposition::NewForegroundTab) => {
+                            if let Some(app) = crate::app::current() {
+                                open_start_url(&app, &target_press, false, LinkDisposition::NewForegroundTab);
+                            }
+                            return crate::gtkx::inh(true);
+                        }
+                        Some(LinkDisposition::CurrentTab) | None => {}
                     }
                     crate::gtkx::inh(false)
                 });
@@ -657,9 +737,24 @@ fn chips_per_row(mode: StartBookmarksMode, compact: bool, narrow: bool) -> usize
     }
 }
 
-fn open_bookmark_mode_menu(current: StartBookmarksMode, event: &gtk::gdk::EventButton) {
+fn open_bookmark_mode_menu(
+    current: StartBookmarksMode,
+    link_url: Option<&str>,
+    event: &gtk::gdk::EventButton,
+) {
     let menu = gtk::Menu::new();
     crate::app::prepare_popup_menu_pub(&menu);
+    if let Some(url) = link_url.filter(|u| !u.is_empty()) {
+        let open_new = gtk::MenuItem::with_label("Open in new tab");
+        let target = url.to_string();
+        open_new.connect_activate(move |_| {
+            if let Some(app) = crate::app::current() {
+                open_start_url(&app, &target, false, LinkDisposition::NewBackgroundTab);
+            }
+        });
+        menu.append(&open_new);
+        menu.append(&gtk::SeparatorMenuItem::new());
+    }
     let show_shortcuts = crate::app::current()
         .map(|app| app.prefs.borrow().show_start_shortcuts)
         .unwrap_or(true);
@@ -779,6 +874,7 @@ fn populate_start_suggestions(
     } else {
         None
     };
+    let was_visible = suggest_box.is_visible();
     clear(suggest_list);
     rows_slot.borrow_mut().clear();
     picked_slot.set(-1);
@@ -786,18 +882,18 @@ fn populate_start_suggestions(
     if trimmed.is_empty() {
         crate::suggest::stop();
         offers_slot.borrow_mut().clear();
-        visible(suggest_box, false);
+        crate::motion::hide_inline(suggest_box, crate::motion::dur::EXIT);
         return;
     }
     let Some(app) = crate::app::current() else {
         offers_slot.borrow_mut().clear();
-        visible(suggest_box, false);
+        crate::motion::hide_inline(suggest_box, crate::motion::dur::EXIT);
         return;
     };
     let items = app.start_offers(trimmed, private);
     if items.is_empty() {
         offers_slot.borrow_mut().clear();
-        visible(suggest_box, false);
+        crate::motion::hide_inline(suggest_box, crate::motion::dur::EXIT);
         return;
     }
     let restored_pick = previous_pick
@@ -846,20 +942,38 @@ fn populate_start_suggestions(
         let sb_weak = suggest_box.downgrade();
         let picked_click = picked_slot.clone();
         let chosen = offer.clone();
-        row.connect_button_press_event(move |_, _| {
+        row.connect_button_press_event(move |_, event| {
+            let Some(disposition) = event_link_disposition(event) else {
+                return crate::gtkx::inh(false);
+            };
             if let Some(sb) = sb_weak.upgrade() {
-                visible(&sb, false);
+                crate::motion::hide_inline(&sb, crate::motion::dur::EXIT);
             }
             picked_click.set(-1);
             if let Some(app) = crate::app::current() {
-                activate_start_offer(&app, &chosen, private);
+                if disposition == LinkDisposition::CurrentTab {
+                    activate_start_offer(&app, &chosen, private);
+                } else {
+                    open_start_url(&app, &chosen.url, private, disposition);
+                }
             }
             crate::gtkx::inh(true)
         });
         rows_slot.borrow_mut().push(row.clone());
         suggest_list.pack_start(&row, false, true, 0);
     }
-    visible(suggest_box, true);
+    if !was_visible {
+        crate::motion::reveal_inline(
+            suggest_box,
+            crate::motion::dur::TRAVEL_SM,
+            crate::motion::dur::ENTER,
+        );
+    } else {
+        crate::motion::cancel(suggest_box);
+        suggest_box.set_opacity(1.0);
+        suggest_box.set_margin_top(0);
+        visible(suggest_box, true);
+    }
 }
 
 fn reflow_link_rows(links: &gtk::Box, per_row: usize) {
@@ -1472,5 +1586,22 @@ mod tests {
         assert_eq!(bookmark_links_capped(&bookmarks, 4).len(), 4);
         assert_eq!(bookmark_links_capped(&bookmarks, 12).len(), 12);
         assert_eq!(bookmark_links_capped(&bookmarks, 99).len(), crate::store::MAX_START_SHORTCUTS_COUNT);
+    }
+
+    #[test]
+    fn start_page_link_clicks_stay_in_current_tab_and_preserve_modifiers() {
+        // Ordinary primary/left click navigates in the current tab.
+        assert_eq!(start_link_disposition(1, false, false, false), Some(LinkDisposition::CurrentTab));
+        // Ctrl/Cmd + click opens in a new background tab.
+        assert_eq!(start_link_disposition(1, true, false, false), Some(LinkDisposition::NewBackgroundTab));
+        assert_eq!(start_link_disposition(1, false, true, false), Some(LinkDisposition::NewBackgroundTab));
+        // Middle-click opens in a new background tab; Shift+middle opens foreground.
+        assert_eq!(start_link_disposition(2, false, false, false), Some(LinkDisposition::NewBackgroundTab));
+        assert_eq!(start_link_disposition(2, false, false, true), Some(LinkDisposition::NewForegroundTab));
+        // Shift+click and Ctrl/Cmd+Shift+click open in a new foreground tab.
+        assert_eq!(start_link_disposition(1, false, false, true), Some(LinkDisposition::NewForegroundTab));
+        assert_eq!(start_link_disposition(1, true, false, true), Some(LinkDisposition::NewForegroundTab));
+        // Right-click does not navigate.
+        assert_eq!(start_link_disposition(3, false, false, false), None);
     }
 }

@@ -388,7 +388,12 @@ pub fn offer_addon(
         ));
         return;
     }
-    let message = addon_message(&crate::shield::host_of(&came_from), &offer);
+    let source_host = if came_from == "this computer" {
+        "this computer".to_string()
+    } else {
+        crate::shield::host_of(&came_from)
+    };
+    let message = addon_message(&source_host, &offer);
     let card = card(app, &message);
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);

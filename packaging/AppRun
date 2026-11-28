@@ -88,5 +88,6 @@ if [ -d "$HERE/usr/lib/dri" ] && [ -n "$(find "$HERE/usr/lib/dri" -maxdepth 1 -n
   export LIBGL_DRIVERS_PATH="$HERE/usr/lib/dri${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
   export LIBVA_DRIVERS_PATH="$HERE/usr/lib/dri${LIBVA_DRIVERS_PATH:+:$LIBVA_DRIVERS_PATH}"
 fi
-export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+# Leave WEBKIT_DISABLE_DMABUF_RENDERER unset by default (and preserve any
+# caller-provided value) so usr/bin/search applies its own DMABUF policy.
 exec "$HERE/usr/bin/search" "$@"

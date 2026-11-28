@@ -205,6 +205,7 @@ pub struct Omnibox {
     column: std::cell::Cell<i32>,
     band: std::cell::Cell<i32>,
     last_size: std::cell::Cell<(i32, i32)>,
+    last_block_pos: std::cell::Cell<(i32, i32)>,
     pub picked: std::cell::Cell<i32>,
     pub holder: gtk::Fixed,
     layer: Layer,
@@ -525,10 +526,14 @@ impl Omnibox {
             // child of the field, so a strong handle here would be a cycle
             // that keeps both alive for as long as the app runs.
             let ring = field.downgrade();
+            let card_ring = block.downgrade();
             entry.connect_has_focus_notify(move |entry| {
                 let Some(ring) = ring.upgrade() else { return };
                 if entry.has_focus() {
                     crate::ui::class(&ring, "focused");
+                    if let Some(card) = card_ring.upgrade() {
+                        crate::ui::class(&card, "focused");
+                    }
                     return;
                 }
                 // Focus moving inside an inactive window is the compositor's
@@ -542,6 +547,9 @@ impl Omnibox {
                     .unwrap_or(false);
                 if active {
                     ring.style_context().remove_class("focused");
+                    if let Some(card) = card_ring.upgrade() {
+                        card.style_context().remove_class("focused");
+                    }
                 }
             });
         }
@@ -625,6 +633,7 @@ impl Omnibox {
             column: std::cell::Cell::new(0),
             band: std::cell::Cell::new(23),
             last_size: std::cell::Cell::new((0, 0)),
+            last_block_pos: std::cell::Cell::new((0, 0)),
             picked: std::cell::Cell::new(-1),
             holder,
             layer,
@@ -670,6 +679,7 @@ impl Omnibox {
         let shown = self.list_scroll.get_visible();
         self.list.set_size_request((field_width - 2).max(200), -1);
         let placed = plan(height, if shown { self.list_height_for(field_width) } else { 0 });
+        self.last_block_pos.set((x, placed.top));
         self.block.set_size_request(field_width, placed.block.max(FIELD_HEIGHT + FOOTER_HEIGHT));
         self.layer.place(&self.block, x, placed.top, field_width, placed.block.max(FIELD_HEIGHT + FOOTER_HEIGHT));
         if shown {
@@ -698,9 +708,12 @@ impl Omnibox {
     }
 
     fn apply_site_chip(&self, chip: Option<&ChipModel>) {
+        let was_visible = self.site_box.get_visible();
         let ctx = self.site_pill.style_context();
         match chip {
             None => {
+                crate::motion::cancel(&self.site_pill);
+                self.site_pill.set_opacity(1.0);
                 self.chip_kind.set(None);
                 ctx.remove_class("insecure");
                 ctx.remove_class("destination");
@@ -742,6 +755,9 @@ impl Omnibox {
                 self.site.set_text(&model.host);
                 self.site_box.show_all();
                 self.entry.set_margin_start(0);
+                if !was_visible {
+                    crate::motion::fade_from(&self.site_pill, 0.0, 1.0, crate::motion::dur::MICRO);
+                }
             }
         }
     }
@@ -802,6 +818,7 @@ impl Omnibox {
         // has not focused, and a capture taken before the entry's idle focus
         // lands, would otherwise show a bare label where the field is.
         crate::ui::class(&self.field, "focused");
+        crate::ui::class(&self.block, "focused");
         self.entry.grab_focus();
         // The text above is the address's path, not the empty string the
         // caller passed in. Setting it fires `changed`, which refreshes the
@@ -843,6 +860,7 @@ impl Omnibox {
         // A hidden field holds no focus, and leaving the ring on would paint
         // the next field as already chosen.
         self.field.style_context().remove_class("focused");
+        self.block.style_context().remove_class("focused");
         if !was_visible {
             return;
         }
@@ -852,14 +870,31 @@ impl Omnibox {
         crate::motion::cancel(&self.list_scroll);
         let visible_flag = self.visible.clone();
         let root = self.layer.root.clone();
-        // Closing mirrors opening on the shared exit role (130ms, ease_exit).
-        crate::motion::fade_out_then(&self.layer.root, crate::motion::dur::EXIT, move || {
-            if !visible_flag.get() {
-                root.hide();
-                root.set_no_show_all(true);
-                root.set_opacity(1.0);
-            }
-        });
+        let block = self.block.clone();
+        let scrim_alpha = self.scrim_alpha.clone();
+        if self.scrim.get_visible() {
+            crate::motion::fade_alpha_out(&self.scrim, &self.scrim_alpha, crate::motion::dur::EXIT);
+        }
+        let (x, y) = self.last_block_pos.get();
+        // Closing mirrors opening symmetrically: scrim fades out while the
+        // omnibox glides gently upward on the shared EXIT role.
+        crate::motion::slide_out_fixed(
+            &self.layer.root,
+            &self.block,
+            x,
+            y,
+            -crate::motion::dur::TRAVEL,
+            crate::motion::dur::EXIT,
+            move || {
+                if !visible_flag.get() {
+                    root.hide();
+                    root.set_no_show_all(true);
+                    root.set_opacity(1.0);
+                    block.set_opacity(1.0);
+                    scrim_alpha.set(1.0);
+                }
+            },
+        );
     }
 
     pub fn set_offers(&self, _ui: &crate::ui::Ui, app: &AppRef, offers: Vec<Offer>) {
@@ -893,8 +928,12 @@ impl Omnibox {
             self.relayout();
             return;
         }
+        let was_shown = self.list_scroll.get_visible();
         self.list_scroll.show();
         self.list.show();
+        if !was_shown && self.visible.get() {
+            crate::motion::fade_from(&self.list_scroll, 0.35, 1.0, crate::motion::dur::MICRO);
+        }
         let mut last_kind = String::new();
         for (index, offer) in offers.into_iter().enumerate() {
             if offer.kind != last_kind {
@@ -1118,8 +1157,11 @@ impl Omnibox {
                         None
                     };
                     if let Some(wanted) = wanted {
-                        adjust.set_value(
-                            wanted.clamp(adjust.lower(), (adjust.upper() - page).max(adjust.lower())),
+                        crate::motion::scroll_to(
+                            &self.list_scroll,
+                            &adjust,
+                            wanted,
+                            crate::motion::dur::MICRO,
                         );
                     }
                 }

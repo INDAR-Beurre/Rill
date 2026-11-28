@@ -303,7 +303,9 @@ pub fn apply(app: &AppRef, intent: Intent) {
             } else if app.find.borrow().visible {
                 app.toggle_find();
             } else if app.panels.borrow().open.is_some() {
-                app.close_panels();
+                if !app.panels.borrow().dismiss_popover() {
+                    app.close_panels();
+                }
             } else if app.reading.get() {
                 // Reading mode is the last thing standing between Escape and
                 // the page, so it is the last thing Escape takes away.

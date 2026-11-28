@@ -7,8 +7,40 @@ use gtk::prelude::*;
 
 const INSET: i32 = 20;
 const COMPACT_INSET: i32 = 16;
-const RAIL_WIDTH: i32 = 164;
+const RAIL_WIDTH: i32 = 192;
 const MAX_HEIGHT: i32 = 720;
+const FULLPAGE_MAX_MEASURE: i32 = 760;
+
+/// Settings and Extensions open as full-content-area workspaces rather than
+/// floating modal popups.
+pub fn is_full_surface_kind(kind: &PanelKind) -> bool {
+    matches!(kind, PanelKind::Settings | PanelKind::Extensions)
+}
+
+/// Fallback full-surface viewport bounds when `viewport_frame` has not yet been
+/// allocated inside the overlay.
+pub fn full_surface_rect(overlay_w: i32, overlay_h: i32, column: i32, top_band: i32) -> (i32, i32, i32, i32) {
+    let x = column + 6;
+    let y = top_band + 2;
+    let w = (overlay_w - column - 12).max(1);
+    let h = (overlay_h - top_band - 8).max(1);
+    (x, y, w, h)
+}
+
+/// Horizontal reading-column margins `(start, end)` inside the full-page
+/// Settings/Extensions content pane so prose stays comfortable (`<= 760px`)
+/// on wide displays while filling narrow viewports cleanly.
+pub fn fullpage_side_margins(content_width: i32, compact: bool) -> (i32, i32) {
+    if compact {
+        return (COMPACT_INSET, COMPACT_INSET);
+    }
+    if content_width <= 840 {
+        return (28, 28);
+    }
+    let start = 44;
+    let end = (content_width - FULLPAGE_MAX_MEASURE - start).max(44);
+    (start, end)
+}
 
 fn widget_insets(widget: &impl IsA<gtk::Widget>) -> (i32, i32, i32, i32) {
     let context = widget.style_context();
@@ -307,11 +339,14 @@ pub struct Panels {
     pub open: Option<PanelKind>,
     rail: gtk::Box,
     rail_brand: gtk::Box,
+    settings_toc: gtk::Box,
     rail_hint: gtk::Box,
     content: gtk::Box,
     header: gtk::Box,
     description: gtk::Label,
     compact: std::cell::Cell<bool>,
+    fullpage: std::cell::Cell<bool>,
+    viewport_rect: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
     refit_queued: std::rc::Rc<std::cell::Cell<bool>>,
     /// True while a freshly opened panel is awaiting or running its entrance
     /// animation so immediate/idle layout calls cannot snap its animated `y`.
@@ -414,8 +449,9 @@ fn populate_catalog_rows(
 
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         actions.set_valign(gtk::Align::Center);
-        if let Some(xpi_url) = entry.xpi_url.clone() {
-            let install_btn = gtk::Button::with_label("Install\u{2026}");
+        if let Some(action_label) = crate::addons_catalog::catalog_install_action(entry.compat, entry.xpi_url.is_some()) {
+            let xpi_url = entry.xpi_url.clone().unwrap_or_default();
+            let install_btn = gtk::Button::with_label(action_label);
             crate::ui::class(&install_btn, "act");
             if entry.compat != crate::addons_catalog::CompatTier::Unsupported {
                 crate::ui::class(&install_btn, "primary");
@@ -423,16 +459,18 @@ fn populate_catalog_rows(
             let app_weak = app.weak();
             let slug = entry.slug.clone();
             let listing = entry.listing_url.clone();
+            let idle_label = action_label.to_string();
             install_btn.connect_clicked(move |btn| {
                 btn.set_sensitive(false);
                 btn.set_label("Fetching\u{2026}");
                 let app_done = app_weak.clone();
                 let btn_done = btn.downgrade();
                 let came_from = listing.clone();
+                let restore_label = idle_label.clone();
                 crate::addons_catalog::download_amo_xpi(&slug, &xpi_url, move |res| {
                     if let Some(b) = btn_done.upgrade() {
                         b.set_sensitive(true);
-                        b.set_label("Install\u{2026}");
+                        b.set_label(&restore_label);
                     }
                     let Some(app) = app_done.upgrade() else { return };
                     match res {
@@ -456,7 +494,7 @@ fn populate_catalog_rows(
         open_btn.connect_clicked(move |_| {
             if let Some(app) = app_weak.upgrade() {
                 app.close_panels();
-                app.new_tab(Some(&listing_url), false, true);
+                app.new_tab(Some(&listing_url), false, false);
             }
         });
         actions.pack_start(&open_btn, false, false, 0);
@@ -597,6 +635,14 @@ impl Panels {
         }
         rail.pack_start(&nav, false, true, 0);
 
+        let settings_toc = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        crate::ui::class(&settings_toc, "settings-toc");
+        settings_toc.set_margin_start(10);
+        settings_toc.set_margin_end(10);
+        settings_toc.set_no_show_all(true);
+        settings_toc.hide();
+        rail.pack_start(&settings_toc, false, true, 0);
+
         let rail_hint = gtk::Box::new(gtk::Orientation::Vertical, 4);
         crate::ui::class(&rail_hint, "panel-rail-hint");
         rail_hint.set_margin_start(16);
@@ -659,6 +705,8 @@ impl Panels {
 
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let settings_holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        settings_holder.set_vexpand(true);
+        settings_holder.set_hexpand(true);
         let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_propagate_natural_height(false);
@@ -711,11 +759,14 @@ impl Panels {
             open: None,
             rail,
             rail_brand,
+            settings_toc,
             rail_hint,
             content,
             header: head,
             description,
             compact: std::cell::Cell::new(false),
+            fullpage: std::cell::Cell::new(false),
+            viewport_rect: std::cell::Cell::new(None),
             refit_queued: std::rc::Rc::new(std::cell::Cell::new(false)),
             entering: std::rc::Rc::new(std::cell::Cell::new(false)),
             open_gen: std::rc::Rc::new(std::cell::Cell::new(0)),
@@ -804,6 +855,129 @@ impl Panels {
         }
     }
 
+    pub fn is_full_surface(&self) -> bool {
+        self.open.as_ref().is_some_and(is_full_surface_kind)
+    }
+
+    pub fn uses_scrim(&self) -> bool {
+        self.open.is_some() && !self.is_full_surface()
+    }
+
+    pub fn set_viewport_rect(&self, rect: Option<(i32, i32, i32, i32)>) {
+        self.viewport_rect.set(rect);
+    }
+
+    fn sync_close_button(&self, palette: &Palette, full: bool) {
+        if let Some(child) = self.close_button.child() {
+            self.close_button.remove(&child);
+        }
+        let ctx = self.close_button.style_context();
+        if full {
+            ctx.remove_class("mark");
+            ctx.remove_class("door");
+            if !ctx.has_class("panel-back-btn") {
+                ctx.add_class("panel-back-btn");
+            }
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let icon = crate::icons::area(crate::icons::Icon::Back, 13, palette.ink);
+            icon.set_valign(gtk::Align::Center);
+            let label = gtk::Label::new(Some("Back"));
+            label.set_valign(gtk::Align::Center);
+            row.pack_start(&icon, false, false, 0);
+            row.pack_start(&label, false, false, 0);
+            self.close_button.add(&row);
+            self.close_button.set_tooltip_text(Some("Return to page · Esc"));
+        } else {
+            ctx.remove_class("panel-back-btn");
+            if !ctx.has_class("mark") {
+                ctx.add_class("mark");
+            }
+            if !ctx.has_class("door") {
+                ctx.add_class("door");
+            }
+            self.close_button.add(&crate::icons::area(crate::icons::Icon::Close, 13, palette.muted));
+            self.close_button.set_tooltip_text(Some("Close panel · Esc"));
+        }
+        self.close_button.show_all();
+    }
+
+    fn clear_settings_toc(&self) {
+        for child in self.settings_toc.children() {
+            self.settings_toc.remove(&child);
+        }
+        self.settings_toc.set_no_show_all(true);
+        self.settings_toc.hide();
+    }
+
+    fn populate_settings_toc(
+        &self,
+        app: &AppRef,
+        list: &gtk::Box,
+        scroll: &gtk::ScrolledWindow,
+        sections: &[(&str, &gtk::Box)],
+    ) {
+        self.clear_settings_toc();
+        let heading = gtk::Label::new(Some("On this page"));
+        crate::ui::class(&heading, "settings-toc-heading");
+        heading.set_xalign(0.0);
+        self.settings_toc.pack_start(&heading, false, true, 0);
+
+        let toc_buttons: std::rc::Rc<std::cell::RefCell<Vec<gtk::Button>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        for (idx, (name, target)) in sections.iter().enumerate() {
+            let btn = gtk::Button::with_label(name);
+            crate::ui::class(&btn, "settings-toc-item");
+            if idx == 0 {
+                crate::ui::class(&btn, "active-section");
+            }
+            btn.set_relief(gtk::ReliefStyle::None);
+            btn.set_can_focus(true);
+            btn.set_focus_on_click(false);
+            if let Some(lbl) = btn.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+                lbl.set_xalign(0.0);
+                lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            }
+            toc_buttons.borrow_mut().push(btn.clone());
+            let app_weak = app.weak();
+            let list_w = list.downgrade();
+            let scroll_w = scroll.downgrade();
+            let target_w = target.downgrade();
+            let buttons_ref = toc_buttons.clone();
+            btn.connect_clicked(move |clicked| {
+                for b in buttons_ref.borrow().iter() {
+                    let ctx = b.style_context();
+                    if b == clicked {
+                        ctx.add_class("active-section");
+                    } else {
+                        ctx.remove_class("active-section");
+                    }
+                }
+                if let Some(app) = app_weak.upgrade() {
+                    let has_filter = !app.panels.borrow().filter.borrow().is_empty();
+                    if has_filter {
+                        app.filter_panel(PanelKind::Settings, "");
+                    }
+                }
+                let scroll_idle = scroll_w.clone();
+                let list_idle = list_w.clone();
+                let target_idle = target_w.clone();
+                glib::idle_add_local_once(move || {
+                    let (Some(scroll), Some(list), Some(target)) =
+                        (scroll_idle.upgrade(), list_idle.upgrade(), target_idle.upgrade())
+                    else {
+                        return;
+                    };
+                    if let Some((_, y)) = target.translate_coordinates(&list, 0, 0) {
+                        let adj = scroll.vadjustment();
+                        let max_val = (adj.upper() - adj.page_size()).max(adj.lower());
+                        adj.set_value((f64::from(y) - 8.0).clamp(adj.lower(), max_val));
+                    }
+                });
+            });
+            self.settings_toc.pack_start(&btn, false, true, 0);
+        }
+    }
+
     pub fn has_open_popover(&self) -> bool {
         self.active_popover
             .borrow()
@@ -846,6 +1020,25 @@ impl Panels {
         self.scroll.set_opacity(1.0);
 
         self.open = Some(kind.clone());
+        let full = is_full_surface_kind(&kind);
+        let full_changed = self.fullpage.replace(full) != full;
+        if full_changed {
+            self.configured_compact.set(None);
+        }
+        {
+            let ctx = self.card.style_context();
+            if full {
+                ctx.add_class("panel-fullpage");
+            } else {
+                ctx.remove_class("panel-fullpage");
+            }
+        }
+        self.scrim.set_no_show_all(full);
+        self.scrim.set_visible(!full);
+        self.sync_close_button(&app.palette.borrow(), full);
+        if kind != PanelKind::Settings {
+            self.clear_settings_toc();
+        }
         self.title.set_text(kind.title());
         self.description.set_text(kind.description());
         if let Some(access) = self.card.accessible() {
@@ -857,8 +1050,16 @@ impl Panels {
         // widths while keeping every other panel on the shared scroller.
         if kind == PanelKind::Settings {
             self.scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+            self.scroll.set_max_content_height(-1);
+            self.scroll.set_margin_bottom(0);
+        } else if full {
+            self.scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+            self.scroll.set_max_content_height(-1);
+            self.scroll.set_margin_bottom(0);
         } else {
             self.scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+            self.scroll.set_max_content_height(MAX_HEIGHT);
+            self.scroll.set_margin_bottom(20);
         }
         let field = match kind {
             PanelKind::Bookmarks => self.build_bookmarks(app),
@@ -877,6 +1078,15 @@ impl Panels {
                 None
             }
         };
+        if self.settings_holder.parent().is_some() {
+            self.body.set_child_packing(
+                &self.settings_holder,
+                kind == PanelKind::Settings,
+                true,
+                0,
+                gtk::PackType::Start,
+            );
+        }
         let column = if app.ui.side.is_visible() && app.ui.side.is_child_visible() {
             app.ui.side.allocated_width().max(0)
         } else {
@@ -889,13 +1099,27 @@ impl Panels {
         };
         self.column.set(column);
         self.band.set(band);
+        let vp_alloc = (
+            app.ui.viewport_frame.allocated_width(),
+            app.ui.viewport_frame.allocated_height(),
+        );
+        if vp_alloc.0 > 40 && vp_alloc.1 > 40 {
+            if let Some((vx, vy)) = app.ui.viewport_frame.translate_coordinates(&app.ui.overlay, 0, 0) {
+                self.viewport_rect.set(Some((vx, vy, vp_alloc.0, vp_alloc.1)));
+            }
+        }
         let (width, height) = (
             app.ui.overlay.allocated_width().max(app.ui.window.allocated_width()),
             app.ui.overlay.allocated_height().max(app.ui.window.allocated_height()),
         );
         let page = (width - column).max(0);
-        let card_width = panel_card_width(page);
-        self.configure_layout(card_width, height);
+        let (card_width, target_h) = if full {
+            let (_, _, vw, vh) = self.target_full_rect(width, height);
+            (vw, vh)
+        } else {
+            (panel_card_width(page), height)
+        };
+        self.configure_layout(card_width, target_h);
         // Shown before measured. A widget that is not shown yet reports a
         // preferred height of 0, so measuring the title row and the nav before
         // this point counted them as nothing: the card came out 45px shorter
@@ -904,88 +1128,105 @@ impl Panels {
         self.card.show_all();
         // An empty panel should be a note, not a slab: the floor used to be
         // 300px of nothing under one line of text.
-        self.wanted_height.set(self.fit_height(card_width));
+        if !full {
+            self.wanted_height.set(self.fit_height(card_width));
+        } else {
+            self.wanted_height.set(target_h);
+            self.fitted_width.set(card_width);
+        }
         self.card.set_can_focus(true);
         self.layer.show();
+        if full {
+            self.scrim.hide();
+        }
         self.layout(width, height);
         if !was_open || switched {
             self.scroll_for_open().vadjustment().set_value(0.0);
         }
         if !was_open && crate::motion::enabled() {
-            // Hold the frame-0 starting pose immediately while the freshly
-            // built panel settles its initial allocation and app-side
-            // layout_with_column completes, then launch the VSync entrance on
-            // idle so build/layout work cannot snap y or eat the frame budget.
-            self.entering.set(true);
-            self.scrim_alpha.set(0.0);
-            self.scrim.queue_draw();
-            self.card.set_opacity(0.0);
-            if width > 1 && height > 1 {
-                let tallest = MAX_HEIGHT.min((height - 80).max(1));
-                let x = column + ((page - card_width) / 2).max(12);
-                let y = ((height - tallest) / 2).max(band + 12);
-                self.layer.root.move_(&self.card, x, y + crate::motion::dur::TRAVEL);
-            }
-            let open_gen = self.open_gen.clone();
-            let entering = self.entering.clone();
-            glib::idle_add_local_once(move || {
-                if open_gen.get() != gen {
-                    return;
-                }
-                let Some(app) = crate::app::current() else { return };
-                let Ok(panels) = app.panels.try_borrow() else { return };
-                if panels.open.is_none() || panels.open_gen.get() != gen {
-                    return;
-                }
-                let width = app.ui.overlay.allocated_width().max(app.ui.window.allocated_width());
-                let height = app.ui.overlay.allocated_height().max(app.ui.window.allocated_height());
-                let column = panels.column.get();
-                let band = panels.band.get();
-                let page = (width - column).max(0);
-                let card_width = panel_card_width(page);
-                if panels.open.as_ref() != Some(&PanelKind::Settings)
-                    || panels.fitted_width.get() != card_width
-                {
-                    panels.wanted_height.set(panels.fit_height(card_width));
-                    let card_height = panels.card_height(card_width, height);
-                    panels.card.set_size_request(card_width, card_height);
-                    panels.scroll_for_open().check_resize();
-                }
-                panels.layer.place(&panels.scrim, 0, 0, width, height);
-                crate::motion::fade_alpha(&panels.scrim, &panels.scrim_alpha, crate::motion::dur::ENTER);
+            if full {
+                self.entering.set(false);
+                crate::motion::fade_in(&self.card, crate::motion::dur::MICRO);
+            } else {
+                // Hold the frame-0 starting pose immediately while the freshly
+                // built panel settles its initial allocation and app-side
+                // layout_with_column completes, then launch the VSync entrance on
+                // idle so build/layout work cannot snap y or eat the frame budget.
+                self.entering.set(true);
+                self.scrim_alpha.set(0.0);
+                self.scrim.queue_draw();
+                self.card.set_opacity(0.0);
                 if width > 1 && height > 1 {
                     let tallest = MAX_HEIGHT.min((height - 80).max(1));
                     let x = column + ((page - card_width) / 2).max(12);
                     let y = ((height - tallest) / 2).max(band + 12);
-                    let done_entering = entering.clone();
-                    let done_gen = open_gen.clone();
-                    crate::motion::slide_in_fixed_then(
-                        &panels.layer.root,
-                        &panels.card,
-                        x,
-                        y,
-                        crate::motion::dur::TRAVEL,
-                        crate::motion::dur::ENTER,
-                        move || {
-                            if done_gen.get() == gen {
-                                done_entering.set(false);
-                            }
-                        },
-                    );
-                } else {
-                    entering.set(false);
-                    crate::motion::fade_in(&panels.card, crate::motion::dur::ENTER);
+                    self.layer.root.move_(&self.card, x, y + crate::motion::dur::TRAVEL);
                 }
-            });
+                let open_gen = self.open_gen.clone();
+                let entering = self.entering.clone();
+                glib::idle_add_local_once(move || {
+                    if open_gen.get() != gen {
+                        return;
+                    }
+                    let Some(app) = crate::app::current() else { return };
+                    let Ok(panels) = app.panels.try_borrow() else { return };
+                    if panels.open.is_none() || panels.open_gen.get() != gen {
+                        return;
+                    }
+                    if panels.is_full_surface() {
+                        entering.set(false);
+                        panels.card.set_opacity(1.0);
+                        return;
+                    }
+                    let width = app.ui.overlay.allocated_width().max(app.ui.window.allocated_width());
+                    let height = app.ui.overlay.allocated_height().max(app.ui.window.allocated_height());
+                    let column = panels.column.get();
+                    let band = panels.band.get();
+                    let page = (width - column).max(0);
+                    let card_width = panel_card_width(page);
+                    if panels.open.as_ref() != Some(&PanelKind::Settings)
+                        || panels.fitted_width.get() != card_width
+                    {
+                        panels.wanted_height.set(panels.fit_height(card_width));
+                        let card_height = panels.card_height(card_width, height);
+                        panels.card.set_size_request(card_width, card_height);
+                        panels.scroll_for_open().check_resize();
+                    }
+                    panels.layer.place(&panels.scrim, 0, 0, width, height);
+                    crate::motion::fade_alpha(&panels.scrim, &panels.scrim_alpha, crate::motion::dur::ENTER);
+                    if width > 1 && height > 1 {
+                        let tallest = MAX_HEIGHT.min((height - 80).max(1));
+                        let x = column + ((page - card_width) / 2).max(12);
+                        let y = ((height - tallest) / 2).max(band + 12);
+                        let done_entering = entering.clone();
+                        let done_gen = open_gen.clone();
+                        crate::motion::slide_in_fixed_then(
+                            &panels.layer.root,
+                            &panels.card,
+                            x,
+                            y,
+                            crate::motion::dur::TRAVEL,
+                            crate::motion::dur::ENTER,
+                            move || {
+                                if done_gen.get() == gen {
+                                    done_entering.set(false);
+                                }
+                            },
+                        );
+                    } else {
+                        entering.set(false);
+                        crate::motion::fade_in(&panels.card, crate::motion::dur::ENTER);
+                    }
+                });
+            }
         } else {
             self.queue_refit();
             if !was_open {
-                // Reduced motion / SEARCH_BENCH: finish synchronously in one step.
-                crate::motion::fade_alpha(&self.scrim, &self.scrim_alpha, crate::motion::dur::ENTER);
+                if !full {
+                    crate::motion::fade_alpha(&self.scrim, &self.scrim_alpha, crate::motion::dur::ENTER);
+                }
                 crate::motion::fade_in(&self.card, crate::motion::dur::ENTER);
             } else if switched {
-                // Switching panels only swaps the content inside the open card, so
-                // the card stays put and the content uses the short MICRO role.
                 crate::motion::fade_from(&self.scroll, 0.35, 1.0, crate::motion::dur::MICRO);
             }
         }
@@ -1121,9 +1362,29 @@ impl Panels {
         self.layout_card(width, height);
     }
 
+    fn target_full_rect(&self, overlay_w: i32, overlay_h: i32) -> (i32, i32, i32, i32) {
+        if let Some((vx, vy, vw, vh)) = self.viewport_rect.get() {
+            if vw > 40 && vh > 40 && vx >= 0 && vy >= 0 {
+                let w = vw.min((overlay_w - vx).max(1));
+                let h = vh.min((overlay_h - vy).max(1));
+                return (vx, vy, w, h);
+            }
+        }
+        full_surface_rect(overlay_w, overlay_h, self.column.get(), self.band.get())
+    }
+
     fn layout_card(&self, width: i32, height: i32) {
         let column = self.column.get();
         let band = self.band.get();
+        if self.is_full_surface() {
+            let (x, y, card_width, card_height) = self.target_full_rect(width, height);
+            self.scrim.hide();
+            self.configure_layout(card_width, card_height);
+            self.wanted_height.set(card_height);
+            self.fitted_width.set(card_width);
+            self.layer.place(&self.card, x, y, card_width, card_height);
+            return;
+        }
         let page = (width - column).max(0);
         self.layer.place(&self.scrim, 0, 0, width, height);
         let card_width = panel_card_width(page);
@@ -1288,11 +1549,18 @@ impl Panels {
     }
 
     fn configure_layout(&self, card_width: i32, window_height: i32) -> bool {
+        let full = self.is_full_surface();
         let compact = card_width < 700 || (window_height > 1 && window_height < 520);
         let changed = self.compact.replace(compact) != compact;
         let chrome_dirty = self.configured_compact.get() != Some(compact);
         if !changed && !chrome_dirty && self.fitted_width.get() == card_width && self.adapted_width.get() == self.content_width(card_width) {
             return false;
+        }
+        let show_toc = !compact && self.open.as_ref() == Some(&PanelKind::Settings);
+        self.settings_toc.set_no_show_all(!show_toc);
+        self.settings_toc.set_visible(show_toc);
+        if show_toc {
+            self.settings_toc.show_all();
         }
         if chrome_dirty {
             let orientation = if compact { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal };
@@ -1300,18 +1568,23 @@ impl Panels {
             self.rail.set_orientation(if compact { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical });
             self.rail.set_hexpand(compact);
             self.rail.set_size_request(if compact { -1 } else { RAIL_WIDTH }, -1);
-            self.card.set_size_request(if compact { 560 } else { 880 }, 420);
+            if !full {
+                self.card.set_size_request(if compact { 560 } else { 880 }, 420);
+            }
             self.rail.set_child_packing(&self.nav, compact, true, 0, gtk::PackType::Start);
             self.nav.set_orientation(if compact { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical });
             self.nav.set_homogeneous(compact);
             self.nav.set_margin_top(if compact { 12 } else { 0 });
-            self.nav.set_margin_bottom(12);
+            self.nav.set_margin_bottom(if compact { 12 } else { 4 });
             self.rail_brand.set_no_show_all(compact);
             self.rail_brand.set_visible(!compact);
-            self.rail_hint.set_no_show_all(compact);
-            self.rail_hint.set_visible(!compact);
+            let show_hint = !compact && !full;
+            self.rail_hint.set_no_show_all(!show_hint);
+            self.rail_hint.set_visible(show_hint);
             if !compact {
                 self.rail_brand.show_all();
+            }
+            if show_hint {
                 self.rail_hint.show_all();
             }
             let context = self.card.style_context();
@@ -1332,16 +1605,21 @@ impl Panels {
                     }
                 }
             }
-            let inset = if compact { COMPACT_INSET } else { INSET };
-            self.header.set_margin_start(inset);
-            self.header.set_margin_end(inset);
-            self.header.set_margin_top(if compact { 16 } else { 20 });
-            self.header.set_margin_bottom(12);
-            self.body.set_margin_start(inset);
-            self.body.set_margin_end(inset);
-            self.body.set_margin_bottom(inset);
             self.configured_compact.set(Some(compact));
         }
+        let (margin_start, margin_end) = if full {
+            fullpage_side_margins(self.content_width(card_width), compact)
+        } else {
+            let inset = if compact { COMPACT_INSET } else { INSET };
+            (inset, inset)
+        };
+        self.header.set_margin_start(margin_start);
+        self.header.set_margin_end(margin_end);
+        self.header.set_margin_top(if compact { 16 } else if full { 28 } else { 20 });
+        self.header.set_margin_bottom(if full { 16 } else { 12 });
+        self.body.set_margin_start(margin_start);
+        self.body.set_margin_end(margin_end);
+        self.body.set_margin_bottom(if full { 20 } else if compact { COMPACT_INSET } else { INSET });
         self.adapt_body_if_needed(self.content_width(card_width));
         changed
     }
@@ -1490,6 +1768,11 @@ impl Panels {
             }
             let width = app.ui.overlay.allocated_width();
             let height = app.ui.overlay.allocated_height();
+            if panels.is_full_surface() {
+                panels.layout_card(width, height);
+                panels.scroll_for_open().check_resize();
+                return;
+            }
             let card_width = panel_card_width((width - panels.column.get()).max(1));
             if panels.open.as_ref() == Some(&PanelKind::Settings)
                 && panels.fitted_width.get() == card_width
@@ -1602,9 +1885,10 @@ impl Panels {
         let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_overlay_scrolling(false);
-        scroll.set_min_content_height(340);
-        scroll.set_max_content_height(480);
+        scroll.set_propagate_natural_height(false);
+        scroll.set_min_content_height(160);
         scroll.set_vexpand(true);
+        scroll.set_hexpand(true);
         scroll.add(content);
         scroll
     }
@@ -2429,38 +2713,69 @@ impl Panels {
         crate::ui::class(&list, "panel-list");
         list.set_margin_end(10);
 
+        let note_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        crate::ui::class(&note_box, "panel-note");
+        note_box.set_margin_bottom(20);
         let disclosure = gtk::Label::new(Some(
-            "Content scripts and CSS run on the sites an add-on requests. WebExtensions background workers, chrome.*/browser.* APIs, extension storage, and nativeMessaging are not supported by WebKitGTK — password managers (such as Bitwarden) and built-in autofill do not work here.",
+            "Rill runs on WebKitGTK, so content scripts and CSS run on the sites an add-on requests, while WebExtensions background workers, chrome.*/browser.* APIs, extension storage, toolbar popups, and nativeMessaging are not supported. Password managers (such as Bitwarden) and built-in autofill do not work here.",
         ));
         crate::ui::class(&disclosure, "settingdesc");
-        crate::ui::class(&disclosure, "panel-note");
         disclosure.set_xalign(0.0);
         disclosure.set_line_wrap(true);
         disclosure.set_line_wrap_mode(gtk::pango::WrapMode::Word);
-        disclosure.set_margin_bottom(14);
-        list.add(&disclosure);
+        note_box.pack_start(&disclosure, false, true, 0);
+        let builtin_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let builtin_hint = gtk::Label::new(Some(
+            "Ad blocking and page darkening are built directly into Rill Settings.",
+        ));
+        crate::ui::class(&builtin_hint, "panel-count");
+        builtin_hint.set_xalign(0.0);
+        builtin_hint.set_hexpand(true);
+        builtin_hint.set_line_wrap(true);
+        let open_settings_btn = gtk::Button::with_label("Open Settings");
+        crate::ui::class(&open_settings_btn, "act");
+        open_settings_btn.set_valign(gtk::Align::Center);
+        {
+            let weak = app.weak();
+            open_settings_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_panel_filtered(PanelKind::Settings, "Browsing");
+                }
+            });
+        }
+        builtin_row.pack_start(&builtin_hint, true, true, 0);
+        builtin_row.pack_start(&open_settings_btn, false, false, 0);
+        note_box.pack_start(&builtin_row, false, true, 0);
+        list.add(&note_box);
 
-        let installed_section = self.section(app, crate::icons::Icon::Spark, "Installed", "Enable, inspect, or remove installed add-ons.");
+        let installed_section = self.section(app, crate::icons::Icon::Spark, "Installed", "Turn installed add-ons on or off, inspect limitations, or remove them.");
+        crate::ui::class(&installed_section, "first-section");
 
         if installed.is_empty() {
-            installed_section.add(&self.empty_state(
-                app,
-                crate::icons::Icon::Spark,
-                "No add-ons installed",
-                "Browse Firefox Add-ons below or install a .xpi, .crx, or unpacked folder from this computer.",
-                None,
+            let empty_note = gtk::Label::new(Some(
+                "No extensions installed yet. Browse the stores below or inspect a local .crx, .xpi, or unpacked folder from this computer.",
             ));
+            crate::ui::class(&empty_note, "settingdesc");
+            empty_note.set_xalign(0.0);
+            empty_note.set_line_wrap(true);
+            empty_note.set_line_wrap_mode(gtk::pango::WrapMode::Word);
+            empty_note.set_margin_top(2);
+            empty_note.set_margin_bottom(6);
+            installed_section.add(&empty_note);
         }
         for entry in installed {
             let mut notes = vec![entry.why_not.replace('\n', " ")];
             notes.extend(crate::extensions::not_drawn(&entry));
             notes.retain(|note| !note.trim().is_empty());
-            let subtitle = if entry.partial {
-                format!("{}  ·  loads on the sites it asks for  ·  {}", entry.version, notes.join("; "))
-            } else if entry.runs {
-                format!("{}  ·  runs on the sites it asks for  ·  {}", entry.version, notes.join("; "))
+            let status = crate::addons_catalog::InstalledStatus::classify(
+                entry.runs,
+                entry.partial,
+                entry.enabled,
+            );
+            let subtitle = if notes.is_empty() {
+                format!("{}  ·  {}", entry.version, status.label())
             } else {
-                format!("{}  ·  {}", entry.version, notes.join("; "))
+                format!("{}  ·  {}  ·  {}", entry.version, status.label(), notes.join("; "))
             };
             let id = entry.id.clone();
             let runs = entry.runs;
@@ -2501,11 +2816,11 @@ impl Panels {
                 }
                 let toggle = Self::pill_switch(app, switch_active, switch_sensitive);
                 toggle.set_tooltip_text(Some(if !switch_sensitive {
-                    "Not supported here — nothing to run"
+                    "Not supported on WebKitGTK — nothing to run"
                 } else if switch_active {
-                    "Disable add-on"
+                    "Disable extension"
                 } else {
-                    "Enable add-on"
+                    "Enable extension"
                 }));
                 if let Some(access) = toggle.accessible() {
                     gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::ToggleButton);
@@ -2540,7 +2855,7 @@ impl Panels {
                 let row = self.link_row(app, &format!("{} options", entry.name), "Opens the page the add-on ships", "Options", {
                     let url = format!("file://{page}");
                     move |app: &AppRef| {
-                        app.open_panel(PanelKind::Extensions);
+                        app.close_panels();
                         app.new_tab(Some(&url), false, false);
                     }
                 });
@@ -2550,6 +2865,7 @@ impl Panels {
         list.add(&installed_section);
 
         let current = app.state.borrow().tab(app.active_id()).map(|tab| tab.url.clone()).unwrap_or_default();
+        let on_chrome_store = crate::addons_catalog::is_chrome_web_store_url(&current);
         let acting = if current.is_empty() { Vec::new() } else { crate::extensions::here(&current) };
         if !acting.is_empty() {
             let active_section = self.section(app, crate::icons::Icon::Globe, "On this page", "Add-ons acting on the page in front of you.");
@@ -2562,17 +2878,53 @@ impl Panels {
             list.add(&active_section);
         }
 
-        // ---- Discover Firefox Add-ons (addons.mozilla.org) ----
+        // ---- Extension stores (Chrome Web Store + Firefox Add-ons) ----
+        let stores_desc = if on_chrome_store {
+            "This tab is on Chrome Web Store. WebKitGTK cannot one-click install directly from Chrome Web Store; if you have a .crx archive or unpacked folder, inspect and add it below."
+        } else {
+            "Browse official stores in a new tab. Rill only installs after showing you every site an extension requests and whether its scripts can run on WebKitGTK."
+        };
+        let stores = self.section(
+            app,
+            crate::icons::Icon::Globe,
+            "Extension stores",
+            stores_desc,
+        );
+        let chrome_store = self.link_row(
+            app,
+            "Chrome Web Store",
+            "Opens chromewebstore.google.com. One-click Chrome store installs are not supported in WebKitGTK; if you have a local .crx or unpacked folder, inspect and add it below (content scripts and CSS only).",
+            "Open store",
+            move |app: &AppRef| {
+                app.close_panels();
+                app.new_tab(Some(crate::addons_catalog::CHROME_WEB_STORE_URL), false, false);
+            },
+        );
+        stores.add(&chrome_store);
+        let firefox_store = self.link_row(
+            app,
+            "Firefox Add-ons",
+            "Opens addons.mozilla.org. Downloading an .xpi from addons.mozilla.org opens Rill's Add to Rill confirmation card before anything is installed.",
+            "Open store",
+            move |app: &AppRef| {
+                app.close_panels();
+                app.new_tab(Some(crate::addons_catalog::FIREFOX_ADDONS_URL), false, false);
+            },
+        );
+        stores.add(&firefox_store);
+        list.add(&stores);
+
+        // ---- Search official Firefox Add-ons (addons.mozilla.org) ----
         let discover = self.section(
             app,
             crate::icons::Icon::Search,
-            "Discover Firefox Add-ons",
-            "Official addons.mozilla.org listings with honest compatibility badges. Searches connect to addons.mozilla.org only when you press Search.",
+            "Search Firefox Add-ons",
+            "Search official addons.mozilla.org listings with honest compatibility notes. No network request is made until you press Search.",
         );
         let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         search_row.set_margin_bottom(8);
         let amo_entry = gtk::Entry::new();
-        amo_entry.set_placeholder_text(Some("Search Firefox Add-ons (addons.mozilla.org)…"));
+        amo_entry.set_placeholder_text(Some("Search addons.mozilla.org…"));
         amo_entry.set_hexpand(true);
         amo_entry.set_width_chars(1);
         if let Some(access) = amo_entry.accessible() {
@@ -2660,25 +3012,18 @@ impl Panels {
             let run_act = run_search.clone();
             amo_entry.connect_activate(move |_| run_act());
         }
-
-        let firefox = self.link_row(
-            app,
-            "Browse all Firefox Add-ons",
-            "Opens addons.mozilla.org in a new tab. Clicking Add to Firefox triggers the install confirmation card.",
-            "Open store",
-            move |app: &AppRef| {
-                app.toggle_panel_switch(PanelKind::Extensions);
-                app.new_tab(Some("https://addons.mozilla.org/firefox/extensions/"), false, true);
-            },
-        );
-        discover.add(&firefox);
         list.add(&discover);
 
-        // ---- Install from disk ----
-        let installation = self.section(app, crate::icons::Icon::Plus, "Install from this computer", "Install a local .xpi, .crx, or unpacked extension folder.");
+        // ---- Add from this computer ----
+        let installation = self.section(
+            app,
+            crate::icons::Icon::Plus,
+            "Add from this computer",
+            "Inspect a local .crx or .xpi archive or an unpacked folder with manifest.json. Rill checks compatibility and asks for confirmation before installing.",
+        );
 
         let field = gtk::Entry::new();
-        field.set_placeholder_text(Some("A .crx, an .xpi, or a folder with a manifest.json"));
+        field.set_placeholder_text(Some("Path to a .crx, .xpi, or folder containing manifest.json"));
         field.set_width_chars(1);
         field.set_hexpand(true);
         if let Some(access) = field.accessible() {
@@ -2687,23 +3032,68 @@ impl Panels {
         let app_field = app.weak();
         field.connect_activate(move |field| {
             let Some(app) = app_field.upgrade() else { return };
-            install_extension_path(&app, &std::path::PathBuf::from(field.text().to_string()));
+            let trimmed = field.text().trim().to_string();
+            if !trimmed.is_empty() {
+                inspect_and_offer_local_extension(&app, std::path::PathBuf::from(trimmed));
+            }
         });
-        let choose = gtk::Button::with_label("Choose…");
-        crate::ui::class(&choose, "act");
-        choose.set_valign(gtk::Align::Center);
-        if let Some(access) = choose.accessible() {
-            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Choose a file or folder to install");
+        let choose_file = gtk::Button::with_label("Choose file\u{2026}");
+        crate::ui::class(&choose_file, "act");
+        choose_file.set_valign(gtk::Align::Center);
+        if let Some(access) = choose_file.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Choose a .crx or .xpi extension file");
         }
-        choose.set_tooltip_text(Some("Install a .crx, .xpi or an unpacked extension folder"));
+        choose_file.set_tooltip_text(Some("Inspect and add a .crx or .xpi archive"));
         let app_choose = app.weak();
-        choose.connect_clicked(move |_| {
+        choose_file.connect_clicked(move |_| {
             let Some(app) = app_choose.upgrade() else { return };
             let dialog = gtk::FileChooserNative::new(
-                Some("Install an add-on"),
+                Some("Choose extension archive"),
                 Some(&app.ui.window),
                 gtk::FileChooserAction::Open,
-                Some("Install"),
+                Some("Inspect"),
+                Some("Cancel"),
+            );
+            dialog.set_select_multiple(false);
+            let filter = gtk::FileFilter::new();
+            filter.set_name(Some("Extension archives (*.xpi, *.crx)"));
+            filter.add_pattern("*.xpi");
+            filter.add_pattern("*.crx");
+            dialog.add_filter(filter);
+            let all_filter = gtk::FileFilter::new();
+            all_filter.set_name(Some("All files"));
+            all_filter.add_pattern("*");
+            dialog.add_filter(all_filter);
+            let app_native = app.weak();
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept {
+                    if let Some(app) = app_native.upgrade() {
+                        if let Some(path) = dialog.filename() {
+                            inspect_and_offer_local_extension(&app, path);
+                        }
+                    }
+                }
+                dialog.destroy();
+                EXTENSION_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+            });
+            EXTENSION_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+            dialog.show();
+        });
+        let choose_folder = gtk::Button::with_label("Choose folder\u{2026}");
+        crate::ui::class(&choose_folder, "act");
+        choose_folder.set_valign(gtk::Align::Center);
+        if let Some(access) = choose_folder.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Choose an unpacked extension folder");
+        }
+        choose_folder.set_tooltip_text(Some("Inspect and add an unpacked folder containing manifest.json"));
+        let app_folder = app.weak();
+        choose_folder.connect_clicked(move |_| {
+            let Some(app) = app_folder.upgrade() else { return };
+            let dialog = gtk::FileChooserNative::new(
+                Some("Choose unpacked extension folder"),
+                Some(&app.ui.window),
+                gtk::FileChooserAction::SelectFolder,
+                Some("Inspect"),
                 Some("Cancel"),
             );
             dialog.set_select_multiple(false);
@@ -2712,7 +3102,7 @@ impl Panels {
                 if response == gtk::ResponseType::Accept {
                     if let Some(app) = app_native.upgrade() {
                         if let Some(path) = dialog.filename() {
-                            install_extension_path(&app, &path);
+                            inspect_and_offer_local_extension(&app, path);
                         }
                     }
                 }
@@ -2726,7 +3116,8 @@ impl Panels {
         install_row.set_margin_top(8);
         install_row.set_margin_bottom(8);
         install_row.pack_start(&field, true, true, 0);
-        install_row.pack_start(&choose, false, false, 0);
+        install_row.pack_start(&choose_file, false, false, 0);
+        install_row.pack_start(&choose_folder, false, false, 0);
         installation.add(&install_row);
         list.add(&installation);
 
@@ -2751,9 +3142,10 @@ impl Panels {
         field.set_position(query.chars().count() as i32);
         // The filter is chrome, not a setting: keeping it outside the
         // scroller stops the bottom-of-panel proof from clipping it in half.
-        self.settings_holder.add(&field_box);
+        self.settings_holder.pack_start(&field_box, false, true, 0);
 
         let appearance = self.section(app, crate::icons::Icon::Spark, "Appearance", "Light, dark, homepage shortcuts, dither canvas, and window controls.");
+        crate::ui::class(&appearance, "first-section");
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         crate::ui::class(&buttons, "panel-appearance");
         buttons.set_homogeneous(true);
@@ -4177,6 +4569,10 @@ impl Panels {
         menu_box.show_all();
         popover.add(&menu_box);
         {
+            let menu_for_show = menu_box.clone();
+            popover.connect_show(move |pop| {
+                crate::motion::reveal_popover(pop, &menu_for_show, pop.position());
+            });
             let picker_weak = picker.downgrade();
             popover.connect_closed(move |_| {
                 if let Some(btn) = picker_weak.upgrade() {
@@ -4209,7 +4605,8 @@ impl Panels {
 
         // Keyword shortcuts belong with the engine: both decide where typed
         // words go. See src/keyword.rs.
-        list.add(&self.decorate_section(app, crate::keyword::settings_section(app), crate::icons::Icon::Command, "Keyword shortcuts"));
+        let keywords_sec = self.decorate_section(app, crate::keyword::settings_section(app), crate::icons::Icon::Command, "Keyword shortcuts");
+        list.add(&keywords_sec);
 
         // This row is about the page in front of you, not about a tab
         // setting, so it gets a head of its own rather than trailing TABS.
@@ -4263,7 +4660,8 @@ impl Panels {
         page.add(&unhide_row);
         list.add(&page);
 
-        list.add(&self.decorate_section(app, crate::permissions::settings_section(app), crate::icons::Icon::Lock, "Site permissions"));
+        let permissions_sec = self.decorate_section(app, crate::permissions::settings_section(app), crate::icons::Icon::Lock, "Site permissions");
+        list.add(&permissions_sec);
         let importing = self.section(app, crate::icons::Icon::Download, "Bring your browser with you", "Add bookmarks and history from another browser on this computer.");
         let import_row = crate::import::settings_row(app);
         crate::ui::class(&import_row, "panel-setting-row");
@@ -4280,12 +4678,28 @@ impl Panels {
         about.set_margin_top(2);
         list.add(&about);
 
-        // Settings is intentionally compact in a small window. Its scroller
-        // owns the overflow; the capture clips the viewport to the card.
+        let settings_scroller = self.settings_scroll(&list);
+        self.populate_settings_toc(
+            app,
+            &list,
+            &settings_scroller,
+            &[
+                ("Appearance", &appearance),
+                ("Toolbar & layout", &layout),
+                ("Spaces", &spaces_sec),
+                ("Named sessions", &sessions_sec),
+                ("Browsing", &browsing),
+                ("Tabs & pages", &tabs),
+                ("Search", &search),
+                ("Site permissions", &permissions_sec),
+            ],
+        );
+
+        // Settings fills the full viewport below its pinned search field.
         // A search narrows the form to matching sections and rows. Sections
         // stay visible when a row inside them matches, so the result still
         // reads as Settings rather than a bare list of controls.
-        self.settings_holder.add(&self.settings_scroll(&list));
+        self.settings_holder.pack_start(&settings_scroller, true, true, 0);
         self.settings_holder.show_all();
         if !query.is_empty() {
             filter_settings_list(&list, &query);
@@ -4471,8 +4885,10 @@ impl Panels {
         {
             let slot = self.active_popover.clone();
             let pop_clone = popover.clone();
-            popover.connect_show(move |_| {
+            let menu_for_show = menu_box.clone();
+            popover.connect_show(move |pop| {
                 *slot.borrow_mut() = Some(pop_clone.clone());
+                crate::motion::reveal_popover(pop, &menu_for_show, pop.position());
             });
             let slot_hide = self.active_popover.clone();
             let picker_weak = picker.downgrade();
@@ -4606,9 +5022,13 @@ impl Panels {
         toolbar
     }
 
-    fn section_header(&self, _app: &AppRef, _icon: crate::icons::Icon, label: &gtk::Label) -> gtk::Box {
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    fn section_header(&self, app: &AppRef, icon: crate::icons::Icon, label: &gtk::Label) -> gtk::Box {
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 9);
         crate::ui::class(&header, "panel-section-header");
+        let glyph = crate::icons::area(icon, 16, app.palette.borrow().muted);
+        crate::ui::class(&glyph, "panel-section-icon");
+        glyph.set_valign(gtk::Align::Center);
+        header.pack_start(&glyph, false, false, 0);
         crate::ui::class(label, "group");
         crate::ui::class(label, "panel-section-heading");
         label.set_xalign(0.0);
@@ -4627,7 +5047,7 @@ impl Panels {
     fn section(&self, app: &AppRef, icon: crate::icons::Icon, title: &str, description: &str) -> gtk::Box {
         let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&section, "panel-section");
-        section.set_margin_bottom(16);
+        section.set_margin_bottom(24);
         if let Some(access) = section.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::Grouping);
             gtk::atk::prelude::AtkObjectExt::set_name(&access, title);
@@ -4642,8 +5062,8 @@ impl Panels {
             detail.set_xalign(0.0);
             detail.set_line_wrap(true);
             detail.set_line_wrap_mode(gtk::pango::WrapMode::Word);
-            detail.set_margin_top(4);
-            detail.set_margin_bottom(8);
+            detail.set_margin_top(5);
+            detail.set_margin_bottom(12);
             section.pack_start(&detail, false, true, 0);
         }
         section
@@ -4653,7 +5073,7 @@ impl Panels {
         crate::ui::class(&section, "panel-section");
         section.set_spacing(0);
         section.set_margin_top(0);
-        section.set_margin_bottom(16);
+        section.set_margin_bottom(24);
         if let Some(access) = section.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_role(&access, gtk::atk::Role::Grouping);
             gtk::atk::prelude::AtkObjectExt::set_name(&access, title);
@@ -4874,16 +5294,18 @@ impl Panels {
 
         let canvas = gtk::DrawingArea::new();
         canvas.set_size_request(40, 24);
-        let btn_weak = button.downgrade();
+        let knob_t = std::rc::Rc::new(std::cell::Cell::new(if value { 1.0_f64 } else { 0.0_f64 }));
+        let knob_draw = knob_t.clone();
         canvas.connect_draw(move |widget, cr| {
-            let active = btn_weak.upgrade().is_some_and(|b| b.is_active());
+            let pos = knob_draw.get();
+            let blend = pos.clamp(0.0, 1.0);
             let w = f64::from(widget.allocated_width()).max(40.0);
             let h = f64::from(widget.allocated_height()).max(24.0);
             let x0 = ((w - 40.0) / 2.0).max(0.0);
             let y0 = ((h - 24.0) / 2.0).max(0.0);
             let r = 12.0;
 
-            let track = if active { on_track } else { off_track };
+            let track = off_track.mix(on_track, blend as f32);
             cr.new_sub_path();
             cr.arc(x0 + 40.0 - r, y0 + r, r, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
             cr.arc(x0 + r, y0 + r, r, std::f64::consts::FRAC_PI_2, 3.0 * std::f64::consts::FRAC_PI_2);
@@ -4895,14 +5317,14 @@ impl Panels {
             );
             let _ = cr.fill();
 
-            let knob_x = if active { x0 + 28.0 } else { x0 + 12.0 };
+            let knob_x = crate::motion::lerp(x0 + 12.0, x0 + 28.0, pos).clamp(x0 + 10.5, x0 + 29.5);
             let knob_y = y0 + 12.0;
             // Subtle shadow under the circular knob matching `.panel switch slider`.
             cr.arc(knob_x, knob_y + 1.0, 9.0, 0.0, 2.0 * std::f64::consts::PI);
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.18);
             let _ = cr.fill();
 
-            let knob = if active { on_knob } else { off_knob };
+            let knob = off_knob.mix(on_knob, blend as f32);
             cr.arc(knob_x, knob_y, 9.0, 0.0, 2.0 * std::f64::consts::PI);
             cr.set_source_rgb(
                 f64::from(knob.0) / 255.0,
@@ -4913,8 +5335,16 @@ impl Panels {
             crate::gtkx::inh(false)
         });
         let canvas_for_toggle = canvas.clone();
-        button.connect_toggled(move |_| {
-            canvas_for_toggle.queue_draw();
+        let knob_for_toggle = knob_t;
+        button.connect_toggled(move |sw| {
+            let target = if sw.is_active() { 1.0 } else { 0.0 };
+            crate::motion::tween_cell(
+                &canvas_for_toggle,
+                &knob_for_toggle,
+                target,
+                crate::motion::dur::MICRO,
+                true,
+            );
         });
         button.add(&canvas);
         button
@@ -5183,21 +5613,22 @@ pub fn refresh_downloads(app: &AppRef) {
     app.panels.borrow_mut().refresh_downloads_open(app);
 }
 
-/// Install a local extension from a typed path or a native chooser.
-/// The chooser must never start navigation or overwrite the current page.
-fn install_extension_path(app: &AppRef, path: &std::path::Path) {
-    match crate::extensions::install(path) {
-        Ok(entry) => {
-            let message = if entry.runs {
-                format!("{} installed", entry.name)
-            } else {
-                format!("{} installed, but {}", entry.name, entry.why_not.replace('\n', " "))
-            };
-            app.rebuild_every_view();
-            app.flash_toast(&message);
-            app.toggle_panel_switch(PanelKind::Extensions);
+/// Inspect a local extension archive or unpacked folder and open Rill's
+/// confirmation card (with Cancel focused by default) so the user sees every
+/// requested host and WebKitGTK compatibility note before anything is copied.
+fn inspect_and_offer_local_extension(app: &AppRef, path: std::path::PathBuf) {
+    match crate::extensions::inspect(&path) {
+        Ok(offer) => {
+            app.close_panels();
+            crate::permissions::offer_addon(
+                app,
+                app.active_id(),
+                path,
+                "this computer".to_string(),
+                offer,
+            );
         }
-        Err(why) => app.flash_toast(&format!("Could not install: {why}")),
+        Err(why) => app.flash_toast(&format!("Could not read extension: {why}")),
     }
 }
 
@@ -5239,6 +5670,32 @@ mod tests {
         assert_eq!(panel_card_width(240), 216);
         assert_eq!(panel_card_width(24), 1);
         assert_eq!(panel_card_width(0), 1);
+    }
+
+    #[test]
+    fn settings_and_extensions_open_as_full_surfaces() {
+        assert!(is_full_surface_kind(&PanelKind::Settings));
+        assert!(is_full_surface_kind(&PanelKind::Extensions));
+        assert!(!is_full_surface_kind(&PanelKind::Bookmarks));
+        assert!(!is_full_surface_kind(&PanelKind::History));
+        assert!(!is_full_surface_kind(&PanelKind::Downloads));
+        assert!(!is_full_surface_kind(&PanelKind::Shortcuts));
+    }
+
+    #[test]
+    fn full_surface_rect_fills_available_browser_content_area() {
+        assert_eq!(full_surface_rect(1280, 900, 0, 76), (6, 78, 1268, 816));
+        assert_eq!(full_surface_rect(1280, 900, 240, 38), (246, 40, 1028, 854));
+        assert_eq!(full_surface_rect(900, 1000, 0, 76), (6, 78, 888, 916));
+    }
+
+    #[test]
+    fn fullpage_side_margins_cap_wide_reading_measure_and_stay_compact_on_narrow() {
+        assert_eq!(fullpage_side_margins(620, true), (COMPACT_INSET, COMPACT_INSET));
+        assert_eq!(fullpage_side_margins(780, false), (28, 28));
+        let (start, end) = fullpage_side_margins(1200, false);
+        assert_eq!(start, 44);
+        assert_eq!(1200 - start - end, FULLPAGE_MAX_MEASURE);
     }
 
     #[test]

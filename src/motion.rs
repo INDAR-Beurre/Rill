@@ -34,13 +34,115 @@ pub fn enabled() -> bool {
     )
 }
 
+/// Evaluates a standard CSS cubic-Bézier timing function `(x1, y1, x2, y2)` at
+/// normalized progress `t` in `[0.0, 1.0]`. Used so procedural `GdkFrameClock`
+/// animations and GTK3 CSS `cubic-bezier(...)` transitions share the exact
+/// same mathematical curves.
+pub fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let ax = 3.0 * x1 - 3.0 * x2 + 1.0;
+    let bx = 3.0 * x2 - 6.0 * x1;
+    let cx = 3.0 * x1;
+    let sample_x = |u: f64| ((ax * u + bx) * u + cx) * u;
+    let sample_dx = |u: f64| (3.0 * ax * u + 2.0 * bx) * u + cx;
+
+    // Solve B_x(u) = t via Newton-Raphson, falling back to bisection when the
+    // slope is flat or leaves [0, 1].
+    let mut u = t;
+    let mut solved = false;
+    for _ in 0..8 {
+        let err = sample_x(u) - t;
+        if err.abs() < 1e-7 {
+            solved = true;
+            break;
+        }
+        let dx = sample_dx(u);
+        if dx.abs() < 1e-6 {
+            break;
+        }
+        let next = u - err / dx;
+        if !(0.0..=1.0).contains(&next) {
+            break;
+        }
+        u = next;
+    }
+    if !solved {
+        let mut lo = 0.0;
+        let mut hi = 1.0;
+        u = t;
+        for _ in 0..24 {
+            let x = sample_x(u);
+            if (x - t).abs() < 1e-7 {
+                break;
+            }
+            if x < t {
+                lo = u;
+            } else {
+                hi = u;
+            }
+            u = 0.5 * (lo + hi);
+        }
+    }
+
+    let ay = 3.0 * y1 - 3.0 * y2 + 1.0;
+    let by = 3.0 * y2 - 6.0 * y1;
+    let cy = 3.0 * y1;
+    ((ay * u + by) * u + cy) * u
+}
+
+/// One coherent easing family shared across CSS and frame-clock transitions
+/// (Rill 1.3 liquid motion spec).
+pub mod curve {
+    /// Primary monotonic settle: fast buoyant lift, long silky deceleration.
+    pub const LIQUID: (f64, f64, f64, f64) = (0.22, 1.0, 0.36, 1.0);
+    /// Subtle ~5% buoyant settle for spatial physical motion (switches, dots,
+    /// floating cards/popovers), inspired by the desktop compositor's fluid
+    /// open curve without distracting bounce.
+    pub const BUOYANT: (f64, f64, f64, f64) = (0.34, 1.0, 0.28, 1.15);
+    /// CSS timing function string matching `LIQUID`.
+    pub const CSS_LIQUID: &str = "cubic-bezier(0.22, 1, 0.36, 1)";
+    /// CSS timing function string for decisive exits.
+    pub const CSS_DISMISS: &str = "cubic-bezier(0.32, 0, 0.67, 0)";
+}
+
+/// Primary liquid ease-out curve (`curve::LIQUID`), strictly monotonic in `[0.0, 1.0]`.
+pub fn ease_liquid(t: f64) -> f64 {
+    cubic_bezier(
+        curve::LIQUID.0,
+        curve::LIQUID.1,
+        curve::LIQUID.2,
+        curve::LIQUID.3,
+        t,
+    )
+}
+
+/// Subtle buoyant spatial settle (`curve::BUOYANT`). Never apply directly to
+/// opacity; use for spatial coordinates, switch knobs, and indicator radii.
+pub fn ease_buoyant(t: f64) -> f64 {
+    cubic_bezier(
+        curve::BUOYANT.0,
+        curve::BUOYANT.1,
+        curve::BUOYANT.2,
+        curve::BUOYANT.3,
+        t,
+    )
+}
+
 /// Cubic ease-out curve for `t` clamped to `[0.0, 1.0]`.
+#[cfg(test)]
 pub fn ease_out_cubic(t: f64) -> f64 {
     let u = 1.0 - t.clamp(0.0, 1.0);
     1.0 - u * u * u
 }
 
 /// Quintic ease-out curve for `t` clamped to `[0.0, 1.0]`.
+#[cfg(test)]
 pub fn ease_out_quint(t: f64) -> f64 {
     let u = 1.0 - t.clamp(0.0, 1.0);
     1.0 - u.powi(5)
@@ -76,16 +178,19 @@ pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
 /// Exits are shorter than entrances: something you dismissed should be out
 /// of the way before your eye gets back to the page.
 pub mod dur {
-    /// Small state changes: a label, a chip, a switch of panel content.
-    pub const MICRO: u64 = 120;
-    /// A layer arriving: field, panel, find bar, card, toast.
-    pub const ENTER: u64 = 180;
+    /// Small state changes: hover/focus/active transitions, switch glides,
+    /// close-button fades, space dots, tab crossfades, and progress sweeps.
+    pub const MICRO: u64 = 140;
+    /// A layer arriving: omnibox, panel, find bar, card, toast, popover, new tab.
+    pub const ENTER: u64 = 200;
     /// The same layer leaving.
-    pub const EXIT: u64 = 130;
-    /// Something that changes the page layout, such as folding the column.
-    pub const LAYOUT: u64 = 220;
-    /// How far a layer travels while it enters or leaves, in pixels.
-    pub const TRAVEL: i32 = 8;
+    pub const EXIT: u64 = 150;
+    /// Structural layout shifts: sidebar/top-tabs toggle, welcome step slide.
+    pub const LAYOUT: u64 = 240;
+    /// Spatial travel for primary floating layers, in pixels.
+    pub const TRAVEL: i32 = 10;
+    /// Compact spatial travel for inline dropdowns, popovers, and new tabs.
+    pub const TRAVEL_SM: i32 = 5;
 }
 
 fn widget_key(widget: &impl IsA<gtk::Widget>) -> usize {
@@ -375,9 +480,22 @@ pub fn animate(
     }
 }
 
-/// Fades `widget` opacity from `0.0` to `1.0` using an ease-out cubic curve.
+/// Fades `widget` opacity from `0.0` to `1.0` using the shared liquid curve.
 pub fn fade_in(widget: &impl IsA<gtk::Widget>, duration_ms: u64) {
     fade_from(widget, 0.0, 1.0, duration_ms);
+}
+
+/// Smoothly fades `widget` opacity from its current opacity to `to` using the
+/// shared liquid curve. Skips work when already at `to`.
+pub fn fade_opacity_to(widget: &impl IsA<gtk::Widget>, to: f64, duration_ms: u64) {
+    let to = to.clamp(0.0, 1.0);
+    let from = widget.opacity().clamp(0.0, 1.0);
+    if (from - to).abs() < 0.005 {
+        cancel(widget);
+        widget.set_opacity(to);
+        return;
+    }
+    fade_from(widget, from, to, duration_ms);
 }
 
 /// Fades a direct-draw alpha multiplier from `0.0` to `1.0` and redraws the
@@ -393,7 +511,7 @@ pub fn fade_alpha(
         widget,
         duration_ms,
         move |t| {
-            alpha.set(ease_out_cubic(t));
+            alpha.set(ease_liquid(t).clamp(0.0, 1.0));
             if let Some(w) = weak.upgrade() {
                 w.queue_draw();
             }
@@ -416,7 +534,7 @@ pub fn fade_alpha_out(
         widget,
         duration_ms,
         move |t| {
-            alpha.set(lerp(start, 0.0, ease_exit(t)));
+            alpha.set(lerp(start, 0.0, ease_exit(t)).clamp(0.0, 1.0));
             if let Some(w) = weak.upgrade() {
                 w.queue_draw();
             }
@@ -425,7 +543,7 @@ pub fn fade_alpha_out(
     );
 }
 
-/// Fades `widget` opacity from `from` to `to` using an ease-out cubic curve.
+/// Fades `widget` opacity from `from` to `to` using the shared liquid curve.
 pub fn fade_from(widget: &impl IsA<gtk::Widget>, from: f64, to: f64, duration_ms: u64) {
     let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
     animate(
@@ -433,7 +551,7 @@ pub fn fade_from(widget: &impl IsA<gtk::Widget>, from: f64, to: f64, duration_ms
         duration_ms,
         move |t| {
             if let Some(w) = weak.upgrade() {
-                w.set_opacity(lerp(from, to, ease_out_cubic(t)));
+                w.set_opacity(lerp(from, to, ease_liquid(t)).clamp(0.0, 1.0));
             }
         },
         || {},
@@ -454,15 +572,15 @@ pub fn fade_out_then(
         duration_ms,
         move |t| {
             if let Some(w) = weak.upgrade() {
-                w.set_opacity(lerp(start_opacity, 0.0, ease_exit(t)));
+                w.set_opacity(lerp(start_opacity, 0.0, ease_exit(t)).clamp(0.0, 1.0));
             }
         },
         on_done,
     );
 }
 
-/// Slides `widget` inside `fixed` from `to_y + offset_y` to `to_y` while fading
-/// opacity from `0.0` to `1.0`, then runs `on_done`.
+/// Slides `widget` inside `fixed` from `to_y + offset_y` to `to_y` with subtle
+/// buoyant spatial settle while fading opacity from `0.0` to `1.0`, then runs `on_done`.
 pub fn slide_in_fixed_then(
     fixed: &gtk::Fixed,
     widget: &impl IsA<gtk::Widget>,
@@ -477,9 +595,8 @@ pub fn slide_in_fixed_then(
     let from_y = (to_y + offset_y) as f64;
     let target_y = to_y as f64;
     // GtkFixed::move_ queues a resize of the whole fixed every time it is called,
-    // even when the child stays on the same pixel. An 8px quint entrance spends
-    // most of its frames inside the last pixel, so those frames only change the
-    // opacity. The move is skipped unless the rounded y is new (Gemini R60 perf).
+    // even when the child stays on the same pixel. The move is skipped unless
+    // the rounded y is new (Gemini R60 perf).
     let last_y = std::rc::Rc::new(std::cell::Cell::new(i32::MIN));
 
     animate(
@@ -487,7 +604,7 @@ pub fn slide_in_fixed_then(
         duration_ms,
         move |t| {
             let Some(w) = widget_weak.upgrade() else { return };
-            let y = lerp(from_y, target_y, ease_out_quint(t)).round() as i32;
+            let y = lerp(from_y, target_y, ease_buoyant(t)).round() as i32;
             if y != last_y.get() {
                 if let Some(f) = fixed_weak.upgrade() {
                     if w.parent().as_ref() == Some(f.upcast_ref::<gtk::Widget>()) {
@@ -496,7 +613,7 @@ pub fn slide_in_fixed_then(
                     }
                 }
             }
-            w.set_opacity(ease_out_cubic(t));
+            w.set_opacity(ease_liquid(t).clamp(0.0, 1.0));
         },
         on_done,
     );
@@ -552,23 +669,21 @@ pub fn slide_out_fixed(
                     }
                 }
             }
-            w.set_opacity(lerp(start_opacity, 0.0, eased));
+            w.set_opacity(lerp(start_opacity, 0.0, eased).clamp(0.0, 1.0));
         },
         on_done,
     );
 }
 
-/// Animates a card or overlay popping into place by reducing `margin_top` from
-/// `to_top + offset_y` to `to_top` while fading opacity from `0.0` to `1.0`.
+/// Animates a card or overlay popping into place by settling `margin_top` from
+/// `to_top + offset_y` to `to_top` with subtle buoyancy while fading opacity
+/// from `0.0` to `1.0`.
 pub fn pop_card_in(widget: &impl IsA<gtk::Widget>, to_top: i32, offset_y: i32, duration_ms: u64) {
     let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
-    let from_top = (to_top + offset_y) as f64;
-    let target_top = to_top as f64;
+    let from_top = (to_top + offset_y).max(0) as f64;
+    let target_top = to_top.max(0) as f64;
     // Changing a margin makes the overlay lay itself out again, so the margin
-    // is set only on frames where the card reaches a new whole pixel. That is
-    // at most |offset_y| layout passes (8 with dur::TRAVEL) for the whole
-    // entrance. On every other frame only the opacity changes, which repaints
-    // without a layout.
+    // is set only on frames where the card reaches a new whole pixel.
     let last_top = Cell::new(i32::MIN);
 
     animate(
@@ -576,18 +691,18 @@ pub fn pop_card_in(widget: &impl IsA<gtk::Widget>, to_top: i32, offset_y: i32, d
         duration_ms,
         move |t| {
             if let Some(w) = weak.upgrade() {
-                let top = lerp(from_top, target_top, ease_out_quint(t)).round() as i32;
+                let top = lerp(from_top, target_top, ease_buoyant(t)).round().max(0.0) as i32;
                 if top != last_top.replace(top) {
                     w.set_margin_top(top);
                 }
-                w.set_opacity(ease_out_cubic(t));
+                w.set_opacity(ease_liquid(t).clamp(0.0, 1.0));
             }
         },
         || {},
     );
 }
 
-/// Animates a bottom toast floating into place by increasing `margin_bottom`
+/// Animates a bottom toast floating into place by settling `margin_bottom`
 /// from `(to_bottom - offset_y).max(0)` to `to_bottom` while fading opacity
 /// from `0.0` to `1.0`.
 pub fn float_toast_in(
@@ -598,10 +713,7 @@ pub fn float_toast_in(
 ) {
     let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
     let from_bottom = (to_bottom - offset_y).max(0) as f64;
-    let target_bottom = to_bottom as f64;
-    // Same rule as pop_card_in: the margin is set (and the layout runs) only
-    // when the toast reaches a new whole pixel. The frames in between change
-    // only the opacity.
+    let target_bottom = to_bottom.max(0) as f64;
     let last_bottom = Cell::new(i32::MIN);
 
     animate(
@@ -609,21 +721,51 @@ pub fn float_toast_in(
         duration_ms,
         move |t| {
             if let Some(w) = weak.upgrade() {
-                let eased = ease_out_cubic(t);
-                let bottom = lerp(from_bottom, target_bottom, eased).round() as i32;
+                let bottom = lerp(from_bottom, target_bottom, ease_buoyant(t)).round().max(0.0) as i32;
                 if bottom != last_bottom.replace(bottom) {
                     w.set_margin_bottom(bottom);
                 }
-                w.set_opacity(eased);
+                w.set_opacity(ease_liquid(t).clamp(0.0, 1.0));
             }
         },
         || {},
     );
 }
 
+/// Animates a bottom toast drifting down and fading out symmetrically, then
+/// runs `on_done`.
+pub fn float_toast_out_then(
+    widget: &impl IsA<gtk::Widget>,
+    offset_y: i32,
+    duration_ms: u64,
+    on_done: impl FnOnce() + 'static,
+) {
+    let start_opacity = widget.opacity();
+    let start_bottom = widget.margin_bottom().max(0);
+    let target_bottom = (start_bottom - offset_y).max(0) as f64;
+    let from_bottom = start_bottom as f64;
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    let last_bottom = Cell::new(start_bottom);
+
+    animate(
+        widget,
+        duration_ms,
+        move |t| {
+            if let Some(w) = weak.upgrade() {
+                let eased = ease_exit(t);
+                let bottom = lerp(from_bottom, target_bottom, eased).round().max(0.0) as i32;
+                if bottom != last_bottom.replace(bottom) {
+                    w.set_margin_bottom(bottom);
+                }
+                w.set_opacity(lerp(start_opacity, 0.0, eased).clamp(0.0, 1.0));
+            }
+        },
+        on_done,
+    );
+}
+
 /// Smoothly animates a `gtk::Paned` divider position from `from` to `to` using
-/// a quintic ease-out curve, then invokes `on_done`.
-#[allow(dead_code)]
+/// the shared liquid curve, then invokes `on_done`.
 pub fn slide_paned(
     paned: &gtk::Paned,
     from: i32,
@@ -634,16 +776,298 @@ pub fn slide_paned(
     let weak = paned.downgrade();
     let start = from as f64;
     let target = to as f64;
+    let last_pos = Cell::new(i32::MIN);
 
     animate(
         paned,
         duration_ms,
         move |t| {
             if let Some(p) = weak.upgrade() {
-                p.set_position(lerp(start, target, ease_out_quint(t)).round() as i32);
+                let pos = lerp(start, target, ease_liquid(t)).round() as i32;
+                if pos != last_pos.replace(pos) {
+                    p.set_position(pos);
+                }
             }
         },
         on_done,
+    );
+}
+
+/// Smoothly animates a Cairo-drawn scalar cell (such as a pill switch knob or
+/// space indicator dot) from its current value to `to` and queues a redraw on
+/// each frame.
+pub fn tween_cell(
+    widget: &impl IsA<gtk::Widget>,
+    cell: &std::rc::Rc<std::cell::Cell<f64>>,
+    to: f64,
+    duration_ms: u64,
+    buoyant: bool,
+) {
+    let from = cell.get();
+    if (from - to).abs() < 1e-4 {
+        cancel(widget);
+        cell.set(to);
+        widget.queue_draw();
+        return;
+    }
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    let cell = cell.clone();
+    animate(
+        widget,
+        duration_ms,
+        move |t| {
+            let factor = if buoyant { ease_buoyant(t) } else { ease_liquid(t) };
+            cell.set(lerp(from, to, factor));
+            if let Some(w) = weak.upgrade() {
+                w.queue_draw();
+            }
+        },
+        || {},
+    );
+}
+
+/// Smoothly scrolls a `gtk::Adjustment` to `target` using the shared liquid
+/// curve, driven by `widget`'s frame clock.
+pub fn scroll_to(
+    widget: &impl IsA<gtk::Widget>,
+    adjust: &gtk::Adjustment,
+    target: f64,
+    duration_ms: u64,
+) {
+    let lo = adjust.lower();
+    let hi = (adjust.upper() - adjust.page_size()).max(lo);
+    let dest = target.clamp(lo, hi);
+    let from = adjust.value();
+    if (from - dest).abs() < 1.0 {
+        cancel(widget);
+        adjust.set_value(dest);
+        return;
+    }
+    let adj_weak = adjust.downgrade();
+    animate(
+        widget,
+        duration_ms,
+        move |t| {
+            if let Some(adj) = adj_weak.upgrade() {
+                let lo = adj.lower();
+                let hi = (adj.upper() - adj.page_size()).max(lo);
+                adj.set_value(lerp(from, dest, ease_liquid(t)).clamp(lo, hi));
+            }
+        },
+        || {},
+    );
+}
+
+/// Reveals a `GtkPopover`'s inner content container with a brisk liquid fade
+/// and compact directional settle matching `position`.
+pub fn reveal_popover(
+    popover: &gtk::Popover,
+    content: &impl IsA<gtk::Widget>,
+    position: gtk::PositionType,
+) {
+    if !enabled() {
+        content.set_opacity(1.0);
+        content.set_margin_top(0);
+        content.set_margin_bottom(0);
+        return;
+    }
+    let content_weak = content.upcast_ref::<gtk::Widget>().downgrade();
+    let from_top = matches!(position, gtk::PositionType::Top);
+    let last_px = Cell::new(i32::MIN);
+    let start_offset = dur::TRAVEL_SM as f64;
+    let cancel_content = content.upcast_ref::<gtk::Widget>().downgrade();
+    popover.connect_closed(move |_| {
+        if let Some(w) = cancel_content.upgrade() {
+            cancel(&w);
+        }
+    });
+    animate(
+        content,
+        dur::ENTER,
+        move |t| {
+            if let Some(w) = content_weak.upgrade() {
+                let px = lerp(start_offset, 0.0, ease_buoyant(t)).round().max(0.0) as i32;
+                if px != last_px.replace(px) {
+                    if from_top {
+                        w.set_margin_bottom(px);
+                    } else {
+                        w.set_margin_top(px);
+                    }
+                }
+                w.set_opacity(ease_liquid(t).clamp(0.0, 1.0));
+            }
+        },
+        || {},
+    );
+}
+
+/// Reveals an inline container (such as start-page suggestions) smoothly.
+pub fn reveal_inline(widget: &impl IsA<gtk::Widget>, offset_y: i32, duration_ms: u64) {
+    cancel(widget);
+    widget.set_no_show_all(false);
+    widget.show_all();
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    let start = offset_y.max(0) as f64;
+    let last = Cell::new(i32::MIN);
+    animate(
+        widget,
+        duration_ms,
+        move |t| {
+            if let Some(w) = weak.upgrade() {
+                let top = lerp(start, 0.0, ease_buoyant(t)).round().max(0.0) as i32;
+                if top != last.replace(top) {
+                    w.set_margin_top(top);
+                }
+                w.set_opacity(ease_liquid(t).clamp(0.0, 1.0));
+            }
+        },
+        || {},
+    );
+}
+
+/// Hides an inline container smoothly, completing synchronously when reduced
+/// motion or `SEARCH_BENCH` is active.
+pub fn hide_inline(widget: &impl IsA<gtk::Widget>, duration_ms: u64) {
+    if !widget.is_visible() {
+        widget.set_no_show_all(true);
+        return;
+    }
+    cancel(widget);
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    fade_out_then(widget, duration_ms, move || {
+        if let Some(w) = weak.upgrade() {
+            w.set_no_show_all(true);
+            w.hide();
+            w.set_opacity(1.0);
+            w.set_margin_top(0);
+        }
+    });
+}
+
+/// Animates a newly mounted top tab chip or sidebar tab row gliding smoothly
+/// into place without altering its container hierarchy.
+pub fn reveal_tab(widget: &impl IsA<gtk::Widget>, vertical: bool) {
+    if !enabled() {
+        widget.set_opacity(1.0);
+        return;
+    }
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    let start = dur::TRAVEL_SM as f64;
+    let last = Cell::new(i32::MIN);
+    animate(
+        widget,
+        dur::ENTER,
+        move |t| {
+            if let Some(w) = weak.upgrade() {
+                let px = lerp(start, 0.0, ease_buoyant(t)).round().max(0.0) as i32;
+                if px != last.replace(px) {
+                    if vertical {
+                        w.set_margin_top(px);
+                    } else {
+                        w.set_margin_start(px);
+                    }
+                }
+                w.set_opacity(ease_liquid(t).clamp(0.0, 1.0));
+            }
+        },
+        || {},
+    );
+}
+
+/// Spawns a lightweight pass-through departure pill at `source`'s current
+/// bounding box inside `overlay` so tab close feels fluid while state and
+/// WebView teardown stay synchronous and leak-free.
+pub fn spawn_tab_close_ghost(
+    overlay: &gtk::Overlay,
+    source: &impl IsA<gtk::Widget>,
+    bg: crate::palette::Rgb,
+    border: crate::palette::Rgb,
+) {
+    if !enabled() || !source.is_visible() || !source.is_mapped() {
+        return;
+    }
+    let w = source.allocated_width();
+    let h = source.allocated_height();
+    if w < 12 || h < 12 {
+        return;
+    }
+    let Some((x, y)) = source.translate_coordinates(overlay, 0, 0) else {
+        return;
+    };
+    let ghost = gtk::DrawingArea::new();
+    ghost.set_widget_name("tab-close-ghost");
+    ghost.set_size_request(w, h);
+    ghost.set_halign(gtk::Align::Start);
+    ghost.set_valign(gtk::Align::Start);
+    ghost.set_margin_start(x.max(0));
+    ghost.set_margin_top(y.max(0));
+    ghost.set_can_focus(false);
+    let progress = std::rc::Rc::new(std::cell::Cell::new(0.0_f64));
+    let p_draw = progress.clone();
+    ghost.connect_draw(move |area, cr| {
+        let p = p_draw.get().clamp(0.0, 1.0);
+        let alpha = (1.0 - p) * 0.85;
+        if alpha <= 0.01 {
+            return crate::gtkx::inh(false);
+        }
+        let aw = f64::from(area.allocated_width().max(1));
+        let ah = f64::from(area.allocated_height().max(1));
+        let inset_x = p * 5.0;
+        let inset_y = p * 2.5;
+        let rw = (aw - inset_x * 2.0).max(4.0);
+        let rh = (ah - inset_y * 2.0).max(4.0);
+        let r = (rh * 0.5).min(rw * 0.5);
+        cr.new_sub_path();
+        cr.arc(inset_x + rw - r, inset_y + r, r, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+        cr.arc(inset_x + r, inset_y + r, r, std::f64::consts::FRAC_PI_2, 3.0 * std::f64::consts::FRAC_PI_2);
+        cr.close_path();
+        cr.set_source_rgba(
+            f64::from(bg.0) / 255.0,
+            f64::from(bg.1) / 255.0,
+            f64::from(bg.2) / 255.0,
+            alpha,
+        );
+        let _ = cr.fill_preserve();
+        cr.set_source_rgba(
+            f64::from(border.0) / 255.0,
+            f64::from(border.1) / 255.0,
+            f64::from(border.2) / 255.0,
+            alpha * 0.8,
+        );
+        cr.set_line_width(1.0);
+        let _ = cr.stroke();
+        crate::gtkx::inh(false)
+    });
+    overlay.add_overlay(&ghost);
+    overlay.set_overlay_pass_through(&ghost, true);
+    ghost.show();
+
+    let ghost_weak = ghost.downgrade();
+    let ghost_done = ghost.downgrade();
+    let overlay_done = overlay.downgrade();
+    let base_y = y.max(0) as f64;
+    let last_y = Cell::new(y.max(0));
+    animate(
+        &ghost,
+        dur::EXIT,
+        move |t| {
+            let eased = ease_exit(t);
+            progress.set(eased);
+            if let Some(g) = ghost_weak.upgrade() {
+                let ny = (base_y - eased * 4.0).round().max(0.0) as i32;
+                if ny != last_y.replace(ny) {
+                    g.set_margin_top(ny);
+                }
+                g.queue_draw();
+            }
+        },
+        move || {
+            if let (Some(ov), Some(g)) = (overlay_done.upgrade(), ghost_done.upgrade()) {
+                if g.parent().as_ref() == Some(ov.upcast_ref::<gtk::Widget>()) {
+                    ov.remove(&g);
+                }
+            }
+        },
     );
 }
 
@@ -735,6 +1159,48 @@ mod tests {
         assert!(dur::MICRO <= dur::EXIT);
         assert!(dur::ENTER < dur::LAYOUT);
         assert!(dur::TRAVEL > 0);
+        assert!(dur::TRAVEL_SM > 0 && dur::TRAVEL_SM < dur::TRAVEL);
+    }
+
+    #[test]
+    fn ease_liquid_is_monotonic_and_fast_out() {
+        assert!(approx_eq(ease_liquid(-0.5), 0.0));
+        assert!(approx_eq(ease_liquid(0.0), 0.0));
+        assert!(approx_eq(ease_liquid(1.0), 1.0));
+        assert!(approx_eq(ease_liquid(1.5), 1.0));
+        assert!(ease_liquid(0.25) > 0.5, "liquid curve should lift briskly");
+
+        let mut prev = ease_liquid(0.0);
+        for i in 1..=40 {
+            let cur = ease_liquid(i as f64 / 40.0);
+            assert!(cur >= prev - 1e-9, "ease_liquid regressed at step {i}: {cur} < {prev}");
+            assert!((0.0..=1.0).contains(&cur));
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn ease_buoyant_has_subtle_restrained_settle_without_excess_bounce() {
+        assert!(approx_eq(ease_buoyant(-0.2), 0.0));
+        assert!(approx_eq(ease_buoyant(0.0), 0.0));
+        assert!(approx_eq(ease_buoyant(1.0), 1.0));
+        assert!(approx_eq(ease_buoyant(1.5), 1.0));
+        let mut peak = 0.0_f64;
+        for i in 1..40 {
+            let v = ease_buoyant(i as f64 / 40.0);
+            peak = peak.max(v);
+        }
+        assert!(
+            (1.01..=1.08).contains(&peak),
+            "buoyant settle peak should stay subtle (1.01..=1.08), got {peak:.4}"
+        );
+    }
+
+    #[test]
+    fn css_curve_tokens_are_valid_gtk_cubic_bezier() {
+        for token in [curve::CSS_LIQUID, curve::CSS_DISMISS] {
+            assert!(token.starts_with("cubic-bezier(") && token.ends_with(')'));
+        }
     }
 
     // Lifecycle tests for the token registry that animate() and cancel()
@@ -853,8 +1319,8 @@ mod tests {
             elapsed = next;
             ticks += 1;
         }
-        // 180ms / 16.667ms = 10.8 -> 11 ticks at 60Hz.
-        assert_eq!(ticks, 11);
+        // 200ms / 16.667ms = 12.0 -> 12 ticks at 60Hz.
+        assert_eq!(ticks, 12);
     }
 
     #[test]

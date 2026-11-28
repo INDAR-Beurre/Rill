@@ -1000,9 +1000,22 @@ pub fn show(app: &AppRef) {
         let next_btn = next_btn.downgrade();
         let finish_btn = finish_btn.downgrade();
         let configure_btn = configure_btn.downgrade();
+        let prev_step = Cell::new(0usize);
         Rc::new(move |step: usize| {
+            let prev = prev_step.replace(step);
             let child_name = step_child_name(step);
             if let Some(s) = stack.upgrade() {
+                if crate::motion::enabled() && prev != step {
+                    s.set_transition_duration(crate::motion::dur::LAYOUT as u32);
+                    s.set_transition_type(if step > prev {
+                        gtk::StackTransitionType::SlideLeft
+                    } else {
+                        gtk::StackTransitionType::SlideRight
+                    });
+                } else {
+                    s.set_transition_duration(0);
+                    s.set_transition_type(gtk::StackTransitionType::None);
+                }
                 s.set_visible_child_name(child_name);
             }
             if let Some(sc) = scroll.upgrade() {
@@ -1012,9 +1025,15 @@ pub fn show(app: &AppRef) {
             let is_last = step + 1 >= STEP_COUNT;
             if let Some(f) = footer_wrap.upgrade() {
                 if is_intro {
+                    crate::motion::cancel(&f);
+                    f.set_opacity(1.0);
                     f.hide();
                 } else {
+                    let was_hidden = !f.is_visible();
                     f.show();
+                    if was_hidden {
+                        crate::motion::fade_in(&f, crate::motion::dur::ENTER);
+                    }
                     if let Some(n) = next_btn.upgrade() {
                         n.set_visible(!is_last);
                     }
@@ -1522,9 +1541,11 @@ fn welcome_pill_switch(value: bool, initial_dark: bool) -> gtk::ToggleButton {
     let canvas = welcome_drawing_area();
     canvas.set_size_request(44, 24);
     canvas.connect_style_updated(|w| w.queue_draw());
-    let btn_weak = button.downgrade();
+    let knob_t = Rc::new(Cell::new(if value { 1.0_f64 } else { 0.0_f64 }));
+    let knob_draw = knob_t.clone();
     canvas.connect_draw(move |widget, cr| {
-        let active = btn_weak.upgrade().is_some_and(|b| b.is_active());
+        let pos = knob_draw.get();
+        let blend = pos.clamp(0.0, 1.0);
         let dark = crate::startpage::widget_is_dark(widget, initial_dark);
         let w = f64::from(widget.allocated_width()).max(44.0);
         let h = f64::from(widget.allocated_height()).max(24.0);
@@ -1549,45 +1570,46 @@ fn welcome_pill_switch(value: bool, initial_dark: bool) -> gtk::ToggleButton {
             3.0 * std::f64::consts::FRAC_PI_2,
         );
         cr.close_path();
-        if active {
-            if dark {
-                cr.set_source_rgb(246.0 / 255.0, 146.0 / 255.0, 104.0 / 255.0);
-            } else {
-                cr.set_source_rgb(183.0 / 255.0, 69.0 / 255.0, 37.0 / 255.0);
-            }
-            let _ = cr.fill();
+        let (off_rgb, on_rgb) = if dark {
+            ((110.0 / 255.0, 105.0 / 255.0, 98.0 / 255.0), (246.0 / 255.0, 146.0 / 255.0, 104.0 / 255.0))
         } else {
-            if dark {
-                cr.set_source_rgb(110.0 / 255.0, 105.0 / 255.0, 98.0 / 255.0);
-            } else {
-                cr.set_source_rgb(129.0 / 255.0, 129.0 / 255.0, 119.0 / 255.0);
-            }
-            let _ = cr.fill();
-        }
+            ((129.0 / 255.0, 129.0 / 255.0, 119.0 / 255.0), (183.0 / 255.0, 69.0 / 255.0, 37.0 / 255.0))
+        };
+        cr.set_source_rgb(
+            crate::motion::lerp(off_rgb.0, on_rgb.0, blend),
+            crate::motion::lerp(off_rgb.1, on_rgb.1, blend),
+            crate::motion::lerp(off_rgb.2, on_rgb.2, blend),
+        );
+        let _ = cr.fill();
 
-        // Circular knob.
-        let knob_x = if active { x0 + 32.0 } else { x0 + 12.0 };
+        // Circular knob with subtle liquid buoyant travel.
+        let knob_x = crate::motion::lerp(x0 + 12.0, x0 + 32.0, pos).clamp(x0 + 10.5, x0 + 33.5);
         let knob_y = y0 + 12.0;
         cr.arc(knob_x, knob_y + 0.8, 8.5, 0.0, 2.0 * std::f64::consts::PI);
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.16);
         let _ = cr.fill();
 
         cr.arc(knob_x, knob_y, 8.5, 0.0, 2.0 * std::f64::consts::PI);
-        if active && dark {
-            cr.set_source_rgb(38.0 / 255.0, 29.0 / 255.0, 22.0 / 255.0);
-        } else if dark {
-            cr.set_source_rgb(239.0 / 255.0, 236.0 / 255.0, 230.0 / 255.0);
+        let (knob_off, knob_on) = if dark {
+            ((239.0 / 255.0, 236.0 / 255.0, 230.0 / 255.0), (38.0 / 255.0, 29.0 / 255.0, 22.0 / 255.0))
         } else {
-            cr.set_source_rgb(1.0, 1.0, 1.0);
-        }
+            ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0))
+        };
+        cr.set_source_rgb(
+            crate::motion::lerp(knob_off.0, knob_on.0, blend),
+            crate::motion::lerp(knob_off.1, knob_on.1, blend),
+            crate::motion::lerp(knob_off.2, knob_on.2, blend),
+        );
         let _ = cr.fill();
         crate::gtkx::inh(false)
     });
 
     let canvas_weak = canvas.downgrade();
-    button.connect_toggled(move |_| {
+    let knob_for_toggle = knob_t;
+    button.connect_toggled(move |sw| {
         if let Some(c) = canvas_weak.upgrade() {
-            c.queue_draw();
+            let target = if sw.is_active() { 1.0 } else { 0.0 };
+            crate::motion::tween_cell(&c, &knob_for_toggle, target, crate::motion::dur::MICRO, true);
         }
     });
 

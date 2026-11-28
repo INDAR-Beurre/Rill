@@ -808,11 +808,30 @@ pub fn build(window: gtk::Window, palette: Palette, prefs: &crate::store::Prefs)
         if w <= 0.0 || h <= 0.0 {
             return crate::gtkx::inh(false);
         }
-        let fill_w = (w * frac).max(2.0).min(w);
+        let fill_w = (w * frac).max(h).min(w);
+        let r = h * 0.5;
         let rgba = widget.style_context().color(gtk::StateFlags::NORMAL);
         cr.set_source_rgba(rgba.red(), rgba.green(), rgba.blue(), rgba.alpha());
-        cr.rectangle(0.0, 0.0, fill_w, h);
+        // Rounded pill progress bar with a smooth liquid leading cap.
+        cr.new_sub_path();
+        cr.move_to(0.0, 0.0);
+        cr.line_to((fill_w - r).max(0.0), 0.0);
+        cr.arc(
+            (fill_w - r).max(r),
+            r,
+            r,
+            -std::f64::consts::FRAC_PI_2,
+            std::f64::consts::FRAC_PI_2,
+        );
+        cr.line_to(0.0, h);
+        cr.close_path();
         let _ = cr.fill();
+        // Subtle crisp leading droplet highlight while actively loading (< 98%).
+        if frac < 0.98 && fill_w > h * 2.0 {
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.28);
+            cr.arc((fill_w - r).max(r), r, r * 0.65, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
         crate::gtkx::inh(false)
     });
     page_overlay.add_overlay(&progress);
@@ -1122,13 +1141,16 @@ pub fn loading_mark(icon: &gtk::Box, colour: crate::palette::Rgb) {
     area.set_size_request(14, 14);
     area.set_valign(gtk::Align::Center);
     let angle = std::rc::Rc::new(std::cell::Cell::new(0.0_f64));
+    let sweep = std::rc::Rc::new(std::cell::Cell::new(std::f64::consts::TAU * 0.68));
     let for_draw = angle.clone();
+    let sweep_draw = sweep.clone();
     area.connect_draw(move |widget, cr| {
         let a = for_draw.get();
+        let s = sweep_draw.get();
         icons::set_source_color(widget, cr, colour);
-        cr.set_line_width(1.6);
+        cr.set_line_width(1.7);
         cr.set_line_cap(cairo::LineCap::Round);
-        cr.arc(7.0, 7.0, 5.0, a, a + std::f64::consts::TAU * 0.7);
+        cr.arc(7.0, 7.0, 5.0, a, a + s);
         let _ = cr.stroke();
         crate::gtkx::inh(false)
     });
@@ -1141,17 +1163,13 @@ pub fn loading_mark(icon: &gtk::Box, colour: crate::palette::Rgb) {
         return;
     }
     // Driven by the frame clock, not a timer: GTK only ticks mapped widgets,
-    // so a spinner in a hidden or folded row costs no wakeups at all. The
-    // angle comes from elapsed time, so it keeps the old speed (one turn in
-    // about 1.44s) whatever the refresh rate.
+    // so a spinner in a hidden or folded row costs no wakeups at all. The arc
+    // breathes smoothly between 28% and 74% circumference while rotating, so
+    // active page loads read as fluid rather than a mechanical constant ring.
     let start = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
     let _ = area.add_tick_callback(move |area, clock| {
-        // Reduced motion can be switched on while the spinner is already
-        // running (gtk-enable-animations changes at run time). The arc then
-        // stops where it is, gets one last draw, and its tick callback is
-        // removed, so it asks for no more frames. This is the same still arc
-        // a spinner built with animations off would show.
         if !crate::motion::enabled() {
+            sweep.set(std::f64::consts::TAU * 0.68);
             area.queue_draw();
             return gtk::glib::ControlFlow::Break;
         }
@@ -1163,8 +1181,11 @@ pub fn loading_mark(icon: &gtk::Box, colour: crate::palette::Rgb) {
                 now
             }
         };
-        let turns = (now - t0).max(0) as f64 / 1_440_000.0;
-        angle.set(turns.fract() * std::f64::consts::TAU);
+        let elapsed_s = (now - t0).max(0) as f64 / 1_000_000.0;
+        let rot = (elapsed_s / 1.25).fract() * std::f64::consts::TAU;
+        let breath = 0.5 - 0.5 * (elapsed_s * std::f64::consts::TAU / 1.65).cos();
+        angle.set(rot + breath * 0.45);
+        sweep.set(std::f64::consts::TAU * (0.28 + 0.46 * breath));
         area.queue_draw();
         gtk::glib::ControlFlow::Continue
     });

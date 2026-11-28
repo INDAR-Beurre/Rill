@@ -778,13 +778,14 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                 // fullscreen and reader mode. A page that crashed while
                 // fullscreen never sends leave-fullscreen, and a peek card
                 // opened from it has nothing left to show.
+                let view_uri = view.uri().map(|u| u.to_string());
+                let tab_url = app.state.borrow().tab(tab).map(|t| t.url.clone()).unwrap_or_default();
+                let uri = resolve_crash_uri(view_uri.as_deref(), &tab_url);
                 app.retire_page_layers(tab);
                 app.set_loading(tab, false);
                 app.set_load_progress(tab, 1.0);
                 let sentence = reason_for_termination(reason);
-                let uri = app.state.borrow().tab(tab).map(|t| t.url.clone()).unwrap_or_default();
-                app.mark_failed(tab);
-                app.show_error(tab, &sentence, &uri);
+                app.show_process_terminated(tab, &sentence, &uri);
             }
         });
     }
@@ -1374,8 +1375,20 @@ fn allow_file_navigation(
     current_view_uri.is_some_and(|u| u.trim().to_ascii_lowercase().starts_with("file://"))
 }
 
+/// Pick the most accurate URL to display and retry after a web-process crash:
+/// prefer the WebView's last URI when non-empty and not `about:blank`, falling
+/// back to the tab's recorded URL.
+pub(crate) fn resolve_crash_uri(view_uri: Option<&str>, tab_url: &str) -> String {
+    if let Some(uri) = view_uri.map(str::trim) {
+        if !uri.is_empty() && !uri.eq_ignore_ascii_case("about:blank") {
+            return uri.to_string();
+        }
+    }
+    tab_url.trim().to_string()
+}
+
 /// What the engine says when it stops a page's process, in the browser's words.
-fn reason_for_termination(reason: webkit2gtk::WebProcessTerminationReason) -> String {
+pub(crate) fn reason_for_termination(reason: webkit2gtk::WebProcessTerminationReason) -> String {
     use webkit2gtk::WebProcessTerminationReason as Reason;
     match reason {
         // A crash is not a hang: WebKit's page process died (for example an
@@ -1532,6 +1545,26 @@ mod tests {
             reason_for_termination(webkit2gtk::WebProcessTerminationReason::ExceededMemoryLimit);
         assert_ne!(crashed, memory);
         assert!(memory.contains("memory"));
+    }
+
+    #[test]
+    fn resolve_crash_uri_prefers_live_view_uri_over_blank_or_stale_tab_url() {
+        assert_eq!(
+            super::resolve_crash_uri(Some("https://www.youtube.com/watch?v=1"), "https://www.youtube.com/"),
+            "https://www.youtube.com/watch?v=1"
+        );
+        assert_eq!(
+            super::resolve_crash_uri(Some("about:blank"), "https://www.youtube.com/"),
+            "https://www.youtube.com/"
+        );
+        assert_eq!(
+            super::resolve_crash_uri(Some("   "), "https://github.com/"),
+            "https://github.com/"
+        );
+        assert_eq!(
+            super::resolve_crash_uri(None, "https://example.com/"),
+            "https://example.com/"
+        );
     }
 
     /// Every certificate problem gets its own reason, and every reason says the

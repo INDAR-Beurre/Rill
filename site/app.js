@@ -7,209 +7,26 @@ import {
   readReleaseCache,
 } from './release-core.mjs';
 
-const BAYER_8X8 = [
-  [0, 48, 12, 60, 3, 51, 15, 63],
-  [32, 16, 44, 28, 35, 19, 47, 31],
-  [8, 56, 4, 52, 11, 59, 7, 55],
-  [40, 24, 36, 20, 43, 27, 39, 23],
-  [2, 50, 14, 62, 1, 49, 13, 61],
-  [34, 18, 46, 30, 33, 17, 45, 29],
-  [10, 58, 6, 54, 9, 57, 5, 53],
-  [42, 26, 38, 22, 41, 25, 37, 21],
-];
-
-// Every Showcase view uses a genuine matched Light + Dark GTK 3 capture of the exact same screen,
-// distinct from the Hero's Vertical Sidebar & Spaces capture.
-const SHOWCASE_VIEWS = {
-  'top-tabs': {
-    title: 'Top tabs and browser menu on a real page',
-    desc: 'Switch between the vertical sidebar and a compact horizontal tab bar anytime from Settings or setup without changing your open Spaces.',
-    lightSrc: 'assets/menu-page.png',
-    darkSrc: 'assets/top-tabs-dark.png',
-    lightCaption: 'Top tabs and browser menu on Wikipedia in Warm paper.',
-    darkCaption: 'Top tabs and start page in Warm charcoal.',
-    alt: 'Rill browser showing horizontal top tabs, open page menu, and controls',
-  },
-  shortcuts: {
-    title: 'Opt-in search suggestions and starter shortcuts',
-    desc: 'Step 3 of setup puts search suggestions and optional starter sites under explicit toggles before your first session begins.',
-    lightSrc: 'assets/setup-shortcuts-light.png',
-    darkSrc: 'assets/setup-shortcuts-dark.png',
-    lightCaption: 'Setup Step 3, Privacy & shortcuts, in Warm paper.',
-    darkCaption: 'Setup Step 3, Privacy & shortcuts, in Warm charcoal.',
-    alt: 'Rill setup step showing search suggestions toggle and starter site options',
-  },
-  welcome: {
-    title: 'Onboarding inside a real tab',
-    desc: 'Configure your look, tab layout, and search engine right in the browser tab or skip straight in with one click and no modal.',
-    lightSrc: 'assets/introduction-light.png',
-    darkSrc: 'assets/introduction-dark.png',
-    lightCaption: 'Welcome tab in Warm paper.',
-    darkCaption: 'Welcome tab in Warm charcoal.',
-    alt: 'Rill welcome tab with Configure and Use defaults buttons',
-  },
-};
-
-function currentTheme() {
-  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-}
-
-function smoothstep(edge0, edge1, x) {
-  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
-  return t * t * (3 - 2 * t);
-}
-
-// Flowing Bayer ordered-dither river contour behind the hero window, echoing Rill's welcome wave
-// while keeping the headline, summary, release link, and header cleanly on solid ground.
-function renderRiverCanvas() {
-  const canvas = document.getElementById('rill-river-canvas');
-  if (!canvas) {
-    return;
-  }
-  const rect = canvas.getBoundingClientRect();
-  const width = Math.max(1, Math.round(rect.width));
-  const height = Math.max(1, Math.round(rect.height));
-  if (width < 640) {
-    return;
-  }
-
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const pixelWidth = Math.round(width * dpr);
-  const pixelHeight = Math.round(height * dpr);
-  const cell = 3;
-  const cols = Math.ceil(width / cell);
-  const rows = Math.ceil(height / cell);
-
-  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-    canvas.width = pixelWidth;
-    canvas.height = pixelHeight;
-  }
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    return;
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-
-  const dark = currentTheme() === 'dark';
-  const bankColor = dark ? 'rgba(66, 58, 50, 0.85)' : 'rgba(212, 208, 198, 0.88)';
-  const coreColor = dark ? 'rgba(176, 102, 72, 0.76)' : 'rgba(204, 120, 88, 0.68)';
-  const startY = 0.14;
-  const endY = 0.97;
-
-  for (let row = 0; row < rows; row += 1) {
-    const ny = row / Math.max(1, rows - 1);
-    if (ny <= startY || ny >= endY) {
-      continue;
-    }
-    const topFade = smoothstep(startY, 0.25, ny);
-    const bottomFade = 1 - smoothstep(0.80, endY, ny);
-    const spineX = 0.85
-      - 0.69 * smoothstep(0.18, 0.92, ny)
-      + 0.075 * Math.sin((ny - 0.18) * Math.PI * 2.1);
-    const riverHalfWidth = 0.21 + 0.04 * Math.sin(ny * Math.PI);
-    const by = row & 7;
-
-    for (let col = 0; col < cols; col += 1) {
-      const nx = col / Math.max(1, cols - 1);
-      const dist = Math.abs(nx - spineX);
-      if (dist > riverHalfWidth * 1.45) {
-        continue;
-      }
-      const normDist = dist / riverHalfWidth;
-      const channelProfile = Math.exp(-normDist * normDist * 1.65);
-      const contourBand = 0.84 + 0.16 * Math.cos(normDist * Math.PI * 3.5);
-      const centerTextMask = (1 - smoothstep(0.18, 0.34, ny)) * (1 - smoothstep(0.24, 0.36, Math.abs(nx - 0.5)));
-      const edgeFade = smoothstep(0.0, 0.04, nx) * (1 - smoothstep(0.96, 1.0, nx));
-      const density = channelProfile * contourBand * topFade * bottomFade * edgeFade * (1 - centerTextMask) * 0.42;
-      const threshold = (BAYER_8X8[by][col & 7] + 0.5) / 64;
-      if (density > threshold) {
-        const accentRatio = Math.max(0, Math.min(1, 1 - normDist * 1.05));
-        const accentThreshold = (BAYER_8X8[(by + 3) & 7][(col + 5) & 7] + 0.5) / 64;
-        ctx.fillStyle = accentRatio > accentThreshold ? coreColor : bankColor;
-        ctx.fillRect(col * cell, row * cell, 2, 2);
-      }
-    }
-  }
-}
-
-let activeViewKey = 'welcome';
-
-function updateThemeUI() {
-  const dark = currentTheme() === 'dark';
-  const meta = document.getElementById('theme-color-scheme');
-  if (meta) {
-    meta.setAttribute('content', dark ? 'dark' : 'light');
-  }
-  const toggleBtn = document.getElementById('theme-toggle');
-  if (toggleBtn) {
-    toggleBtn.setAttribute('aria-pressed', dark ? 'true' : 'false');
-    toggleBtn.setAttribute(
-      'aria-label',
-      dark ? 'Switch to Warm paper light theme' : 'Switch to Warm charcoal dark theme',
-    );
-    for (const opt of toggleBtn.querySelectorAll('.theme-option')) {
-      const isMatch = opt.dataset.themeOpt === (dark ? 'dark' : 'light');
-      opt.setAttribute('data-active', isMatch ? 'true' : 'false');
-    }
-  }
-
+function syncHeroShotLink(dark) {
   const heroImg = document.getElementById('hero-screenshot');
-  const heroCaption = document.getElementById('hero-caption');
-  if (heroImg) {
-    const src = dark ? heroImg.dataset.dark : heroImg.dataset.light;
-    if (src) {
-      heroImg.src = src;
-    }
+  const heroShotLink = document.getElementById('hero-shot-link');
+  if (!heroImg || !heroShotLink) {
+    return;
   }
-  if (heroCaption) {
-    heroCaption.textContent = dark
-      ? 'Vertical tabs and Spaces in Warm charcoal.'
-      : 'Spaces and vertical tabs in Warm paper.';
+  const href = dark ? heroImg.dataset.dark : heroImg.dataset.light;
+  if (href) {
+    heroShotLink.href = href;
   }
-
-  renderShowcaseView(activeViewKey);
-  renderRiverCanvas();
 }
 
-function renderShowcaseView(viewKey) {
-  const view = SHOWCASE_VIEWS[viewKey] || SHOWCASE_VIEWS.welcome;
-  activeViewKey = SHOWCASE_VIEWS[viewKey] ? viewKey : 'welcome';
-  const dark = currentTheme() === 'dark';
-
-  let activeTabId = 'tab-welcome';
-  for (const btn of document.querySelectorAll('.view-tab')) {
-    const selected = btn.dataset.view === activeViewKey;
-    btn.setAttribute('aria-selected', selected ? 'true' : 'false');
-    btn.setAttribute('tabindex', selected ? '0' : '-1');
-    if (selected && btn.id) {
-      activeTabId = btn.id;
-    }
+function initColorSchemeSync() {
+  if (!window.matchMedia) {
+    return;
   }
-
-  const panel = document.getElementById('showcase-tabpanel');
-  if (panel) {
-    panel.setAttribute('aria-labelledby', activeTabId);
-  }
-
-  const img = document.getElementById('showcase-image');
-  const title = document.getElementById('showcase-view-title');
-  const desc = document.getElementById('showcase-view-desc');
-  const caption = document.getElementById('showcase-caption');
-
-  if (img) {
-    img.src = dark ? view.darkSrc : view.lightSrc;
-    img.alt = view.alt;
-  }
-  if (title) {
-    title.textContent = view.title;
-  }
-  if (desc) {
-    desc.textContent = view.desc;
-  }
-  if (caption) {
-    caption.textContent = dark ? view.darkCaption : view.lightCaption;
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  syncHeroShotLink(mq.matches);
+  if (typeof mq.addEventListener === 'function') {
+    mq.addEventListener('change', (ev) => syncHeroShotLink(ev.matches));
   }
 }
 
@@ -240,6 +57,10 @@ function formatShortTime(epochMs) {
 }
 
 function initDownloadWorkbench() {
+  if (!document.getElementById('download-workbench')) {
+    return;
+  }
+
   const heroSummaryEl = document.getElementById('hero-release-summary');
   const titleEl = document.getElementById('release-title');
   const metaEl = document.getElementById('release-meta');
@@ -274,6 +95,7 @@ function initDownloadWorkbench() {
   let currentRelease = null;
   let currentCommandText = '';
   let releaseRequestSeq = 0;
+  let copyResetTimer = null;
 
   function setHeroNeutralLink() {
     if (!heroSummaryEl) {
@@ -281,7 +103,7 @@ function initDownloadWorkbench() {
     }
     heroSummaryEl.textContent = '';
     const link = document.createElement('a');
-    link.className = 'link-quiet';
+    link.className = 'text-link';
     link.href = RELEASES_FALLBACK_URL;
     link.rel = 'noopener noreferrer';
     link.textContent = 'View latest stable release on GitHub';
@@ -397,7 +219,7 @@ function initDownloadWorkbench() {
       const glibcNote = release.version.startsWith('1.1.') && pkg.format === '.AppImage'
         ? ', glibc 2.44+'
         : '';
-      heroSummaryEl.textContent = `Latest stable: ${release.title}, ${pkg.arch} ${pkg.format} (${pkg.sizeLabel}${glibcNote})`;
+      heroSummaryEl.textContent = `Latest: ${release.title}, ${pkg.arch} ${pkg.format} (${pkg.sizeLabel}${glibcNote})`;
     }
 
     downloadLink.href = pkg.url;
@@ -462,7 +284,7 @@ function initDownloadWorkbench() {
           : '';
         setNotice(`${result.errorDetail}${resetNote}`);
       } else if (result.fromCache && result.fetchedAt) {
-        setNotice(`Loaded cached release metadata from ${formatShortTime(result.fetchedAt)}. Use Refresh release to check GitHub now.`);
+        setNotice(`Loaded cached release metadata from ${formatShortTime(result.fetchedAt)}. Use Refresh to check GitHub now.`);
       } else {
         setNotice('');
       }
@@ -578,8 +400,12 @@ function initDownloadWorkbench() {
       await navigator.clipboard.writeText(currentCommandText);
       copyBtn.textContent = 'Copied';
       copyStatus.textContent = 'Commands copied to clipboard.';
-      setTimeout(() => {
+      if (copyResetTimer !== null) {
+        clearTimeout(copyResetTimer);
+      }
+      copyResetTimer = setTimeout(() => {
         copyBtn.textContent = 'Copy commands';
+        copyResetTimer = null;
       }, 1800);
     } catch {
       copyStatus.textContent = 'Clipboard copy unavailable; select the command text manually.';
@@ -589,61 +415,15 @@ function initDownloadWorkbench() {
   loadRelease();
 }
 
-function initGallery() {
-  const filterLinks = [...document.querySelectorAll('.gallery-filter')];
-  const groups = [...document.querySelectorAll('.gallery-group')];
-  const statusEl = document.getElementById('gallery-status');
-  const shotLinks = [...document.querySelectorAll('[data-gallery-shot]')];
-
-  function applyFilter(filterKey) {
-    let firstVisibleAssigned = false;
-    let visibleShots = 0;
-    let matchedGroupLabel = 'all categories';
-
-    for (const group of groups) {
-      const show = filterKey === 'all' || group.dataset.group === filterKey;
-      group.hidden = !show;
-      group.classList.remove('is-first-visible');
-      if (show) {
-        if (!firstVisibleAssigned) {
-          group.classList.add('is-first-visible');
-          firstVisibleAssigned = true;
-        }
-        visibleShots += group.querySelectorAll('[data-gallery-shot]').length;
-        if (filterKey !== 'all' && group.dataset.groupLabel) {
-          matchedGroupLabel = group.dataset.groupLabel;
-        }
-      }
-    }
-
-    for (const link of filterLinks) {
-      const isMatch = link.dataset.filter === filterKey;
-      if (isMatch) {
-        link.setAttribute('aria-current', 'true');
-      } else {
-        link.removeAttribute('aria-current');
-      }
-    }
-
-    if (statusEl) {
-      statusEl.textContent = filterKey === 'all'
-        ? `Showing all ${visibleShots} screenshots.`
-        : `Showing ${visibleShots} screenshots in ${matchedGroupLabel}.`;
-    }
-  }
-
-  for (const link of filterLinks) {
-    link.addEventListener('click', (ev) => {
-      if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button !== 0) {
-        return;
-      }
-      ev.preventDefault();
-      applyFilter(link.dataset.filter || 'all');
-    });
-  }
-
-  const dialog = document.getElementById('gallery-lightbox');
+function initScreenshotLightbox() {
+  const dialog = document.getElementById('screenshot-lightbox');
   const stage = document.getElementById('lightbox-stage');
+  const shotLinks = [...document.querySelectorAll('[data-shot-link]')];
+
+  if (!dialog || typeof dialog.showModal !== 'function' || !stage || shotLinks.length === 0) {
+    return;
+  }
+
   const groupEl = document.getElementById('lightbox-group');
   const counterEl = document.getElementById('lightbox-counter');
   const rawLink = document.getElementById('lightbox-raw-link');
@@ -653,33 +433,18 @@ function initGallery() {
   const prevBtn = document.getElementById('lightbox-prev');
   const nextBtn = document.getElementById('lightbox-next');
 
-  if (!dialog || typeof dialog.showModal !== 'function' || !stage) {
-    return;
-  }
-
-  let activeShots = [];
   let activeIndex = 0;
   let lastTrigger = null;
 
-  function getVisibleShots() {
-    return shotLinks.filter((link) => {
-      const group = link.closest('.gallery-group');
-      return !group || !group.hidden;
-    });
-  }
-
-  function renderLightboxAt(index) {
-    if (activeShots.length === 0) {
-      return;
-    }
-    const len = activeShots.length;
+  function renderAt(index) {
+    const len = shotLinks.length;
     activeIndex = ((index % len) + len) % len;
-    const link = activeShots[activeIndex];
+    const link = shotLinks[activeIndex];
     const thumb = link.querySelector('img');
-    const figure = link.closest('.gallery-figure');
-    const group = link.closest('.gallery-group');
-    const titleNode = figure ? figure.querySelector('.gallery-caption-title') : null;
-    const descNode = figure ? figure.querySelector('.gallery-caption-desc') : null;
+    const figure = link.closest('.shot-card');
+    const section = link.closest('[data-shot-group]');
+    const titleNode = figure ? figure.querySelector('.shot-title') : null;
+    const descNode = figure ? figure.querySelector('.shot-desc') : null;
     const href = link.getAttribute('href') || '';
 
     stage.textContent = '';
@@ -694,7 +459,7 @@ function initGallery() {
     stage.appendChild(fullImg);
 
     if (groupEl) {
-      groupEl.textContent = group?.dataset.groupLabel || 'Rill screenshot';
+      groupEl.textContent = section?.dataset.shotGroup || 'Rill screenshot';
     }
     if (counterEl) {
       counterEl.textContent = `${activeIndex + 1} / ${len}`;
@@ -716,45 +481,29 @@ function initGallery() {
     }
   }
 
-  function openLightbox(triggerLink) {
-    activeShots = getVisibleShots();
-    const idx = activeShots.indexOf(triggerLink);
-    if (idx === -1) {
-      return;
-    }
-    lastTrigger = triggerLink;
-    renderLightboxAt(idx);
-    if (!dialog.open) {
-      dialog.showModal();
-    }
-  }
-
-  for (const link of shotLinks) {
+  for (let i = 0; i < shotLinks.length; i += 1) {
+    const link = shotLinks[i];
     link.addEventListener('click', (ev) => {
       if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button !== 0) {
         return;
       }
       ev.preventDefault();
-      openLightbox(link);
+      lastTrigger = link;
+      renderAt(i);
+      if (!dialog.open) {
+        dialog.showModal();
+      }
     });
   }
 
   if (closeBtn) {
-    closeBtn.addEventListener('click', () => {
-      dialog.close();
-    });
+    closeBtn.addEventListener('click', () => dialog.close());
   }
-
   if (prevBtn) {
-    prevBtn.addEventListener('click', () => {
-      renderLightboxAt(activeIndex - 1);
-    });
+    prevBtn.addEventListener('click', () => renderAt(activeIndex - 1));
   }
-
   if (nextBtn) {
-    nextBtn.addEventListener('click', () => {
-      renderLightboxAt(activeIndex + 1);
-    });
+    nextBtn.addEventListener('click', () => renderAt(activeIndex + 1));
   }
 
   dialog.addEventListener('click', (ev) => {
@@ -766,10 +515,10 @@ function initGallery() {
   dialog.addEventListener('keydown', (ev) => {
     if (ev.key === 'ArrowLeft') {
       ev.preventDefault();
-      renderLightboxAt(activeIndex - 1);
+      renderAt(activeIndex - 1);
     } else if (ev.key === 'ArrowRight') {
       ev.preventDefault();
-      renderLightboxAt(activeIndex + 1);
+      renderAt(activeIndex + 1);
     }
   });
 
@@ -783,53 +532,9 @@ function initGallery() {
 }
 
 function init() {
-  const toggleBtn = document.getElementById('theme-toggle');
-  if (toggleBtn) {
-    toggleBtn.addEventListener('click', () => {
-      const next = currentTheme() === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', next);
-      try {
-        localStorage.setItem('rill.site.theme', next);
-      } catch {
-        // Ignore private browsing storage error.
-      }
-      updateThemeUI();
-    });
-  }
-
-  const tabButtons = [...document.querySelectorAll('.view-tab')];
-  tabButtons.forEach((btn, idx) => {
-    btn.addEventListener('click', () => {
-      renderShowcaseView(btn.dataset.view);
-    });
-    btn.addEventListener('keydown', (ev) => {
-      let nextIdx = null;
-      if (ev.key === 'ArrowRight') {
-        nextIdx = (idx + 1) % tabButtons.length;
-      } else if (ev.key === 'ArrowLeft') {
-        nextIdx = (idx - 1 + tabButtons.length) % tabButtons.length;
-      } else if (ev.key === 'Home') {
-        nextIdx = 0;
-      } else if (ev.key === 'End') {
-        nextIdx = tabButtons.length - 1;
-      }
-      if (nextIdx !== null) {
-        ev.preventDefault();
-        tabButtons[nextIdx].focus();
-        renderShowcaseView(tabButtons[nextIdx].dataset.view);
-      }
-    });
-  });
-
-  let resizeTimer = null;
-  window.addEventListener('resize', () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(renderRiverCanvas, 80);
-  });
-
-  updateThemeUI();
-  initGallery();
+  initColorSchemeSync();
   initDownloadWorkbench();
+  initScreenshotLightbox();
 }
 
 init();

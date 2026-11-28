@@ -214,7 +214,7 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
     let page = if app.prefs.borrow().darken_pages { (0.043, 0.043, 0.043) } else { (1.0, 1.0, 1.0) };
     view.set_background_color(&gtk::gdk::RGBA::new(page.0, page.1, page.2, 1.0));
     app.tone_for(&view);
-    let handlers = connect_refusals(&view);
+    let handlers = connect_refusals(app, &view);
 
     let view_holder = gtk::Overlay::new();
     view_holder.set_hexpand(true);
@@ -328,9 +328,33 @@ pub fn open(app: &App, tab: TabId, opener: &WebView, url: &str) {
 }
 
 /// Refusals the peek makes on its own: no permission, no sign-in, no dialog,
-/// no window, and no scheme the browser does not open.
-fn connect_refusals(view: &WebView) -> Vec<SignalHandlerId> {
+/// no window, and no scheme the browser does not open, plus clean dismissal if
+/// the preview's web process terminates.
+fn connect_refusals(app: &App, view: &WebView) -> Vec<SignalHandlerId> {
     let mut handlers = Vec::new();
+    let weak = app.weak();
+    handlers.push(view.connect_web_process_terminated(move |crashed_view, reason| {
+        let weak = weak.clone();
+        let crashed_weak = crashed_view.downgrade();
+        let message = web::reason_for_termination(reason);
+        // Defer dismissal to the next main-loop turn: `dismiss` calls
+        // `view.destroy()`, which must not run synchronously inside the view's
+        // own `web-process-terminated` signal emission.
+        glib::idle_add_local_once(move || {
+            let (Some(app), Some(crashed_view)) = (weak.upgrade(), crashed_weak.upgrade()) else {
+                return;
+            };
+            let matches_open = PEEK.with(|p| {
+                p.borrow()
+                    .as_ref()
+                    .is_some_and(|peek| peek.view == crashed_view)
+            });
+            if matches_open {
+                dismiss(&app);
+                app.flash_error(&message);
+            }
+        });
+    }));
     handlers.push(view.connect_permission_request(|_, request| {
         request.deny();
         true

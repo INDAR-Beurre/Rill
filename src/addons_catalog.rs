@@ -15,6 +15,72 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_SEARCH_BYTES: usize = 512 * 1024;
 const MAX_XPI_BYTES: usize = 32 * 1024 * 1024;
 
+pub const CHROME_WEB_STORE_URL: &str = "https://chromewebstore.google.com/";
+pub const FIREFOX_ADDONS_URL: &str = "https://addons.mozilla.org/firefox/extensions/";
+
+/// Recognize official Chrome Web Store HTTPS URLs without claiming one-click
+/// WebKitGTK install support.
+pub fn is_chrome_web_store_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if matches!(host, "chromewebstore.google.com" | "chromewebstore.google.com:443") {
+        return true;
+    }
+    if matches!(host, "chrome.google.com" | "chrome.google.com:443") {
+        let path = rest.strip_prefix(host).unwrap_or("");
+        return path == "/webstore" || path.starts_with("/webstore/");
+    }
+    false
+}
+
+/// Honest action label for an official AMO catalog entry.
+/// Only uses "Add to Rill…" when a verified official `.xpi` URL is present and
+/// the listing is not already known to require unsupported WebExtensions APIs.
+pub fn catalog_install_action(compat: CompatTier, has_xpi: bool) -> Option<&'static str> {
+    if !has_xpi {
+        return None;
+    }
+    match compat {
+        CompatTier::Unsupported => Some("Inspect\u{2026}"),
+        CompatTier::Unverified | CompatTier::Partial => Some("Add to Rill\u{2026}"),
+    }
+}
+
+/// Honest status classification for an installed extension row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InstalledStatus {
+    Active,
+    Disabled,
+    Partial,
+    Unsupported,
+}
+
+impl InstalledStatus {
+    pub fn classify(runs: bool, partial: bool, enabled: bool) -> Self {
+        if !runs {
+            Self::Unsupported
+        } else if !enabled {
+            Self::Disabled
+        } else if partial {
+            Self::Partial
+        } else {
+            Self::Active
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Active => "Active (content scripts)",
+            Self::Disabled => "Turned off",
+            Self::Partial => "Partial (content scripts only)",
+            Self::Unsupported => "Cannot run on WebKitGTK",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CompatTier {
     /// Catalog metadata does not establish runtime compatibility.
@@ -571,6 +637,36 @@ mod tests {
             assert!(!entry.summary.contains("Search "), "{}", entry.summary);
             assert!(!entry.compat_note.contains("Search's"), "{}", entry.compat_note);
         }
+    }
+
+    #[test]
+    fn chrome_web_store_url_matcher_accepts_only_official_https_store_urls() {
+        assert!(is_chrome_web_store_url(CHROME_WEB_STORE_URL));
+        assert!(is_chrome_web_store_url("https://chromewebstore.google.com/detail/example/abc"));
+        assert!(is_chrome_web_store_url("https://chrome.google.com/webstore/category/extensions"));
+        assert!(!is_chrome_web_store_url("http://chromewebstore.google.com/"));
+        assert!(!is_chrome_web_store_url("https://chrome.google.com/"));
+        assert!(!is_chrome_web_store_url("https://chromewebstore.google.com.evil.example/"));
+        assert!(!is_chrome_web_store_url("https://evil.example/chromewebstore.google.com"));
+    }
+
+    #[test]
+    fn catalog_install_action_only_offers_add_to_rill_for_supported_or_unverified_official_xpis() {
+        assert_eq!(catalog_install_action(CompatTier::Unverified, true), Some("Add to Rill\u{2026}"));
+        assert_eq!(catalog_install_action(CompatTier::Partial, true), Some("Add to Rill\u{2026}"));
+        assert_eq!(catalog_install_action(CompatTier::Unsupported, true), Some("Inspect\u{2026}"));
+        assert_eq!(catalog_install_action(CompatTier::Unverified, false), None);
+        assert_eq!(catalog_install_action(CompatTier::Partial, false), None);
+        assert_eq!(catalog_install_action(CompatTier::Unsupported, false), None);
+    }
+
+    #[test]
+    fn installed_status_classification_is_honest() {
+        assert_eq!(InstalledStatus::classify(true, false, true), InstalledStatus::Active);
+        assert_eq!(InstalledStatus::classify(true, true, true), InstalledStatus::Partial);
+        assert_eq!(InstalledStatus::classify(true, false, false), InstalledStatus::Disabled);
+        assert_eq!(InstalledStatus::classify(false, false, true), InstalledStatus::Unsupported);
+        assert_eq!(InstalledStatus::classify(false, true, false), InstalledStatus::Unsupported);
     }
 
     #[test]

@@ -219,7 +219,7 @@ fn tab_id(argument: &str) -> Option<u64> {
 // be allowed to run to the length a full Shortcuts sheet has. This cap is well
 // past the longest panel this browser builds; the walk stops collecting at it
 // rather than answering with a megabyte of text.
-const PANEL_TEXT_CAP: usize = 4000;
+const PANEL_TEXT_CAP: usize = 12000;
 
 // What the open panel says, in the order it is drawn: every label under the
 // body container, which is where a panel puts its rows. A button's caption is
@@ -1194,14 +1194,17 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                 .map(|settings| settings.is_gtk_enable_animations())
                 .unwrap_or(true);
             ok(&format!(
-                ",\"animations\":{},\"gtkAnimations\":{},\"microMs\":{},\"enterMs\":{},\"exitMs\":{},\"layoutMs\":{},\"travelPx\":{}",
+                ",\"animations\":{},\"gtkAnimations\":{},\"microMs\":{},\"enterMs\":{},\"exitMs\":{},\"layoutMs\":{},\"travelPx\":{},\"travelSmPx\":{},\"curveLiquid\":\"{}\",\"curveDismiss\":\"{}\"",
                 crate::motion::enabled(),
                 gtk,
                 crate::motion::dur::MICRO,
                 crate::motion::dur::ENTER,
                 crate::motion::dur::EXIT,
                 crate::motion::dur::LAYOUT,
-                crate::motion::dur::TRAVEL
+                crate::motion::dur::TRAVEL,
+                crate::motion::dur::TRAVEL_SM,
+                crate::motion::curve::CSS_LIQUID,
+                crate::motion::curve::CSS_DISMISS
             ))
         }
         "scrimclick" => {

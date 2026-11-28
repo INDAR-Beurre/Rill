@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -20,7 +21,7 @@ import {
   readReleaseCache,
 } from '../release-core.mjs';
 
-const TEST_TMP_BASE = process.env.TMPDIR || '/home/alex/.cache';
+const TEST_TMP_BASE = process.env.TMPDIR || tmpdir();
 
 function makeMemoryStorage() {
   const store = new Map();

@@ -7,26 +7,80 @@ import {
   readReleaseCache,
 } from './release-core.mjs';
 
-function syncHeroShotLink(dark) {
-  const heroImg = document.getElementById('hero-screenshot');
-  const heroShotLink = document.getElementById('hero-shot-link');
-  if (!heroImg || !heroShotLink) {
+const HERO_VIEWS = {
+  sidebar: {
+    light: 'assets/sidebar-light.png',
+    dark: 'assets/sidebar-dark.png',
+    caption: 'Vertical sidebar and Spaces.',
+    alt: 'Rill browser window on Linux with a vertical tab sidebar, pinned site icons, Space switcher dots, and start page',
+  },
+  toptabs: {
+    light: 'assets/top-tabs-light.png',
+    dark: 'assets/top-tabs-dark.png',
+    caption: 'Horizontal top tabs with Work Space.',
+    alt: 'Rill browser window on Linux with horizontal top tabs, Work Space selector, pinned site icons, and start page',
+  },
+};
+
+function syncPictureLink(imgId, linkId, dark) {
+  const img = document.getElementById(imgId);
+  const link = document.getElementById(linkId);
+  if (!img || !link) {
     return;
   }
-  const href = dark ? heroImg.dataset.dark : heroImg.dataset.light;
+  const href = dark ? img.dataset.dark : img.dataset.light;
   if (href) {
-    heroShotLink.href = href;
+    link.href = href;
   }
 }
 
-function initColorSchemeSync() {
-  if (!window.matchMedia) {
-    return;
+function isDarkScheme() {
+  return Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+function initColorSchemeAndHeroViews() {
+  const heroImg = document.getElementById('hero-screenshot');
+  const heroSourceDark = document.getElementById('hero-source-dark');
+  const heroCaption = document.getElementById('hero-caption');
+  const toggleButtons = [...document.querySelectorAll('[data-hero-view]')];
+
+  function applyHeroView(viewKey) {
+    const view = HERO_VIEWS[viewKey] || HERO_VIEWS.sidebar;
+    if (heroImg) {
+      heroImg.src = view.light;
+      heroImg.dataset.light = view.light;
+      heroImg.dataset.dark = view.dark;
+      heroImg.alt = view.alt;
+    }
+    if (heroSourceDark) {
+      heroSourceDark.srcset = view.dark;
+    }
+    if (heroCaption) {
+      heroCaption.textContent = view.caption;
+    }
+    for (const btn of toggleButtons) {
+      btn.setAttribute('aria-selected', String(btn.dataset.heroView === viewKey));
+    }
+    syncPictureLink('hero-screenshot', 'hero-shot-link', isDarkScheme());
   }
-  const mq = window.matchMedia('(prefers-color-scheme: dark)');
-  syncHeroShotLink(mq.matches);
-  if (typeof mq.addEventListener === 'function') {
-    mq.addEventListener('change', (ev) => syncHeroShotLink(ev.matches));
+
+  for (const btn of toggleButtons) {
+    btn.addEventListener('click', () => {
+      applyHeroView(btn.dataset.heroView);
+    });
+  }
+
+  function syncAllLinks(dark) {
+    syncPictureLink('hero-screenshot', 'hero-shot-link', dark);
+    syncPictureLink('native-screenshot', 'native-shot-link', dark);
+  }
+
+  syncAllLinks(isDarkScheme());
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    if (typeof mq.addEventListener === 'function') {
+      mq.addEventListener('change', (ev) => syncAllLinks(ev.matches));
+    }
   }
 }
 
@@ -56,6 +110,36 @@ function formatShortTime(epochMs) {
   }).format(date);
 }
 
+function friendlyFormatLabel(format) {
+  switch (format) {
+    case '.AppImage':
+      return 'AppImage';
+    case '.deb':
+      return 'Debian / Ubuntu (.deb)';
+    case '.rpm':
+      return 'Fedora / RPM (.rpm)';
+    case '.pkg.tar.zst':
+      return 'Arch package (.pkg.tar.zst)';
+    case '.tar.gz':
+      return 'Archive (.tar.gz)';
+    default:
+      return format;
+  }
+}
+
+function friendlyArchLabel(arch) {
+  switch (arch) {
+    case 'x86_64':
+      return '64-bit Linux';
+    case 'aarch64':
+      return 'ARM64 Linux';
+    case 'any':
+      return 'Linux';
+    default:
+      return 'Linux';
+  }
+}
+
 function initDownloadWorkbench() {
   if (!document.getElementById('download-workbench')) {
     return;
@@ -69,6 +153,7 @@ function initDownloadWorkbench() {
   const readyEl = document.getElementById('release-ready');
   const fallbackEl = document.getElementById('release-fallback');
   const fallbackMsgEl = document.getElementById('fallback-message');
+  const selectorRow = document.getElementById('selector-row');
   const archLabel = document.getElementById('arch-label');
   const archWrap = document.getElementById('arch-select-wrap');
   const archSelect = document.getElementById('arch-select');
@@ -77,9 +162,14 @@ function initDownloadWorkbench() {
   const pkgWrap = document.getElementById('package-select-wrap');
   const packageSelect = document.getElementById('package-select');
   const pkgReadout = document.getElementById('package-readout');
+  const detailTag = document.getElementById('detail-tag');
+  const detailArch = document.getElementById('detail-arch');
+  const detailPackage = document.getElementById('detail-package');
+  const detailFilename = document.getElementById('detail-filename');
   const availSummary = document.getElementById('availability-summary');
   const reqHeadline = document.getElementById('requirements-headline');
   const reqDetail = document.getElementById('requirements-detail');
+  const reqBrief = document.getElementById('download-req-brief');
   const downloadLink = document.getElementById('download-link');
   const assetMeta = document.getElementById('asset-meta');
   const sidecarLink = document.getElementById('sidecar-link');
@@ -91,6 +181,7 @@ function initDownloadWorkbench() {
   const copyBtn = document.getElementById('copy-commands');
   const copyStatus = document.getElementById('copy-status');
   const retryBtn = document.getElementById('retry-release');
+  const retryFallbackBtn = document.getElementById('retry-release-fallback');
 
   let currentRelease = null;
   let currentCommandText = '';
@@ -157,10 +248,10 @@ function initDownloadWorkbench() {
       selectId: 'arch-select',
       singleText: arches[0] || '',
     });
-    syncPackageOptions(release);
+    syncPackageOptions(release, arches.length);
   }
 
-  function syncPackageOptions(release) {
+  function syncPackageOptions(release, archCount) {
     const selectedArch = archSelect.value;
     const matching = release.packages.filter((p) => p.arch === selectedArch);
     const formatCounts = new Map();
@@ -189,6 +280,12 @@ function initDownloadWorkbench() {
       selectId: 'package-select',
       singleText: singleLabel,
     });
+
+    if (selectorRow) {
+      const totalArches = archCount ?? new Set(release.packages.map((p) => p.arch)).size;
+      selectorRow.hidden = totalArches <= 1 && matching.length <= 1;
+    }
+
     renderSelectedPackage(release);
   }
 
@@ -204,8 +301,21 @@ function initDownloadWorkbench() {
       return;
     }
 
+    if (detailTag) {
+      detailTag.textContent = release.tag;
+    }
+    if (detailArch) {
+      detailArch.textContent = pkg.arch;
+    }
+    if (detailPackage) {
+      detailPackage.textContent = `${pkg.format} (${pkg.sizeLabel})`;
+    }
+    if (detailFilename) {
+      detailFilename.textContent = pkg.name;
+    }
+
     if (release.packages.length === 1) {
-      availSummary.textContent = `Publishes ${pkg.arch} ${pkg.format} only.`;
+      availSummary.textContent = `This release publishes a Linux ${pkg.arch} ${pkg.format} build.`;
     } else {
       const formatList = [...new Set(release.packages.map((p) => p.format))].join(', ');
       availSummary.textContent = `Available package formats in ${release.title}: ${formatList}.`;
@@ -215,16 +325,20 @@ function initDownloadWorkbench() {
     reqHeadline.textContent = reqs.headline;
     reqDetail.textContent = reqs.detail;
 
+    if (reqBrief) {
+      reqBrief.textContent =
+        release.version.startsWith('1.1.') && pkg.format === '.AppImage'
+          ? 'Works on Wayland and X11. Current builds need a recent Linux system (glibc 2.44 or newer).'
+          : `Works on ${friendlyArchLabel(pkg.arch)} with Wayland or X11.`;
+    }
+
     if (heroSummaryEl) {
-      const glibcNote = release.version.startsWith('1.1.') && pkg.format === '.AppImage'
-        ? ', glibc 2.44+'
-        : '';
-      heroSummaryEl.textContent = `Latest: ${release.title}, ${pkg.arch} ${pkg.format} (${pkg.sizeLabel}${glibcNote})`;
+      heroSummaryEl.textContent = `${release.title} for Linux (${pkg.sizeLabel})`;
     }
 
     downloadLink.href = pkg.url;
-    downloadLink.textContent = `Download ${pkg.format}`;
-    assetMeta.textContent = `${pkg.name} (${pkg.sizeLabel})`;
+    downloadLink.textContent = `Download for Linux (${pkg.format})`;
+    assetMeta.textContent = `${friendlyArchLabel(pkg.arch)} ${friendlyFormatLabel(pkg.format)}, ${pkg.sizeLabel}`;
 
     if (pkg.sidecar) {
       sidecarLink.href = pkg.sidecar.url;
@@ -258,8 +372,8 @@ function initDownloadWorkbench() {
     commandsNote.textContent = cmds.note;
     if (terminalTitle) {
       terminalTitle.textContent = cmds.hasVerification
-        ? 'Verify checksum and run locally'
-        : 'Run locally (no checksum published for this asset)';
+        ? 'Verify download and run in terminal'
+        : 'Run in terminal (no checksum published for this asset)';
     }
   }
 
@@ -269,9 +383,7 @@ function initDownloadWorkbench() {
       currentRelease = release;
       const dateStr = formatPublishedDate(release.publishedAt);
       titleEl.textContent = release.title;
-      metaEl.textContent = dateStr
-        ? `Tag ${release.tag}, published ${dateStr}`
-        : `Tag ${release.tag}`;
+      metaEl.textContent = dateStr ? `Released ${dateStr}` : `Version ${release.tag}`;
 
       if (notesLink) {
         notesLink.href = release.htmlUrl || RELEASES_FALLBACK_URL;
@@ -284,7 +396,7 @@ function initDownloadWorkbench() {
           : '';
         setNotice(`${result.errorDetail}${resetNote}`);
       } else if (result.fromCache && result.fetchedAt) {
-        setNotice(`Loaded cached release metadata from ${formatShortTime(result.fetchedAt)}. Use Refresh to check GitHub now.`);
+        setNotice(`Showing saved release info from ${formatShortTime(result.fetchedAt)}. Use Refresh to check GitHub now.`);
       } else {
         setNotice('');
       }
@@ -302,21 +414,21 @@ function initDownloadWorkbench() {
 
     if (result.status === 'empty' && result.release) {
       titleEl.textContent = result.release.title;
-      metaEl.textContent = `Tag ${result.release.tag}`;
+      metaEl.textContent = `Version ${result.release.tag}`;
       if (notesLink) {
         notesLink.href = result.release.htmlUrl || RELEASES_FALLBACK_URL;
         notesLink.hidden = false;
       }
       fallbackMsgEl.textContent =
-        'This release does not include prebuilt Linux package files (.AppImage, .deb, .rpm, .pkg.tar.zst, or .tar.gz). Check the release notes on GitHub or build from source below.';
+        'This release does not include prebuilt Linux packages (.AppImage, .deb, .rpm, .pkg.tar.zst, or .tar.gz). Check the release notes on GitHub or build from source.';
       return;
     }
 
     if (notesLink) {
       notesLink.hidden = true;
     }
-    titleEl.textContent = 'Live release lookup unavailable';
-    metaEl.textContent = 'Could not verify the latest release from GitHub';
+    titleEl.textContent = 'Direct lookup unavailable';
+    metaEl.textContent = 'Could not check GitHub right now';
 
     if (result.errorKind === 'ratelimit') {
       const resetNote = result.rateLimitResetAt
@@ -325,10 +437,10 @@ function initDownloadWorkbench() {
       fallbackMsgEl.textContent = `GitHub API rate limit reached for this connection.${resetNote} Download directly from the official GitHub Releases page.`;
     } else if (result.errorKind === 'timeout') {
       fallbackMsgEl.textContent =
-        'The GitHub request timed out after 8 seconds. Retry or open the official GitHub Releases page directly.';
+        'The GitHub request timed out after 8 seconds. Try again or open the official GitHub Releases page directly.';
     } else {
       fallbackMsgEl.textContent =
-        'Unable to reach GitHub right now (offline or blocked). Open the official GitHub Releases page directly or build from source.';
+        'Unable to reach GitHub right now. Open the official GitHub Releases page directly or try again later.';
     }
   }
 
@@ -356,11 +468,11 @@ function initDownloadWorkbench() {
         stale: true,
         fromCache: true,
         fetchedAt: cached.fetchedAt,
-        errorDetail: `Showing cached metadata from ${formatShortTime(cached.fetchedAt)} while checking GitHub.`,
+        errorDetail: `Showing saved release info from ${formatShortTime(cached.fetchedAt)} while checking GitHub.`,
       });
     } else {
-      titleEl.textContent = 'Latest release';
-      metaEl.textContent = 'Checking GitHub for the latest stable build';
+      titleEl.textContent = 'Latest stable release';
+      metaEl.textContent = 'Checking GitHub for the latest build';
       setNotice('');
       readyEl.hidden = true;
       fallbackEl.hidden = true;
@@ -388,29 +500,39 @@ function initDownloadWorkbench() {
     }
   });
 
-  retryBtn.addEventListener('click', () => {
-    loadRelease({ bypassCache: true });
-  });
+  if (retryBtn) {
+    retryBtn.addEventListener('click', () => {
+      loadRelease({ bypassCache: true });
+    });
+  }
 
-  copyBtn.addEventListener('click', async () => {
-    if (!currentCommandText) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(currentCommandText);
-      copyBtn.textContent = 'Copied';
-      copyStatus.textContent = 'Commands copied to clipboard.';
-      if (copyResetTimer !== null) {
-        clearTimeout(copyResetTimer);
+  if (retryFallbackBtn) {
+    retryFallbackBtn.addEventListener('click', () => {
+      loadRelease({ bypassCache: true });
+    });
+  }
+
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      if (!currentCommandText) {
+        return;
       }
-      copyResetTimer = setTimeout(() => {
-        copyBtn.textContent = 'Copy commands';
-        copyResetTimer = null;
-      }, 1800);
-    } catch {
-      copyStatus.textContent = 'Clipboard copy unavailable; select the command text manually.';
-    }
-  });
+      try {
+        await navigator.clipboard.writeText(currentCommandText);
+        copyBtn.textContent = 'Copied';
+        copyStatus.textContent = 'Commands copied to clipboard.';
+        if (copyResetTimer !== null) {
+          clearTimeout(copyResetTimer);
+        }
+        copyResetTimer = setTimeout(() => {
+          copyBtn.textContent = 'Copy commands';
+          copyResetTimer = null;
+        }, 1800);
+      } catch {
+        copyStatus.textContent = 'Clipboard copy unavailable; select the command text manually.';
+      }
+    });
+  }
 
   loadRelease();
 }
@@ -532,7 +654,7 @@ function initScreenshotLightbox() {
 }
 
 function init() {
-  initColorSchemeSync();
+  initColorSchemeAndHeroViews();
   initDownloadWorkbench();
   initScreenshotLightbox();
 }

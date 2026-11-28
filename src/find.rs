@@ -129,6 +129,22 @@ impl FindBar {
         if let Some(access) = entry.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&access, "Find in page");
         }
+        {
+            let bar_in = bar.downgrade();
+            entry.connect_focus_in_event(move |_, _| {
+                if let Some(b) = bar_in.upgrade() {
+                    crate::ui::class(&b, "focused");
+                }
+                crate::gtkx::inh(false)
+            });
+            let bar_out = bar.downgrade();
+            entry.connect_focus_out_event(move |_, _| {
+                if let Some(b) = bar_out.upgrade() {
+                    b.style_context().remove_class("focused");
+                }
+                crate::gtkx::inh(false)
+            });
+        }
         crate::ui::pack(&bar, &entry, true);
 
         // `icons::button` turns focus off to keep the marks mouse-only. In this

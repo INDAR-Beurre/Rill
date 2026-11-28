@@ -131,11 +131,15 @@ button {{ background-color: transparent; border: 1px solid transparent; color: {
 button label {{ font-family: {font}; font-weight: normal; }}
 button:hover {{ background-color: {hover}; }}
 button:active {{ background-color: {wash}; }}
-button:focus, entry:focus, switch:focus, .row:focus, .pin:focus, .toptab:focus, .toppin:focus, .ptrow:focus, .sgrow:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
+button:focus, switch:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_pill}px; }}
+entry:focus {{ outline: none; border-color: {accent}; box-shadow: inset 0 0 0 1px {accent}; }}
+checkbutton:focus, radiobutton:focus, spinbutton:focus, scale:focus, flowboxchild:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_sm}px; }}
+expander title {{ border-radius: {r_pill}px; padding: 2px 6px; }}
+expander title:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_pill}px; }}
 button:disabled label {{ color: {disabled}; }}
 button.mark {{ background-color: transparent; border: none; padding: 4px; border-radius: {r_pill}px; color: {muted}; min-width: 0; min-height: 0; }}
 button.mark:hover {{ background-color: {hover}; color: {ink}; }}
-button.mark:focus {{ outline: 2px solid {accent}; outline-offset: 1px; }}
+button.mark:focus {{ outline: 2px solid {accent}; outline-offset: 1px; -gtk-outline-radius: {r_pill}px; }}
 button.mark:disabled {{ opacity: 0.35; }}
 
 .toptabs-scroll, .toptabs-scroll viewport {{ background-color: transparent; border: none; }}
@@ -157,6 +161,7 @@ button.mark:disabled {{ opacity: 0.35; }}
 .toppin.live {{ background-color: {surface}; border-color: {divider}; box-shadow: {tabshadow}; }}
 .toppin.keep-awake, .pin.keep-awake {{ border-color: {accent}; }}
 .toppin.private.live, .pin.private.live {{ border-color: {fieldborder}; }}
+.toptab:focus, .toptab.live:focus, .toppin:focus, .toppin.live:focus {{ outline: none; border-color: {accent}; box-shadow: inset 0 0 0 1px {accent}; }}
 button.space-pill {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 2px 8px; min-height: 24px; color: {muted}; }}
 button.space-pill:hover {{ background-color: {hover}; border-color: {divider}; color: {ink}; }}
 button.space-pill:active {{ background-color: {wash}; box-shadow: {pressshadow}; }}
@@ -192,11 +197,13 @@ button.site-info {{ padding: 4px 8px; color: {muted}; border-radius: {r_pill}px;
 button.site-info.protected {{ color: {accent}; }}
 button.address-button {{ border-radius: {r_pill}px; padding: 4px 12px 4px 4px; }}
 button.address-button:hover {{ background-color: transparent; }}
+button.site-info:focus, button.address-button:focus {{ outline: 2px solid {accent}; outline-offset: -1px; -gtk-outline-radius: {r_pill}px; }}
 .address-label {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {ink}; }}
 .address-path {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .control {{ min-width: 26px; min-height: 26px; border-radius: {r_pill}px; background-color: transparent; color: {muted}; }}
 .control:hover {{ background-color: {hover}; color: {ink}; }}
 .control:active {{ background-color: {wash}; }}
+.control:focus {{ outline: none; box-shadow: inset 0 0 0 2px {accent}; }}
 .control.shut:hover {{ background-color: {danger}; color: #FFFFFF; }}
 window.unfocused .control {{ opacity: 0.6; }}
 
@@ -222,6 +229,7 @@ button.close:hover {{ background-color: {wash}; color: {ink}; }}
 .pin {{ border: 1px solid transparent; border-radius: {r_sm}px; background-color: {tilebg}; min-width: 36px; min-height: 36px; }}
 .pin:hover {{ background-color: {sidehover}; border-color: {divider}; }}
 .pin.live {{ background-color: {pinlive}; border-color: {accent}; box-shadow: {tabshadow}; }}
+.row:focus, .row.live:focus, .pin:focus, .pin.live:focus {{ outline: none; border-color: {accent}; box-shadow: inset 0 0 0 1px {accent}; }}
 .pinletter {{ font-family: {font}; font-size: {caption}px; font-weight: 600; letter-spacing: -0.02em; color: {pinfg}; }}
 .pin.live .pinletter, .toppin.live .pinletter {{ color: {pinlivefg}; font-weight: 700; }}
 row, flowbox, flowboxchild {{ background-color: transparent; padding: 0; }}
@@ -308,6 +316,7 @@ button.start-chip:active {{ background-color: {wash}; box-shadow: {pressshadow};
 .suggest .sgrow {{ border-radius: {r_pill}px; border: 1px solid transparent; min-height: 44px; color: {muted}; }}
 .suggest .sgrow:hover {{ background-color: {hover}; }}
 .suggest .sgrow.picked {{ background-color: {wash}; border-color: transparent; color: {ink}; }}
+.suggest .sgrow:focus, .suggest .sgrow.picked:focus, .bmark-suggest-card .sgrow:focus, .bmark-suggest-card .sgrow.picked:focus, .start-suggest .sgrow:focus, .start-suggest .sgrow.picked:focus {{ outline: none; border-color: {accent}; box-shadow: inset 0 0 0 1px {accent}; }}
 .sghead {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; }}
 .sgtitle {{ font-family: {font}; font-size: {body}px; color: {ink}; }}
 .sgurl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
@@ -317,6 +326,7 @@ button.start-chip:active {{ background-color: {wash}; box-shadow: {pressshadow};
 
 .panel {{ background-color: {surface}; border-radius: {r_xl}px; border: 1px solid {divider}; box-shadow: 0 10px 28px {shadow}; }}
 .panel.panel-fullpage {{ background-color: {surface}; border-radius: {r_lg}px; border: 1px solid {divider}; box-shadow: none; }}
+.panel:focus, .dlbar:focus {{ outline: none; }}
 .panel .head, .panel-heading {{ font-family: {font}; font-size: {panel_heading}px; font-weight: 600; letter-spacing: -0.4px; color: {ink}; }}
 .panel .sub, .panel-description {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel .panel-rail {{ background-color: {ground}; border-right: 1px solid {divider}; border-radius: 19px 0 0 19px; }}
@@ -327,12 +337,14 @@ button.start-chip:active {{ background-color: {wash}; box-shadow: {pressshadow};
 .panel button.tab:hover {{ background-color: {hover}; }}
 .panel button.tab:checked {{ background-color: {tint}; border-color: transparent; color: {accent}; box-shadow: none; }}
 .panel button.tab:checked label {{ color: {ink}; font-weight: 600; }}
+.panel button.tab:focus, .panel button.panel-nav-item:focus {{ outline: 2px solid {accent}; outline-offset: 1px; -gtk-outline-radius: {r_pill}px; }}
 .panel .settings-toc {{ border-top: 1px solid {divider}; margin-top: 10px; padding-top: 12px; }}
 .panel .settings-toc-heading {{ font-family: {font}; font-size: {caption}px; font-weight: 600; color: {faint}; margin-bottom: 4px; padding-left: 10px; }}
 .panel button.settings-toc-item {{ background-color: transparent; border: none; border-radius: {r_sm}px; padding: 5px 10px; min-height: 20px; color: {muted}; }}
 .panel button.settings-toc-item label {{ font-family: {font}; font-size: {small}px; color: {muted}; font-weight: 400; }}
 .panel button.settings-toc-item:hover {{ background-color: {hover}; }}
 .panel button.settings-toc-item:hover label {{ color: {ink}; }}
+.panel button.settings-toc-item:focus {{ outline: 2px solid {accent}; outline-offset: 1px; -gtk-outline-radius: 11px; }}
 .panel button.settings-toc-item.active-section {{ background-color: {hover}; }}
 .panel button.settings-toc-item.active-section label {{ color: {ink}; font-weight: 600; }}
 .panel-section {{ background-color: transparent; border: none; border-top: 1px solid {divider}; padding-top: 20px; }}
@@ -341,15 +353,16 @@ button.start-chip:active {{ background-color: {wash}; box-shadow: {pressshadow};
 .panel-setting-row:last-child, .panel-setting-row.panel-keyword-form {{ border-bottom: none; }}
 .panel-appearance {{ padding: 6px 0 8px; }}
 .panel entry, .dlbar entry, popover.browser-menu entry {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px; font-family: {font}; font-size: {body}px; color: {ink}; }}
-.panel entry:focus, .dlbar entry:focus, popover.browser-menu entry:focus {{ border-color: {fieldborder}; }}
+.panel entry:focus, .dlbar entry:focus, popover.browser-menu entry:focus {{ outline: none; border-color: {accent}; box-shadow: inset 0 0 0 1px {accent}; }}
 .panel entry text, .dlbar entry text, popover.browser-menu entry text {{ color: {ink}; font-family: {font}; font-size: {body}px; }}
 .panel .panel-filter-box {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px; }}
-.panel .panel-filter-box.focused {{ border-color: {fieldborder}; }}
+.panel .panel-filter-box.focused {{ border-color: {accent}; box-shadow: {focusring}; }}
 .panel .panel-filter-icon {{ color: {muted}; }}
 .panel .panel-filter-box entry.panel-filter {{ background-color: transparent; border: none; box-shadow: none; padding: 2px 0; min-height: 0; }}
 .panel .panel-filter-box entry.panel-filter:focus {{ border: none; outline: none; box-shadow: none; }}
 .panel .ptrow {{ border-radius: {r_md}px; padding: 10px 12px; border: 1px solid transparent; }}
 .panel .ptrow:hover {{ background-color: {hover}; }}
+.panel .ptrow:focus {{ outline: none; border-color: {accent}; box-shadow: inset 0 0 0 1px {accent}; }}
 .panel .ptitle {{ font-family: {font}; font-size: {body}px; color: {ink}; font-weight: 500; }}
 .panel .purl {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .panel button.panelclose {{ min-width: 28px; min-height: 28px; border-radius: {r_pill}px; }}
@@ -392,6 +405,7 @@ progressbar.dl-progress progress {{ background-color: {accent}; border: none; bo
 .panel-section-description {{ font-size: {small}px; color: {muted}; }}
 .panel .panel-appearance-option {{ background-color: transparent; border: 1px solid {divider}; padding: 8px; border-radius: {r_md}px; }}
 .panel .panel-appearance-option:hover {{ background-color: {hover}; }}
+.panel .panel-appearance-option:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_lg}px; }}
 .panel .panel-appearance-option.chosen, .panel .panel-appearance-option:checked {{ background-color: {card}; border-color: {accent}; box-shadow: 0 0 0 1px {accent}; }}
 .panel .panel-appearance-option label, .panel .panel-appearance-option.chosen label {{ color: {ink}; font-weight: 500; }}
 .panel .panel-appearance-preview {{ color: {divider}; }}
@@ -429,7 +443,7 @@ button.act:disabled label {{ color: {disabled}; }}
 .panel switch slider {{ min-width: 16px; min-height: 16px; border-radius: {r_pill}px; margin: 3px; background-color: {surface}; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }}
 .panel switch:checked slider {{ background-color: {accentink}; }}
 button.pill-switch, button.pill-switch:hover, button.pill-switch:active, button.pill-switch:checked {{ background-color: transparent; border: none; padding: 2px; border-radius: {r_pill}px; min-width: 0; min-height: 0; }}
-button.pill-switch:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
+button.pill-switch:focus {{ outline: 2px solid {accent}; outline-offset: 0px; -gtk-outline-radius: {r_pill}px; }}
 button.pill-switch:disabled {{ opacity: 0.35; }}
 button.engine-picker, button.setting-picker {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px; }}
 button.engine-picker label, button.setting-picker label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
@@ -438,12 +452,14 @@ popover {{ background-color: {surface}; border: 1px solid {divider}; border-radi
 popover.engine-popover button.act {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 6px 12px; min-height: 20px; }}
 popover.engine-popover button.act label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 popover.engine-popover button.act:hover {{ background-color: {hover}; border-color: transparent; }}
+popover.engine-popover button.act:focus {{ outline: 2px solid {accent}; outline-offset: 1px; -gtk-outline-radius: {r_pill}px; }}
 popover.engine-popover button.act.chosen {{ background-color: {tint}; border-color: {accent}; }}
 popover.engine-popover button.act.chosen label {{ color: {ink}; font-weight: 600; }}
 popover.browser-menu {{ padding: 6px; border-radius: {r_lg}px; }}
 popover.browser-menu button.menu-row {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 6px 12px; min-height: 26px; }}
 popover.browser-menu button.menu-row:hover {{ background-color: {hover}; }}
 popover.browser-menu button.menu-row:active {{ background-color: {wash}; }}
+popover.browser-menu button.menu-row:focus {{ outline: 2px solid {accent}; outline-offset: 1px; -gtk-outline-radius: {r_pill}px; }}
 popover.browser-menu button.menu-row:disabled label {{ color: {disabled}; }}
 popover.browser-menu .menu-row-title {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 popover.browser-menu .menu-row-accel {{ font-family: {mono}; font-size: {caption}px; color: {faint}; }}
@@ -463,13 +479,16 @@ menu {{ background-color: {surface}; border: 1px solid {divider}; border-radius:
 menu separator {{ background-color: {divider}; min-height: 1px; margin: 4px 8px; }}
 menuitem {{ border-radius: {r_pill}px; padding: 6px 12px; }}
 menuitem:hover {{ background-color: {hover}; }}
+menuitem:focus {{ outline: 2px solid {accent}; outline-offset: -1px; -gtk-outline-radius: {r_pill}px; }}
 menuitem label {{ font-family: {font}; font-size: {small}px; color: {ink}; }}
 menuitem:disabled label {{ color: {disabled}; }}
 
 .findbar {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 2px 10px; box-shadow: 0 6px 18px {shadow}; }}
+.findbar.focused {{ border-color: {accent}; box-shadow: 0 6px 18px {shadow}, {focusring}; }}
 .dlbar {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_xl}px; box-shadow: 0 8px 24px {shadow}; }}
 .dlbar.toast-pill {{ border-radius: {r_pill}px; padding: 2px 6px; }}
-.findbar entry {{ background-color: transparent; border: none; box-shadow: none; }}
+.findbar entry {{ background-color: transparent; border: none; outline: none; box-shadow: none; }}
+.findbar entry:focus {{ background-color: transparent; border: none; outline: none; box-shadow: none; }}
 .findbar label, .dlbar label {{ font-family: {font}; font-size: {small}px; color: {muted}; }}
 .findbar label.find-zero {{ color: {dangerink}; font-weight: 600; }}
 .dlbar.prompt {{ padding: 16px; }}
@@ -490,7 +509,7 @@ menuitem:disabled label {{ color: {disabled}; }}
 button.welcome-choice {{ background-color: transparent; border: none; border-bottom: 1px solid {divider}; border-radius: 0; padding: 10px 12px; min-height: 52px; box-shadow: none; }}
 button.welcome-choice:hover {{ background-color: {hover}; }}
 button.welcome-choice:active {{ background-color: {wash}; }}
-button.welcome-choice:focus {{ outline: 2px solid {accent}; outline-offset: -2px; }}
+button.welcome-choice:focus {{ outline: 2px solid {accent}; outline-offset: -3px; -gtk-outline-radius: 6px; }}
 button.welcome-choice.chosen {{ background-color: {wash}; border-bottom: 2px solid {accent}; }}
 button.welcome-choice .welcome-choice-title {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {ink}; }}
 button.welcome-choice .welcome-choice-sub {{ font-family: {font}; font-size: {caption}px; color: {muted}; }}
@@ -503,7 +522,7 @@ button.welcome-choice.chosen .welcome-choice-icon {{ color: {accent}; }}
 .welcome-toggle-sub {{ font-family: {font}; font-size: {caption}px; color: {muted}; }}
 button.welcome-switch {{ min-width: 44px; min-height: 24px; padding: 0; border: none; border-radius: {r_pill}px; background-color: transparent; box-shadow: none; }}
 button.welcome-switch:hover {{ background-color: transparent; }}
-button.welcome-switch:focus {{ outline: 2px solid {accent}; outline-offset: 3px; }}
+button.welcome-switch:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_pill}px; }}
 .welcome-import {{ background-color: {surface}; border: 1px solid {divider}; border-radius: {r_lg}px; padding: 11px 18px; box-shadow: none; }}
 .welcome-import-title {{ font-family: {font}; font-size: {small}px; font-weight: 600; color: {ink}; }}
 .welcome-import expander arrow {{ color: {muted}; }}
@@ -513,17 +532,17 @@ button.welcome-import-btn {{ padding: 5px 14px; min-height: 30px; }}
 button.welcome-btn-secondary {{ background-color: {surface}; border: 1px solid {fieldborder}; border-radius: {r_pill}px; padding: 9px 20px; min-height: 40px; box-shadow: none; }}
 button.welcome-btn-secondary:hover {{ background-color: {hover}; border-color: {ink}; }}
 button.welcome-btn-secondary:active {{ background-color: {wash}; }}
-button.welcome-btn-secondary:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
+button.welcome-btn-secondary:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_pill}px; }}
 button.welcome-btn-secondary .welcome-btn-label, button.welcome-btn-secondary .welcome-btn-icon {{ color: {ink}; font-family: {font}; font-size: {small}px; font-weight: 600; }}
 button.welcome-btn-primary {{ background-color: {accent}; border: 1px solid {accent}; border-radius: {r_pill}px; padding: 9px 22px; min-height: 40px; box-shadow: none; }}
 button.welcome-btn-primary:hover {{ background-color: {accenthover}; border-color: {accenthover}; }}
 button.welcome-btn-primary:active {{ background-color: {accenthover}; border-color: {accenthover}; }}
-button.welcome-btn-primary:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
+button.welcome-btn-primary:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_pill}px; }}
 button.welcome-btn-primary .welcome-btn-label, button.welcome-btn-primary .welcome-btn-icon {{ color: {accentink}; font-family: {font}; font-size: {small}px; font-weight: 600; }}
 button.welcome-skip-link {{ background-color: transparent; border: none; border-radius: {r_pill}px; padding: 4px 12px; min-height: 28px; box-shadow: none; }}
 button.welcome-skip-link label {{ font-family: {font}; font-size: {caption}px; color: {muted}; }}
 button.welcome-skip-link:hover label {{ color: {ink}; }}
-button.welcome-skip-link:focus {{ outline: 2px solid {accent}; outline-offset: 2px; }}
+button.welcome-skip-link:focus {{ outline: 2px solid {accent}; outline-offset: 2px; -gtk-outline-radius: {r_pill}px; }}
 .welcome-short button.welcome-choice {{ padding: 7px 10px; min-height: 44px; }}
 .welcome-short .welcome-toggle-row {{ padding: 7px 6px; }}
 .welcome-short button.welcome-btn-secondary, .welcome-short button.welcome-btn-primary {{ padding: 7px 18px; min-height: 36px; }}
@@ -545,7 +564,7 @@ scrollbar, scrollbar trough {{ background-color: transparent; border: none; }}
 scrollbar slider {{ background-color: {fieldborder}; border: none; border-radius: {r_pill}px; min-width: 6px; min-height: 6px; margin: 2px; }}
 scrollbar slider:hover {{ background-color: {muted}; }}
 button, .control, .row, .toptab, .toppin, .pin, .tile, .colstrip, menuitem, .sgrow, .bmark, .ptrow, .panel-appearance-option, button.welcome-choice, button.welcome-btn-primary, button.welcome-btn-secondary, button.space-pill, button.space-dot, button.space-menu-button, button.start-chip, button.start-search-submit, popover.browser-menu button.menu-row {{ transition: background-color {micro}ms {ease}, color {micro}ms {ease}, border-color {micro}ms {ease}, opacity {micro}ms {ease}, box-shadow {micro}ms {ease}; }}
-.location, .start-search, .bmark-search, .omni-block, .omni, .panel .panel-filter-box, .panel entry, .dlbar entry, popover.browser-menu entry, .omnisite-pill {{ transition: background-color {micro}ms {ease}, border-color {micro}ms {ease}, box-shadow {micro}ms {ease}, color {micro}ms {ease}; }}
+.location, .start-search, .bmark-search, .findbar, .omni-block, .omni, .panel .panel-filter-box, .panel entry, .dlbar entry, popover.browser-menu entry, .omnisite-pill {{ transition: background-color {micro}ms {ease}, border-color {micro}ms {ease}, box-shadow {micro}ms {ease}, color {micro}ms {ease}; }}
 .rowtitle, .toptab-title, .row-subtitle, .favicon, .pinletter, .space-pill-label, .start-search-icon, .start-arrow, .panel-nav-icon, .welcome-choice-icon {{ transition: color {micro}ms {ease}, opacity {micro}ms {ease}; }}
 scrollbar slider, .shell separator, paned separator {{ transition: background-color {micro}ms {ease}, opacity {micro}ms {ease}; }}
 progressbar.dl-progress progress {{ transition: background-color {micro}ms {ease}, min-width {micro}ms {ease}; }}
@@ -780,8 +799,75 @@ mod tests {
             assert!(!sheet.contains("transition: all"), "never use blanket transition: all");
             assert!(!sheet.contains("transform:"), "GTK3 CSS rejects transform properties");
             assert!(!sheet.contains("@media"), "GTK3 CSS does not support @media queries");
-            for selector in [".omni-block.focused", ".location.omni-open", ".start-search.focused", "progressbar.dl-progress progress"] {
+            for selector in [".omni-block.focused", ".location.omni-open", ".start-search.focused", ".findbar.focused", "progressbar.dl-progress progress"] {
                 assert!(sheet.contains(selector), "missing motion selector {selector}");
+            }
+        }
+    }
+
+    #[test]
+    fn focus_outlines_always_match_control_shape() {
+        for look in [Look::Light, Look::Dark] {
+            let palette = Palette::for_look(look, false);
+            let sheet = build(&palette, 48);
+            // Every CSS rule that paints a solid GTK focus outline must declare
+            // `-gtk-outline-radius` so GTK3 never falls back to a hard 0px rectangle.
+            for line in sheet.lines() {
+                if line.contains("outline: 2px solid") {
+                    assert!(
+                        line.contains("-gtk-outline-radius:"),
+                        "solid focus outline without -gtk-outline-radius: {line}"
+                    );
+                }
+            }
+            // Pill controls get pill-radius outlines.
+            for pill_rule in [
+                "button:focus, switch:focus { outline: 2px solid",
+                "button.mark:focus { outline: 2px solid",
+                "button.pill-switch:focus { outline: 2px solid",
+                "button.welcome-switch:focus { outline: 2px solid",
+                "button.welcome-btn-primary:focus { outline: 2px solid",
+                "button.welcome-btn-secondary:focus { outline: 2px solid",
+                "button.welcome-skip-link:focus { outline: 2px solid",
+                "expander title:focus { outline: 2px solid",
+            ] {
+                let matched = sheet
+                    .lines()
+                    .find(|line| line.contains(pill_rule))
+                    .unwrap_or_else(|| panic!("missing pill focus rule: {pill_rule}"));
+                assert!(
+                    matched.contains("-gtk-outline-radius: 999px;"),
+                    "expected 999px pill outline radius on: {matched}"
+                );
+            }
+            // Rounded cards & TOC rows match their concentric radii rather than 0px or 999px.
+            let card_focus = sheet
+                .lines()
+                .find(|line| line.contains(".panel .panel-appearance-option:focus"))
+                .expect("missing appearance card focus rule");
+            assert!(card_focus.contains("-gtk-outline-radius: 16px;"));
+            let toc_focus = sheet
+                .lines()
+                .find(|line| line.contains(".panel button.settings-toc-item:focus"))
+                .expect("missing TOC item focus rule");
+            assert!(toc_focus.contains("-gtk-outline-radius: 11px;"));
+            // Rectangular editorial choice rows keep a softened inset focus ring.
+            let choice_focus = sheet
+                .lines()
+                .find(|line| line.contains("button.welcome-choice:focus"))
+                .expect("missing welcome-choice focus rule");
+            assert!(choice_focus.contains("outline-offset: -3px;"));
+            assert!(choice_focus.contains("-gtk-outline-radius: 6px;"));
+            // EventBox and Entry controls use shape-matched border + inset ring (outline: none)
+            // because GtkEventBox does not call gtk_render_focus and GtkEntry clips outer outlines.
+            for inset_rule in [
+                "entry:focus { outline: none;",
+                ".toptab:focus, .toptab.live:focus, .toppin:focus, .toppin.live:focus { outline: none;",
+                ".row:focus, .row.live:focus, .pin:focus, .pin.live:focus { outline: none;",
+                ".panel .ptrow:focus { outline: none;",
+                ".findbar entry:focus { background-color: transparent; border: none; outline: none; box-shadow: none; }",
+            ] {
+                assert!(sheet.contains(inset_rule), "missing shape-safe focus rule: {inset_rule}");
             }
         }
     }

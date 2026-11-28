@@ -279,6 +279,7 @@ fn finish(
                     state.bookmarks.push(Bookmark {
                         url: site.url.to_string(),
                         title: site.title.to_string(),
+                        folder: String::new(),
                     });
                     added = true;
                 }

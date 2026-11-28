@@ -148,10 +148,12 @@ button.mark:disabled {{ opacity: 0.35; }}
 .toptab-title {{ font-family: {font}; font-size: {small}px; font-weight: 500; color: {rowfg}; }}
 .toptab.asleep .toptab-title {{ color: {faint}; }}
 .toptab.asleep .favicon, .toptab.asleep .rowmark {{ opacity: 0.55; }}
+.toptab.keep-awake {{ border-color: {accent}; }}
 .toptab.private.live {{ border-color: {fieldborder}; }}
 .toppin {{ border: 1px solid transparent; border-radius: {r_sm}px; background-color: transparent; min-width: 30px; min-height: 30px; }}
 .toppin:hover {{ background-color: {sidehover}; }}
 .toppin.live {{ background-color: {surface}; border-color: {divider}; box-shadow: {tabshadow}; }}
+.toppin.keep-awake, .pin.keep-awake {{ border-color: {accent}; }}
 .toppin.private.live, .pin.private.live {{ border-color: {fieldborder}; }}
 button.space-pill {{ background-color: transparent; border: 1px solid transparent; border-radius: {r_pill}px; padding: 2px 6px; min-height: 24px; color: {muted}; }}
 button.space-pill:hover {{ background-color: {hover}; }}
@@ -199,6 +201,8 @@ window.unfocused .control {{ opacity: 0.6; }}
 .row.private .row-subtitle {{ color: {accent}; }}
 .row.asleep .rowtitle {{ color: {faint}; }}
 .row.asleep .favicon, .row.asleep .rowmark {{ opacity: 0.55; }}
+.row.keep-awake {{ border-color: {divider}; }}
+.row.keep-awake .row-subtitle {{ color: {accent}; }}
 button.close, button.loupe {{ background-color: transparent; border: none; border-radius: {r_pill}px; box-shadow: none; padding: 2px; min-width: 0; min-height: 0; opacity: 0; color: {muted}; }}
 button.close.rowclose {{ opacity: 1; }}
 .pin:hover button.close {{ opacity: 1; }}
@@ -312,9 +316,9 @@ button.start-chip:active {{ background-color: {wash}; }}
 .panel-setting-row {{ padding: 10px 0; border-bottom: 1px solid {divider}; }}
 .panel-setting-row:last-child {{ border-bottom: none; }}
 .panel-appearance {{ padding: 4px 0 4px; }}
-.panel entry, .dlbar entry {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px; font-family: {font}; font-size: {body}px; color: {ink}; }}
-.panel entry:focus, .dlbar entry:focus {{ border-color: {fieldborder}; }}
-.panel entry text, .dlbar entry text {{ color: {ink}; font-family: {font}; font-size: {body}px; }}
+.panel entry, .dlbar entry, popover.browser-menu entry {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 6px 14px; font-family: {font}; font-size: {body}px; color: {ink}; }}
+.panel entry:focus, .dlbar entry:focus, popover.browser-menu entry:focus {{ border-color: {fieldborder}; }}
+.panel entry text, .dlbar entry text, popover.browser-menu entry text {{ color: {ink}; font-family: {font}; font-size: {body}px; }}
 .panel .panel-filter-box {{ background-color: {card}; border: 1px solid {divider}; border-radius: {r_pill}px; padding: 5px 12px; }}
 .panel .panel-filter-box.focused {{ border-color: {fieldborder}; }}
 .panel .panel-filter-icon {{ color: {muted}; }}

@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rill, a native browser for Linux</title>
+  <meta name="description" content="Rill is a native Linux web browser built with Rust, GTK 3, and WebKitGTK 4.1. Quiet defaults, vertical tabs, Spaces, and direct AppImage downloads.">
+  <meta id="theme-color-scheme" name="color-scheme" content="light">
+  <link rel="icon" type="image/svg+xml" href="assets/rill-icon.svg">
+  <link rel="icon" type="image/png" href="assets/rill-icon.png">
+  <script>
+    (function () {
+      try {
+        var theme = 'light';
+        var saved = localStorage.getItem('rill.site.theme');
+        if (saved === 'dark' || saved === 'light') {
+          theme = saved;
+        } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+          theme = 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', theme);
+        var meta = document.getElementById('theme-color-scheme');
+        if (meta) meta.setAttribute('content', theme);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header" id="top">
+    <div class="container header-inner">
+      <a class="brand" href="#top" aria-label="Rill home">
+        <img src="assets/rill-icon.svg" alt="" width="28" height="28">
+        <span>Rill</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#download">Download</a>
+        <a href="#showcase">Showcase</a>
+        <a href="#gallery">Gallery</a>
+        <a href="#limits">Limits</a>
+        <a href="#stickers">Stickers</a>
+      </nav>
+      <button
+        type="button"
+        id="theme-toggle"
+        class="theme-toggle"
+        aria-pressed="false"
+        aria-label="Switch to Warm charcoal dark theme"
+      >
+        <span class="theme-option" data-theme-opt="light" data-active="true"><span class="theme-swatch theme-swatch-light" aria-hidden="true"></span>Paper</span>
+        <span class="theme-option" data-theme-opt="dark" data-active="false"><span class="theme-swatch theme-swatch-dark" aria-hidden="true"></span>Charcoal</span>
+      </button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-heading">
+      <canvas id="rill-river-canvas" class="river-canvas" aria-hidden="true"></canvas>
+      <div class="container">
+        <div class="hero-copy">
+          <h1 id="hero-heading">A quiet browser for Linux.</h1>
+          <p class="hero-summary">
+            Written in Rust with GTK 3 and WebKitGTK. No Electron, no Chromium, no account.
+          </p>
+          <div class="hero-action">
+            <a class="btn-primary" href="#download">Download for Linux</a>
+            <p id="hero-release-summary" class="hero-release-meta">
+              <a class="link-quiet" href="https://github.com/INDAR-Beurre/Rill/releases/latest" rel="noopener noreferrer">View latest stable release on GitHub</a>
+            </p>
+          </div>
+        </div>
+
+        <figure class="hero-frame">
+          <img
+            id="hero-screenshot"
+            src="assets/settings-spaces.png"
+            data-light="assets/settings-spaces.png"
+            data-dark="assets/sidebar-dark.png"
+            alt="Rill browser window on Linux showing vertical tabs, pinned sites, and Spaces"
+            width="1200"
+            height="800"
+          >
+          <figcaption id="hero-caption" class="frame-caption">
+            Spaces and vertical tabs in Warm paper.
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section" id="download" aria-labelledby="download-heading">
+      <div class="container">
+        <div class="section-intro">
+          <h2 id="download-heading">Download Rill for Linux</h2>
+          <p>
+            Direct Linux builds from GitHub Releases, with SHA-256 verification.
+          </p>
+        </div>
+
+          <div class="download-panel" id="download-workbench">
+            <div class="panel-head">
+              <div>
+                <h3 id="release-title" class="release-title">Latest release</h3>
+                <p id="release-meta" class="muted-line">
+                  Checking GitHub for the latest stable build
+                </p>
+              </div>
+              <div class="panel-actions">
+                <button type="button" id="retry-release" class="btn-secondary">Refresh release</button>
+                <a id="release-notes-link" class="link-quiet" href="https://github.com/INDAR-Beurre/Rill/releases/latest" rel="noopener noreferrer" hidden>
+                  Release notes
+                </a>
+                <a class="link-quiet" href="https://github.com/INDAR-Beurre/Rill/releases" rel="noopener noreferrer">
+                  All releases
+                </a>
+              </div>
+            </div>
+
+            <div id="release-notice" class="notice-banner" role="status" aria-live="polite" hidden></div>
+
+            <div id="release-ready" hidden>
+              <div class="selector-grid">
+                <div class="field-group">
+                  <label id="arch-label" for="arch-select">Architecture</label>
+                  <div id="arch-select-wrap" class="select-wrap" hidden>
+                    <select id="arch-select"></select>
+                  </div>
+                  <div id="arch-readout" class="field-readout" aria-labelledby="arch-label"></div>
+                </div>
+                <div class="field-group">
+                  <label id="package-label" for="package-select">Package</label>
+                  <div id="package-select-wrap" class="select-wrap" hidden>
+                    <select id="package-select"></select>
+                  </div>
+                  <div id="package-readout" class="field-readout" aria-labelledby="package-label"></div>
+                </div>
+              </div>
+
+              <div class="availability-note">
+                <p id="availability-summary"></p>
+                <p id="requirements-headline" class="req-headline"></p>
+                <p id="requirements-detail" class="muted-line"></p>
+              </div>
+
+              <div class="asset-action-row">
+                <div class="asset-primary">
+                  <a id="download-link" class="btn-primary" href="https://github.com/INDAR-Beurre/Rill/releases/latest" rel="noopener noreferrer">
+                    Download package
+                  </a>
+                  <span id="asset-meta" class="tabular-meta"></span>
+                </div>
+                <div class="asset-checksums">
+                  <div class="sidecar-links">
+                    <a id="sidecar-link" class="link-quiet" href="https://github.com/INDAR-Beurre/Rill/releases/latest" rel="noopener noreferrer" hidden>
+                      Download .sha256 checksum
+                    </a>
+                    <a id="sig-link" class="link-quiet" href="https://github.com/INDAR-Beurre/Rill/releases/latest" rel="noopener noreferrer" hidden>
+                      External signature file (verify manually with gpg)
+                    </a>
+                  </div>
+                  <span id="digest-line" class="digest-text" hidden></span>
+                </div>
+              </div>
+
+              <div class="terminal-section">
+                <div class="terminal-header">
+                  <span id="terminal-title" class="terminal-title">Verify checksum and run locally</span>
+                  <button type="button" id="copy-commands" class="btn-secondary">Copy commands</button>
+                </div>
+                <pre tabindex="0" aria-label="Verification and install commands"><code id="install-commands"></code></pre>
+                <p id="commands-note" class="muted-line"></p>
+                <span id="copy-status" class="sr-only" aria-live="polite"></span>
+              </div>
+            </div>
+
+            <div id="release-fallback" class="fallback-box" hidden>
+              <p id="fallback-message"></p>
+              <p>
+                <a class="btn-primary" href="https://github.com/INDAR-Beurre/Rill/releases/latest" rel="noopener noreferrer">
+                  Open GitHub Releases
+                </a>
+              </p>
+            </div>
+
+            <noscript>
+              <div class="fallback-box">
+                <p>
+                  JavaScript is disabled, so automatic release detection cannot query GitHub here. Download verified Rill builds directly from the official releases page.
+                </p>
+                <p>
+                  <a class="btn-primary" href="https://github.com/INDAR-Beurre/Rill/releases/latest" rel="noopener noreferrer">
+                    Open GitHub Releases
+                  </a>
+                </p>
+              </div>
+            </noscript>
+
+            <details class="source-details">
+              <summary>Build from source instead</summary>
+              <div class="source-body">
+                <p>
+                  Requires current stable Rust (1.89 or newer for locked dependencies), GTK 3, WebKitGTK 4.1, and GStreamer media plugins. The Cargo package and executable remain named <code>search</code> for profile compatibility.
+                </p>
+                <pre tabindex="0" aria-label="Build from source commands"><code>CARGO_TARGET_DIR=target/rill cargo build --release --bin search
+./target/rill/release/search</code></pre>
+                <p>
+                  <a class="link-quiet" href="https://github.com/INDAR-Beurre/Rill#build-from-source" rel="noopener noreferrer">
+                    Read source build instructions in README
+                  </a>
+                </p>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-band" id="showcase" aria-labelledby="showcase-heading">
+        <div class="container">
+          <div class="section-intro">
+            <h2 id="showcase-heading">Built to stay out of the way</h2>
+            <p>
+              Start with Back, Forward, Reload, and the address field. Move tabs to a vertical sidebar, organize projects into Spaces, or tune every toolbar button when you want more control.
+            </p>
+          </div>
+
+          <div class="showcase-workbench">
+            <div class="showcase-controls">
+              <div class="view-tabs" role="tablist" aria-label="Rill interface views">
+                <button type="button" role="tab" class="view-tab" id="tab-welcome" aria-selected="true" aria-controls="showcase-tabpanel" tabindex="0" data-view="welcome">
+                Welcome
+                </button>
+                <button type="button" role="tab" class="view-tab" id="tab-shortcuts" aria-selected="false" aria-controls="showcase-tabpanel" tabindex="-1" data-view="shortcuts">
+                  Privacy &amp; shortcuts
+                </button>
+                <button type="button" role="tab" class="view-tab" id="tab-top-tabs" aria-selected="false" aria-controls="showcase-tabpanel" tabindex="-1" data-view="top-tabs">
+                  Top tabs
+                </button>
+              </div>
+
+              <div class="view-detail" id="showcase-detail">
+              <h3 id="showcase-view-title">Onboarding inside a real tab</h3>
+                <p id="showcase-view-desc">
+                  Configure your look, tab layout, and search engine right in the browser tab or skip straight in with one click and no modal.
+                </p>
+              </div>
+            </div>
+
+            <div id="showcase-tabpanel" class="showcase-panel" role="tabpanel" aria-labelledby="tab-welcome" tabindex="0">
+              <figure class="showcase-stage">
+                <img
+                  id="showcase-image"
+                  src="assets/introduction-light.png"
+                  alt="Rill welcome tab with Configure and Use defaults buttons"
+                  width="1200"
+                  height="800"
+                >
+                <figcaption id="showcase-caption" class="frame-caption">
+                Welcome tab in Warm paper.
+                </figcaption>
+              </figure>
+            </div>
+
+            <dl class="detail-ledger">
+              <div class="ledger-row">
+                <dt>Spaces and layout presets</dt>
+                <dd>Group tabs into persistent named Spaces inside one profile, and pick Minimal, Standard, or Full toolbar presets.</dd>
+              </div>
+              <div class="ledger-row">
+                <dt>Built-in blocking and omnibox</dt>
+              <dd>Compiles 15,775 bundled EasyList and EasyPrivacy rules inside WebKitGTK, plus <kbd>Ctrl+L</kbd> local search and <kbd>Ctrl+Shift+H</kbd> element hiding.</dd>
+              </div>
+              <div class="ledger-row">
+                <dt>Sleeping tabs</dt>
+                <dd>Idle tabs release their WebKit view after ten minutes unless playing audio, keeping multi-tab sessions light.</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="gallery" aria-labelledby="gallery-heading">
+        <div class="container">
+          <div class="section-intro">
+            <h2 id="gallery-heading">Inside Rill, screen by screen</h2>
+            <p>
+              Twenty captures from the native GTK 3 and WebKitGTK build across Warm paper and Warm charcoal. Select any screenshot to inspect it at full size.
+            </p>
+          </div>
+
+          <nav class="gallery-filters" aria-label="Screenshot categories">
+            <a class="gallery-filter" href="#gallery" data-filter="all" aria-current="true">All <span class="gallery-filter-count">20</span></a>
+            <a class="gallery-filter" href="#gallery-browsing" data-filter="browsing">Browsing &amp; menu <span class="gallery-filter-count">3</span></a>
+            <a class="gallery-filter" href="#gallery-tabs" data-filter="tabs">Tabs &amp; Spaces <span class="gallery-filter-count">6</span></a>
+            <a class="gallery-filter" href="#gallery-omnibox" data-filter="omnibox">Omnibox <span class="gallery-filter-count">2</span></a>
+            <a class="gallery-filter" href="#gallery-settings" data-filter="settings">Settings <span class="gallery-filter-count">3</span></a>
+            <a class="gallery-filter" href="#gallery-onboarding" data-filter="onboarding">Onboarding <span class="gallery-filter-count">6</span></a>
+          </nav>
+          <p id="gallery-status" class="sr-only" aria-live="polite"></p>
+
+          <div class="gallery-groups">
+            <div class="gallery-group is-first-visible" id="gallery-browsing" data-group="browsing" data-group-label="Browsing, menu, and start page">
+              <div class="gallery-group-head">
+                <h3>Browsing, menu, and start page</h3>
+                <p>Live Wikipedia browsing with the full browser menu, plus Warm paper and Warm charcoal start pages.</p>
+              </div>
+              <div class="gallery-grid">
+                <figure class="gallery-figure gallery-figure-wide">
+                  <a class="gallery-shot" href="assets/menu-page.png" data-gallery-shot>
+                    <img
+                      src="assets/menu-page.png"
+                      alt="Rill showing the Linux article on Wikipedia with top tabs, bookmarks bar, and the browser menu open to Zoom, Reading Mode, Blocker Off Here, History, Downloads, and Settings"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Active page and browser menu</span>
+                      <span class="gallery-caption-meta">Warm paper</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Top tabs, bookmarks bar, and the full menu over Wikipedia: zoom controls, Reading Mode (<kbd>Ctrl+Shift+R</kbd>), per-site blocker toggle, and sidebar switching.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/start-light.png" data-gallery-shot>
+                    <img
+                      src="assets/start-light.png"
+                      alt="Rill start page in Warm paper light theme with top tabs, browser window controls, centered search bar, and six saved site shortcuts over the Bayer wave"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Start page in Warm paper</span>
+                      <span class="gallery-caption-meta">Light theme</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Centered search bar and six saved site shortcuts over Rill's Bayer dithered wave, using compact browser-drawn window controls.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/start-dark.png" data-gallery-shot>
+                    <img
+                      src="assets/start-dark.png"
+                      alt="Rill start page in Warm charcoal dark theme with top tabs, dark address field, and six shortcut chips over the dark Bayer wave"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Start page in Warm charcoal</span>
+                      <span class="gallery-caption-meta">Dark theme</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Low-glare charcoal surface with matched GTK tab strip, address bar, and shortcut chips across the same start-page layout.
+                    </p>
+                  </figcaption>
+                </figure>
+              </div>
+            </div>
+
+            <div class="gallery-group" id="gallery-tabs" data-group="tabs" data-group-label="Vertical sidebar, top tabs, and Spaces">
+              <div class="gallery-group-head">
+                <h3>Vertical sidebar, top tabs, and Spaces</h3>
+                <p>Compare Warm paper and Warm charcoal across vertical tabs, horizontal top tabs, pinned sites, and compact 900px windows.</p>
+              </div>
+              <div class="gallery-grid">
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/sidebar-light.png" data-gallery-shot>
+                    <img
+                      src="assets/sidebar-light.png"
+                      alt="Rill vertical tab sidebar in Warm paper showing three pinned favicons at the top, open tabs, and Space indicator dots at the bottom"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Vertical sidebar and Spaces</span>
+                      <span class="gallery-caption-meta">Warm paper</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Pinned site icons sit at the top of the left rail, tabs stack cleanly below, and Space switcher dots anchor the bottom edge.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/sidebar-dark.png" data-gallery-shot>
+                    <img
+                      src="assets/sidebar-dark.png"
+                      alt="Rill vertical tab sidebar in Warm charcoal dark theme showing pinned favicons, vertical tab list, and Space switcher dots"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Vertical sidebar and Spaces</span>
+                      <span class="gallery-caption-meta">Warm charcoal</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      The vertical tab column, pinned icons, and bottom Space controls paired with the Warm charcoal start page.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/top-tabs-light.png" data-gallery-shot>
+                    <img
+                      src="assets/top-tabs-light.png"
+                      alt="Rill horizontal top tabs in Warm paper showing the Work Space dropdown, three pinned favicons, and the start page"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Top tabs with Work Space</span>
+                      <span class="gallery-caption-meta">Warm paper</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Switching to top tabs keeps the active Space menu and pinned site favicons compactly aligned on the left side of the tab bar.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/top-tabs-dark.png" data-gallery-shot>
+                    <img
+                      src="assets/top-tabs-dark.png"
+                      alt="Rill horizontal top tabs in Warm charcoal showing the Work Space dropdown, pinned favicons, and dark start page"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Top tabs with Work Space</span>
+                      <span class="gallery-caption-meta">Warm charcoal</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Horizontal tab layout in dark mode with the same Space selector, pinned sites, and quiet chrome.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/start-icons-only-dark.png" data-gallery-shot>
+                    <img
+                      src="assets/start-icons-only-dark.png"
+                      alt="Rill in a 900px dark window with top tabs and six icon-only start-page shortcuts arranged in a single row"
+                      width="900"
+                      height="760"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Icon-only start page at 900px</span>
+                      <span class="gallery-caption-meta">Top tabs, Charcoal</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Start-page shortcuts can switch from labeled chips to circular icons, keeping six saved sites on one line in narrower windows.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/sidebar-icons-only-dark.png" data-gallery-shot>
+                    <img
+                      src="assets/sidebar-icons-only-dark.png"
+                      alt="Rill in a 900px dark window with vertical tab sidebar, Space dots, and icon-only start-page shortcuts"
+                      width="900"
+                      height="700"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Vertical sidebar at 900px</span>
+                      <span class="gallery-caption-meta">Sidebar, Charcoal</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Sidebar navigation paired with icon-only shortcuts on a smaller 900px screen without crowding the address bar or page area.
+                    </p>
+                  </figcaption>
+                </figure>
+              </div>
+            </div>
+
+            <div class="gallery-group" id="gallery-omnibox" data-group="omnibox" data-group-label="Omnibox and quick switching">
+              <div class="gallery-group-head">
+                <h3>Omnibox and quick switching</h3>
+                <p>Press <kbd>Ctrl+L</kbd> to jump straight to open tabs, bookmarks, or your chosen search engine without touching the mouse.</p>
+              </div>
+              <div class="gallery-grid">
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/omnibox-search.png" data-gallery-shot>
+                    <img
+                      src="assets/omnibox-search.png"
+                      alt="Rill Ctrl+L omnibox querying arch and grouping results into Open tabs, Startpage search, Bookmark, and opt-in Suggestions"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Unified Ctrl+L omnibox</span>
+                      <span class="gallery-caption-meta">Tabs, bookmarks, search</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Typing <code>arch</code> surfaces the open ArchWiki tab to switch immediately, followed by Startpage search, bookmarks, and opt-in suggestions.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/omnibox-spaces-switch.png" data-gallery-shot>
+                    <img
+                      src="assets/omnibox-spaces-switch.png"
+                      alt="Rill omnibox inside the Work Space matching rust to the open Rust Programming Language tab with Tab complete and Enter switch hints"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Space-aware tab switching</span>
+                      <span class="gallery-caption-meta">Work Space</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Inside the Work Space, querying <code>rust</code> ranks the open <code>rust-lang.org</code> tab first with keyboard hints for <kbd>Tab</kbd> completion and <kbd>Enter</kbd> to switch.
+                    </p>
+                  </figcaption>
+                </figure>
+              </div>
+            </div>
+
+            <div class="gallery-group" id="gallery-settings" data-group="settings" data-group-label="Native GTK settings">
+              <div class="gallery-group-head">
+                <h3>Native GTK settings</h3>
+                <p>One searchable overlay for appearance, toolbar visibility, Spaces, history, bookmarks, downloads, extensions, and keyboard shortcuts.</p>
+              </div>
+              <div class="gallery-grid">
+                <figure class="gallery-figure gallery-figure-wide">
+                  <a class="gallery-shot" href="assets/settings-appearance.png" data-gallery-shot>
+                    <img
+                      src="assets/settings-appearance.png"
+                      alt="Rill Settings Appearance panel showing Light, Dark, and System theme previews, Homepage shortcuts dropdown, and Window controls options"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Appearance and window controls</span>
+                      <span class="gallery-caption-meta">Settings</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Switch between Light, Dark, and System themes, choose how start-page bookmarks appear, and pick System, Browser, or Hidden window controls for tiling window managers.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/settings-toolbar.png" data-gallery-shot>
+                    <img
+                      src="assets/settings-toolbar.png"
+                      alt="Rill Settings Toolbar and layout panel with individual switches for navigation bar, Back and Forward, Reload, Home button, and tab sidebar"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Toolbar and layout switches</span>
+                      <span class="gallery-caption-meta">Settings</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Show or hide the navigation bar, Back/Forward, Reload, Home button, and tab sidebar individually while keeping every action reachable via shortcuts and the menu.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/settings-spaces.png" data-gallery-shot>
+                    <img
+                      src="assets/settings-spaces.png"
+                      alt="Rill Settings Spaces panel inside the vertical sidebar layout showing Create space, Rename, Switch, and Delete controls"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Spaces management</span>
+                      <span class="gallery-caption-meta">Settings</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Create, rename, switch, and delete named Spaces with direct search inside Settings and a plain statement that Spaces share profile cookies and history.
+                    </p>
+                  </figcaption>
+                </figure>
+              </div>
+            </div>
+
+            <div class="gallery-group" id="gallery-onboarding" data-group="onboarding" data-group-label="In-tab onboarding">
+              <div class="gallery-group-head">
+                <h3>In-tab onboarding</h3>
+                <p>First launch opens inside a real browser tab with live previews and one-click defaults—no modal wizard locking the window.</p>
+              </div>
+              <div class="gallery-grid">
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/introduction-light.png" data-gallery-shot>
+                    <img
+                      src="assets/introduction-light.png"
+                      alt="Rill first-run Welcome tab in Warm paper showing Configure and Use defaults buttons beside the terracotta Bayer river contour"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Welcome tab</span>
+                      <span class="gallery-caption-meta">Warm paper</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Configure appearance, tabs, and search right away, or click Use defaults (or press <kbd>Esc</kbd>) to start browsing immediately.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/introduction-dark.png" data-gallery-shot>
+                    <img
+                      src="assets/introduction-dark.png"
+                      alt="Rill first-run Welcome tab in Warm charcoal dark theme with Configure and Use defaults buttons"
+                      width="1200"
+                      height="800"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Welcome tab</span>
+                      <span class="gallery-caption-meta">Warm charcoal</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      The same first-run welcome screen matched to a dark desktop palette, paired with the terracotta dithered contour.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/setup-appearance-light.png" data-gallery-shot>
+                    <img
+                      src="assets/setup-appearance-light.png"
+                      alt="Rill setup Step 1 of 3 for Appearance and layout with System, Light, and Dark options and Top tabs or Sidebar choices"
+                      width="1280"
+                      height="860"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Step 1: Appearance and layout</span>
+                      <span class="gallery-caption-meta">Setup</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Choose System, Light, or Dark appearance and Top tabs or vertical Sidebar; choices preview live before anything is saved.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/setup-search-light.png" data-gallery-shot>
+                    <img
+                      src="assets/setup-search-light.png"
+                      alt="Rill setup Step 2 of 3 for Default search engine showing Startpage selected alongside Ecosia, DuckDuckGo, Google, Bing, and Brave"
+                      width="1280"
+                      height="860"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Step 2: Default search engine</span>
+                      <span class="gallery-caption-meta">Setup</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Startpage is selected by default alongside Ecosia, DuckDuckGo, Google, Bing, and Brave, with no hidden partner redirects.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/setup-shortcuts-light.png" data-gallery-shot>
+                    <img
+                      src="assets/setup-shortcuts-light.png"
+                      alt="Rill setup Step 3 of 3 for Privacy and shortcuts in Warm paper showing the Live search suggestions toggle and optional starter sites"
+                      width="1280"
+                      height="860"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Step 3: Privacy and shortcuts</span>
+                      <span class="gallery-caption-meta">Warm paper</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Live search suggestions stay under an explicit switch (never sent in private tabs or for typed URLs), and starter sites load icons only if selected.
+                    </p>
+                  </figcaption>
+                </figure>
+
+                <figure class="gallery-figure">
+                  <a class="gallery-shot" href="assets/setup-shortcuts-dark.png" data-gallery-shot>
+                    <img
+                      src="assets/setup-shortcuts-dark.png"
+                      alt="Rill setup Step 3 of 3 for Privacy and shortcuts in Warm charcoal dark theme"
+                      width="1280"
+                      height="860"
+                      loading="lazy"
+                      decoding="async"
+                    >
+                  </a>
+                  <figcaption class="gallery-caption">
+                    <div class="gallery-caption-head">
+                      <span class="gallery-caption-title">Step 3: Privacy and shortcuts</span>
+                      <span class="gallery-caption-meta">Warm charcoal</span>
+                    </div>
+                    <p class="gallery-caption-desc">
+                      Step 3 rendered in Warm charcoal, ready to finish setup or return to earlier steps at any time.
+                    </p>
+                  </figcaption>
+                </figure>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="limits" aria-labelledby="limits-heading">
+        <div class="container">
+          <div class="limits-layout">
+            <div class="section-intro">
+              <h2 id="limits-heading">Honest limits before you switch</h2>
+              <p>
+                Rill is not a Chromium fork. Reading what it leaves out will save you time before moving a workflow over.
+              </p>
+            </div>
+
+            <dl class="limits-grid">
+              <div class="limit-item">
+                <dt>Extensions and password managers</dt>
+                <dd>
+                  WebKitGTK does not provide WebExtensions background workers, <code>chrome.*</code> messaging, or <code>nativeMessaging</code>. Pure content-script add-ons can load, while Bitwarden, 1Password, and popup-driven extensions do not work.
+                </dd>
+              </div>
+              <div class="limit-item">
+                <dt>No accounts, sync, or DRM</dt>
+                <dd>
+                  Rill has no cloud sync, passkey integration, multi-window mode, or DRM/EME video decryption. Local bookmarks and history can be imported from Firefox, Chromium, Chrome, Brave, Edge, and Vivaldi.
+                </dd>
+              </div>
+              <div class="limit-item">
+                <dt>Memory footprint and media codecs</dt>
+                <dd>
+                  WebKitGTK separates UI, web content, and network processes, so memory stays well above a minimal single-process target and varies widely across real websites; running as an AppImage adds runtime extraction overhead too. Video playback relies on system <code>gst-plugins-good</code> and <code>gst-libav</code>.
+                </dd>
+              </div>
+              <div class="limit-item">
+                <dt>Distribution and desktop coverage</dt>
+                <dd>
+                  Tested on X11 Openbox and Wayland Sway. KDE/KWin, Hyprland, and Omarchy are untested. Check the download section above for each release's minimum Linux and glibc requirements.
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-band" id="stickers" aria-labelledby="stickers-heading">
+        <div class="container">
+          <div class="sticker-layout">
+            <div class="sticker-copy">
+              <h2 id="stickers-heading">Brand marks and vector sticker sheet</h2>
+              <p>
+                Built directly from Rill's orbital application icon, warm paper and charcoal palette, and keyboard shortcuts. Download the crisp SVG sheet for local badges or prints.
+              </p>
+              <p class="sticker-action">
+                <a class="btn-secondary" href="assets/rill-sticker-sheet.svg" download="rill-sticker-sheet.svg">
+                  Download SVG sticker sheet
+                </a>
+              </p>
+            </div>
+            <figure class="sticker-preview">
+              <img
+                src="assets/rill-sticker-sheet.svg"
+                alt="Vector sticker sheet featuring the Rill orbital icon, warm paper emblem, wordmark stamp, Ctrl+S shortcut keycap, Bayer wave card, and typographic seal"
+                width="960"
+                height="540"
+              >
+            </figure>
+          </div>
+        </div>
+      </section>
+    </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/rill-icon.svg" alt="" width="22" height="22">
+        <span>Rill for Linux</span>
+        <span class="footer-sep" aria-hidden="true">/</span>
+        <span>MIT License</span>
+      </div>
+      <ul class="footer-links">
+        <li><a href="https://github.com/INDAR-Beurre/Rill" rel="noopener noreferrer">Repository</a></li>
+        <li><a href="https://github.com/INDAR-Beurre/Rill/releases" rel="noopener noreferrer">Releases</a></li>
+        <li><a href="https://github.com/INDAR-Beurre/Rill/blob/main/docs/ARCHITECTURE.md" rel="noopener noreferrer">Architecture</a></li>
+        <li><a href="https://github.com/INDAR-Beurre/Rill/blob/main/docs/EXTENSIONS.md" rel="noopener noreferrer">Extensions</a></li>
+        <li><a href="https://github.com/INDAR-Beurre/Rill/blob/main/docs/TESTING.md" rel="noopener noreferrer">Testing</a></li>
+      </ul>
+    </div>
+  </footer>
+
+  <dialog id="gallery-lightbox" class="lightbox" aria-labelledby="lightbox-title" aria-describedby="lightbox-desc">
+    <div class="lightbox-surface">
+      <div class="lightbox-bar">
+        <div class="lightbox-bar-meta">
+          <span id="lightbox-group" class="lightbox-group"></span>
+          <span id="lightbox-counter" class="tabular-meta"></span>
+        </div>
+        <div class="lightbox-bar-actions">
+          <a id="lightbox-raw-link" class="link-quiet" href="assets/menu-page.png" target="_blank" rel="noopener noreferrer">Open full PNG</a>
+          <button type="button" id="lightbox-close" class="btn-secondary">Close</button>
+        </div>
+      </div>
+      <div id="lightbox-stage" class="lightbox-stage"></div>
+      <div class="lightbox-footer">
+        <div class="lightbox-copy">
+          <h3 id="lightbox-title" class="lightbox-title"></h3>
+          <p id="lightbox-desc" class="lightbox-desc"></p>
+        </div>
+        <div class="lightbox-nav">
+          <button type="button" id="lightbox-prev" class="btn-secondary" aria-label="Previous screenshot">Previous</button>
+          <button type="button" id="lightbox-next" class="btn-secondary" aria-label="Next screenshot">Next</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

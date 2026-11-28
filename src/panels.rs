@@ -113,6 +113,122 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     static PROFILE_CHOOSERS: std::cell::RefCell<Vec<gtk::FileChooserNative>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static BOOKMARK_CHOOSERS: std::cell::RefCell<Vec<gtk::FileChooserNative>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static HISTORY_CHOOSERS: std::cell::RefCell<Vec<gtk::FileChooserNative>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// L12: one undo slot, held in memory only. A removal records the exact
+// index; another edit clears it so undo cannot resurrect stale state.
+thread_local! {
+    static BOOKMARK_UNDO: std::cell::RefCell<Option<(crate::store::Bookmark, usize)>> =
+        const { std::cell::RefCell::new(None) };
+    static USED_BOOKMARK_UNDO_URLS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+pub fn clear_bookmark_undo() {
+    BOOKMARK_UNDO.with(|slot| *slot.borrow_mut() = None);
+    USED_BOOKMARK_UNDO_URLS.with(|used| used.borrow_mut().clear());
+}
+
+fn remember_bookmark_removal(bookmark: crate::store::Bookmark, index: usize) {
+    let already_used = USED_BOOKMARK_UNDO_URLS.with(|used| used.borrow().contains(&bookmark.url));
+    BOOKMARK_UNDO.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if already_used || slot.as_ref().is_some_and(|(kept, _)| kept.url == bookmark.url) {
+            *slot = None;
+            return;
+        }
+        *slot = Some((bookmark, index));
+    });
+}
+
+fn take_bookmark_undo() -> Option<(crate::store::Bookmark, usize)> {
+    let taken = BOOKMARK_UNDO.with(|slot| slot.borrow_mut().take());
+    if let Some((ref bookmark, _)) = taken {
+        USED_BOOKMARK_UNDO_URLS.with(|used| {
+            used.borrow_mut().insert(bookmark.url.clone());
+        });
+    }
+    taken
+}
+
+fn restore_bookmark_if_unique(
+    bookmarks: &mut Vec<crate::store::Bookmark>,
+    bookmark: crate::store::Bookmark,
+    index: usize,
+) -> bool {
+    let key = crate::tab_actions::duplicate_url_key(&bookmark.url);
+    if bookmarks.iter().any(|existing| crate::tab_actions::duplicate_url_key(&existing.url) == key) {
+        return false;
+    }
+    let at = index.min(bookmarks.len());
+    bookmarks.insert(at, bookmark);
+    true
+}
+
+fn row_enter_triggers_primary_action(key_name: &str, shift_held: bool) -> bool {
+    (key_name == "Return" || key_name == "KP_Enter") && !shift_held
+}
+
+#[cfg(test)]
+mod bookmark_undo_tests {
+    use super::*;
+
+    fn bookmark(url: &str) -> crate::store::Bookmark {
+        crate::store::Bookmark { url: url.to_string(), title: url.to_string(), folder: String::new() }
+    }
+
+    #[test]
+    fn remove_undo_remove_never_keeps_a_stale_duplicate() {
+        clear_bookmark_undo();
+        remember_bookmark_removal(bookmark("https://one.example/"), 0);
+        let restored = take_bookmark_undo().expect("first undo slot");
+        assert_eq!(restored.0.url, "https://one.example/");
+
+        remember_bookmark_removal(bookmark("https://two.example/"), 1);
+        let second = take_bookmark_undo().expect("second undo slot");
+        assert_eq!(second.0.url, "https://two.example/");
+        assert!(take_bookmark_undo().is_none(), "undo slots are consumed once");
+        clear_bookmark_undo();
+    }
+
+    #[test]
+    fn removing_an_already_restored_bookmark_does_not_store_stale_undo() {
+        clear_bookmark_undo();
+        remember_bookmark_removal(bookmark("https://one.example/"), 0);
+        let restored = take_bookmark_undo().expect("undo slot");
+        remember_bookmark_removal(restored.0.clone(), restored.1);
+        assert!(take_bookmark_undo().is_none(), "stale duplicate is not offered for undo");
+        clear_bookmark_undo();
+    }
+
+    #[test]
+    fn restore_skips_when_duplicate_url_exists() {
+        let mut bookmarks = vec![
+            bookmark("https://alpha.example:443/page"),
+            bookmark("https://beta.example/"),
+        ];
+        let duplicate = bookmark("https://user:pass@ALPHA.EXAMPLE/page#");
+        assert!(!restore_bookmark_if_unique(&mut bookmarks, duplicate, 0));
+        assert_eq!(bookmarks.len(), 2);
+
+        let fresh = bookmark("https://gamma.example/");
+        assert!(restore_bookmark_if_unique(&mut bookmarks, fresh, 1));
+        assert_eq!(bookmarks.len(), 3);
+        assert_eq!(bookmarks[1].url, "https://gamma.example/");
+    }
+
+    #[test]
+    fn row_enter_ignores_shift_return_for_more_menu() {
+        assert!(row_enter_triggers_primary_action("Return", false));
+        assert!(row_enter_triggers_primary_action("KP_Enter", false));
+        assert!(!row_enter_triggers_primary_action("Return", true));
+        assert!(!row_enter_triggers_primary_action("KP_Enter", true));
+        assert!(!row_enter_triggers_primary_action("space", false));
+    }
 }
 
 /// Card width clamped to the page viewport width so narrow windows never overflow.
@@ -134,6 +250,8 @@ pub fn shortcut_section(what: &str) -> &'static str {
         | "Duplicate this tab"
         | "Move tab left"
         | "Move tab right"
+        | "Next space"
+        | "Previous space"
         | "Show or hide the tab sidebar"
         | "Fold the tab column to a strip, or open it" => "Tabs",
         "Back"
@@ -922,6 +1040,13 @@ impl Panels {
         filter.is_empty() || text.to_lowercase().contains(filter.as_str())
     }
 
+    /// L15: folder names participate in bookmark search without changing the
+    /// history/downloads search behaviour.
+    fn matches_bookmark(&self, bookmark: &crate::store::Bookmark) -> bool {
+        let filter = self.filter.borrow();
+        crate::store::bookmark_matches_query(bookmark, &filter)
+    }
+
     pub fn open_panel(&mut self, app: &AppRef, kind: PanelKind) {
         *self.filter.borrow_mut() = String::new();
         self.open_panel_with(app, kind);
@@ -1560,14 +1685,16 @@ impl Panels {
             // A blank tab has no address, so add_bookmark would do nothing.
             // Turn the button off and say why, instead of letting a click fail
             // without a word.
-            let has_page = !app
+            let (has_page, is_private) = app
                 .state
                 .borrow()
                 .tab(app.active_id())
-                .map(|tab| tab.url.is_empty())
-                .unwrap_or(true);
-            keep.set_sensitive(has_page);
-            keep.set_tooltip_text(Some(if has_page {
+                .map(|tab| (!tab.url.is_empty(), tab.private))
+                .unwrap_or((false, false));
+            keep.set_sensitive(has_page && !is_private);
+            keep.set_tooltip_text(Some(if is_private {
+                "Private tabs cannot be bookmarked"
+            } else if has_page {
                 "Bookmark the current page · Ctrl D"
             } else {
                 "Open a page first, then bookmark it · Ctrl D"
@@ -1585,6 +1712,22 @@ impl Panels {
             crate::ui::class(&keycap, "keycap");
             keycap.set_valign(gtk::Align::Center);
             tip.pack_start(&keycap, false, false, 0);
+            let import_empty = gtk::Button::with_label("Import HTML\u{2026}");
+            crate::ui::class(&import_empty, "act");
+            import_empty.set_can_focus(true);
+            import_empty.set_tooltip_text(Some("Import bookmarks from an HTML file"));
+            if let Some(access) = import_empty.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, "Import bookmarks HTML");
+            }
+            {
+                let weak = app.weak();
+                import_empty.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        open_bookmarks_import_chooser(&app);
+                    }
+                });
+            }
+            tip.pack_start(&import_empty, false, false, 0);
             empty.pack_start(&tip, false, true, 0);
             self.body.add(&empty);
             self.body.show_all();
@@ -1598,24 +1741,139 @@ impl Panels {
             }
         });
         self.body.add(&filter_box);
+        let organize = gtk::FlowBox::new();
+        organize.set_selection_mode(gtk::SelectionMode::None);
+        organize.set_homogeneous(false);
+        organize.set_row_spacing(6);
+        organize.set_column_spacing(6);
+        organize.set_min_children_per_line(1);
+        organize.set_max_children_per_line(6);
+        crate::ui::class(&organize, "panel-action-bar");
+        let undo = gtk::Button::with_label("Undo removal");
+        crate::ui::class(&undo, "act");
+        undo.set_can_focus(true);
+        undo.set_sensitive(BOOKMARK_UNDO.with(|slot| slot.borrow().is_some()));
+        {
+            let weak = app.weak();
+            undo.connect_clicked(move |_| {
+                let Some((bookmark, index)) = take_bookmark_undo() else { return };
+                let Some(app) = weak.upgrade() else { return };
+                let restored = {
+                    let mut state = app.state.borrow_mut();
+                    let inserted = restore_bookmark_if_unique(&mut state.bookmarks, bookmark, index);
+                    if inserted {
+                        Records::save_bookmarks(&state.bookmarks);
+                    }
+                    inserted
+                };
+                if restored {
+                    app.flash_toast("Restored bookmark to its original position");
+                } else {
+                    app.flash_toast("Bookmark is already saved");
+                }
+                app.toggle_panel_switch(PanelKind::Bookmarks);
+            });
+        }
+        let sort_title = gtk::Button::with_label("Sort by title");
+        crate::ui::class(&sort_title, "act");
+        sort_title.set_can_focus(true);
+        sort_title.set_tooltip_text(Some("Stable case-insensitive title order · L05"));
+        {
+            let weak = app.weak();
+            sort_title.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    clear_bookmark_undo();
+                    let mut state = app.state.borrow_mut();
+                    state.bookmarks.sort_by_key(|b| crate::store::bookmark_sort_key(b, false));
+                    Records::save_bookmarks(&state.bookmarks);
+                    drop(state);
+                    app.render();
+                    app.toggle_panel_switch(PanelKind::Bookmarks);
+                }
+            });
+        }
+        let sort_site = gtk::Button::with_label("Sort by site");
+        crate::ui::class(&sort_site, "act");
+        sort_site.set_can_focus(true);
+        sort_site.set_tooltip_text(Some("Group by hostname, then title · L06"));
+        {
+            let weak = app.weak();
+            sort_site.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    clear_bookmark_undo();
+                    let mut state = app.state.borrow_mut();
+                    state.bookmarks.sort_by_key(|b| crate::store::bookmark_sort_key(b, true));
+                    Records::save_bookmarks(&state.bookmarks);
+                    drop(state);
+                    app.render();
+                    app.toggle_panel_switch(PanelKind::Bookmarks);
+                }
+            });
+        }
+        let export_bookmarks = gtk::Button::with_label("Export HTML\u{2026}");
+        crate::ui::class(&export_bookmarks, "act");
+        export_bookmarks.set_can_focus(true);
+        export_bookmarks.set_tooltip_text(Some("Export bookmarks as an HTML file"));
+        if let Some(access) = export_bookmarks.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Export bookmarks as HTML");
+        }
+        {
+            let weak = app.weak();
+            export_bookmarks.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_bookmarks_export_chooser(&app);
+                }
+            });
+        }
+        let import_bookmarks = gtk::Button::with_label("Import HTML\u{2026}");
+        crate::ui::class(&import_bookmarks, "act");
+        import_bookmarks.set_can_focus(true);
+        import_bookmarks.set_tooltip_text(Some("Import bookmarks from an HTML file"));
+        if let Some(access) = import_bookmarks.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, "Import bookmarks HTML");
+        }
+        {
+            let weak = app.weak();
+            import_bookmarks.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_bookmarks_import_chooser(&app);
+                }
+            });
+        }
+        for button in [&undo, &sort_title, &sort_site, &export_bookmarks, &import_bookmarks] {
+            organize.insert(button, -1);
+            if let Some(child) = button.parent().and_then(|p| p.downcast::<gtk::FlowBoxChild>().ok()) {
+                child.set_can_focus(false);
+            }
+        }
+        self.body.add(&organize);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
         list.set_margin_end(10);
         let mut shown = 0;
-        for bookmark in bookmarks.into_iter().filter(|bookmark| self.matches(&format!("{} {}", bookmark.title, bookmark.url))) {
+        for (bookmark_index, bookmark) in bookmarks
+            .into_iter()
+            .enumerate()
+            .filter(|(_, bookmark)| self.matches_bookmark(bookmark))
+        {
             shown += 1;
-            let remove_url = bookmark.url.clone();
+            let bookmark_url = bookmark.url.clone();
             let row = self.row_with(app, &bookmark.title, &bookmark.url, "Open", {
                 let url = bookmark.url.clone();
                 move |app: &AppRef| app.navigate_active(&url)
             }, Some(("Remove", Box::new(move |app: &AppRef| {
                 {
                     let mut state = app.state.borrow_mut();
-                    state.bookmarks.retain(|kept| kept.url != remove_url);
+                    if let Some(index) = state.bookmarks.iter().position(|kept| kept.url == bookmark_url) {
+                        let removed = state.bookmarks.remove(index);
+                        remember_bookmark_removal(removed, index);
+                    }
                     Records::save_bookmarks(&state.bookmarks);
                 }
+                app.render_bmarks();
                 app.toggle_panel_switch(PanelKind::Bookmarks);
             }))));
+            Self::add_bookmark_row_actions(app, &row, bookmark.clone(), bookmark_index);
             if let Some(surface) = app.favicon_for_url(&bookmark.url) {
                 if let Some(tile) = row
                     .child()
@@ -1649,6 +1907,150 @@ impl Panels {
         self.body.add(&self.body_scroll(&list));
         self.body.show_all();
         Some(filter)
+    }
+
+    /// L01-L04, L09-L11, L14: compact row menu. One button per row keeps the
+    /// panel usable at 900x560; each action is a real, focusable button.
+    fn add_bookmark_row_actions(
+        app: &AppRef,
+        row: &gtk::EventBox,
+        bookmark: crate::store::Bookmark,
+        position: usize,
+    ) {
+        let Some(hbox) = row.child().and_then(|c| c.downcast::<gtk::Box>().ok()) else { return };
+        let Some(actions) = hbox.children().into_iter().find_map(|child| {
+            child.downcast::<gtk::Box>().ok().filter(|box_| box_.style_context().has_class("panel-row-actions"))
+        }) else { return };
+        let menu_button = gtk::MenuButton::new();
+        crate::ui::class(&menu_button, "act");
+        menu_button.set_label("More");
+        menu_button.set_can_focus(true);
+        menu_button.set_valign(gtk::Align::Center);
+        menu_button.set_tooltip_text(Some("Bookmark actions · Shift+Return"));
+        if let Some(access) = menu_button.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&access, &format!("Bookmark actions for {}", bookmark.title));
+        }
+        let menu = gtk::Menu::new();
+        let add_item = |label: &str, name: &str, action: std::rc::Rc<dyn Fn()>| {
+            let item = gtk::MenuItem::with_label(label);
+            if let Some(access) = item.accessible() {
+                gtk::atk::prelude::AtkObjectExt::set_name(&access, name);
+            }
+            item.connect_activate(move |_| action());
+            menu.append(&item);
+            item
+        };
+        let weak = app.weak();
+        let url = bookmark.url.clone();
+        add_item("Open in background tab", "Open bookmark in a background tab", std::rc::Rc::new(move || {
+            if let Some(app) = weak.upgrade() {
+                if let Some(safe) = crate::store::safe_bookmark_url(&url) {
+                    app.new_tab(Some(&safe), false, true);
+                } else {
+                    app.flash_error("Only http:// and https:// bookmark addresses can be opened");
+                }
+            }
+        }));
+        let weak = app.weak();
+        let url = bookmark.url.clone();
+        add_item("Open privately", "Open bookmark in a private tab", std::rc::Rc::new(move || {
+            if let Some(app) = weak.upgrade() {
+                if let Some(safe) = crate::store::safe_bookmark_url(&url) {
+                    app.new_tab(Some(&safe), true, false);
+                } else {
+                    app.flash_error("Only http:// and https:// bookmark addresses can be opened");
+                }
+            }
+        }));
+        let weak = app.weak();
+        let url = bookmark.url.clone();
+        add_item("Copy address", "Copy bookmark address", std::rc::Rc::new(move || {
+            if let Some(safe) = crate::store::safe_bookmark_url(&url) {
+                gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(&safe);
+            } else if let Some(app) = weak.upgrade() {
+                app.flash_error("Only http:// and https:// bookmark addresses can be copied");
+            }
+        }));
+        let weak = app.weak();
+        let index = position;
+        let url = bookmark.url.clone();
+        add_item("Edit title…", "Edit bookmark title", std::rc::Rc::new(move || {
+            if let Some(app) = weak.upgrade() {
+                open_bookmark_edit_dialog(&app, &url, index, true);
+            }
+        }));
+        let weak = app.weak();
+        let url = bookmark.url.clone();
+        add_item("Edit address…", "Edit bookmark address", std::rc::Rc::new(move || {
+            if let Some(app) = weak.upgrade() {
+                open_bookmark_edit_dialog(&app, &url, index, false);
+            }
+        }));
+        let weak = app.weak();
+        let url = bookmark.url.clone();
+        let move_up = add_item("Move up", "Move bookmark up", std::rc::Rc::new(move || {
+            if let Some(app) = weak.upgrade() {
+                app.move_bookmark(&url, -1);
+                app.toggle_panel_switch(PanelKind::Bookmarks);
+            }
+        }));
+        move_up.set_sensitive(position > 0);
+        move_up.set_tooltip_text(Some(if position == 0 {
+            "Already at the first bookmark"
+        } else {
+            "Move bookmark up"
+        }));
+        let weak = app.weak();
+        let url = bookmark.url.clone();
+        let move_down = add_item("Move down", "Move bookmark down", std::rc::Rc::new(move || {
+            if let Some(app) = weak.upgrade() {
+                app.move_bookmark(&url, 1);
+                app.toggle_panel_switch(PanelKind::Bookmarks);
+            }
+        }));
+        let count = app.state.borrow().bookmarks.len();
+        move_down.set_sensitive(position + 1 < count);
+        move_down.set_tooltip_text(Some(if position + 1 >= count {
+            "Already at the last bookmark"
+        } else {
+            "Move bookmark down"
+        }));
+        let weak = app.weak();
+        let url = bookmark.url.clone();
+        let folder_now = bookmark.folder().to_string();
+        add_item("Change folder…", "Move bookmark between folders", std::rc::Rc::new(move || {
+            if let Some(app) = weak.upgrade() {
+                open_bookmark_folder_dialog(&app, &url, &folder_now);
+            }
+        }));
+        menu.show_all();
+        menu_button.set_popup(Some(&menu));
+        crate::app::App::retain_popup_menu(&menu);
+        actions.pack_start(&menu_button, false, false, 0);
+        actions.reorder_child(&menu_button, 0);
+        {
+            let weak = row.downgrade();
+            row.connect_key_press_event(move |_, event| {
+                let name = event.keyval().name().unwrap_or_default();
+                if (name != "Return" && name != "KP_Enter")
+                    || !event.state().contains(gtk::gdk::ModifierType::SHIFT_MASK)
+                {
+                    return crate::gtkx::inh(false);
+                }
+                let Some(row) = weak.upgrade() else { return crate::gtkx::inh(false) };
+                let Some(hbox) = row.child().and_then(|child| child.downcast::<gtk::Box>().ok()) else {
+                    return crate::gtkx::inh(false);
+                };
+                let Some(actions) = hbox.children().into_iter().find_map(|child| {
+                    child.downcast::<gtk::Box>().ok().filter(|box_| box_.style_context().has_class("panel-row-actions"))
+                }) else { return crate::gtkx::inh(false) };
+                let Some(button) = actions.children().into_iter().find_map(|child| {
+                    child.downcast::<gtk::MenuButton>().ok()
+                }) else { return crate::gtkx::inh(false) };
+                button.emit_clicked();
+                crate::gtkx::inh(true)
+            });
+        }
     }
 
     fn build_history(&self, app: &AppRef) -> Option<gtk::Entry> {
@@ -1721,12 +2123,76 @@ impl Panels {
         header.pack_start(&clear, false, false, 0);
         self.body.add(&header);
 
+        // L16-L21/L23: one compact toolbar carries scoped removals, the
+        // scoped export and the result count. All removals use the same
+        // async confirmation dialog and cancel is a no-op.
+        let scoped = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        crate::ui::class(&scoped, "panel-action-bar");
+        let site_btn = gtk::Button::with_label("Remove this site\u{2026}");
+        crate::ui::class(&site_btn, "act");
+        site_btn.set_can_focus(true);
+        {
+            let weak = app.weak();
+            site_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_history_scope_dialog(&app, HistoryScope::Site);
+                }
+            });
+        }
+        let hour_btn = gtk::Button::with_label("Clear last hour\u{2026}");
+        crate::ui::class(&hour_btn, "act");
+        hour_btn.set_can_focus(true);
+        {
+            let weak = app.weak();
+            hour_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_history_scope_dialog(&app, HistoryScope::Hour);
+                }
+            });
+        }
+        let today_btn = gtk::Button::with_label("Clear today\u{2026}");
+        crate::ui::class(&today_btn, "act");
+        today_btn.set_can_focus(true);
+        {
+            let weak = app.weak();
+            today_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_history_scope_dialog(&app, HistoryScope::Today);
+                }
+            });
+        }
+        let export_btn = gtk::Button::with_label("Export shown\u{2026}");
+        crate::ui::class(&export_btn, "act");
+        export_btn.set_can_focus(true);
+        {
+            let weak = app.weak();
+            let query = self.filter.borrow().clone();
+            export_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    open_history_export_chooser(&app, &query);
+                }
+            });
+        }
+        for button in [&site_btn, &hour_btn, &today_btn, &export_btn] {
+            scoped.pack_start(button, false, false, 0);
+        }
+        self.body.add(&scoped);
+
         let (filter_box, filter) = self.filter_field(app, "Search history", |text| {
             if let Some(app) = crate::app::current() {
                 app.filter_panel(PanelKind::History, text);
             }
         });
         self.body.add(&filter_box);
+        let matched: Vec<&crate::store::HistoryEntry> = history
+            .iter()
+            .filter(|entry| self.matches(&format!("{} {}", entry.title, entry.url)))
+            .collect();
+        let count = gtk::Label::new(Some(&format!("{} of {} pages shown", matched.len().min(300), history.len())));
+        crate::ui::class(&count, "sub");
+        crate::ui::class(&count, "panel-count");
+        count.set_xalign(0.0);
+        self.body.add(&count);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         crate::ui::class(&list, "panel-list");
         list.set_margin_end(10);
@@ -1738,7 +2204,7 @@ impl Panels {
         let mut day = String::new();
         for entry in history
             .iter()
-            .filter(|entry| self.matches(&format!("{} {}", entry.title, entry.url)))
+            .filter(|entry| self.matches(&format!("{} {} {}", entry.title, entry.url, crate::store::site_key(&entry.url))))
             .take(300)
         {
             // A flat list of "43 days ago" cannot answer "what did I read on
@@ -1763,6 +2229,7 @@ impl Panels {
             };
             let when = ago(entry.at, now);
             let remove_url = entry.url.clone();
+            let background_url = entry.url.clone();
             let row = self.row_with(app, &title, &format!("{} · {}", entry.url, when), "Open", {
                 let url = entry.url.clone();
                 move |app: &AppRef| app.navigate_active(&url)
@@ -1774,6 +2241,28 @@ impl Panels {
                 }
                 app.toggle_panel_switch(PanelKind::History);
             }))));
+            {
+                let Some(hbox) = row.child().and_then(|child| child.downcast::<gtk::Box>().ok()) else { continue };
+                let Some(actions) = hbox.children().into_iter().find_map(|child| {
+                    child.downcast::<gtk::Box>().ok().filter(|box_| box_.style_context().has_class("panel-row-actions"))
+                }) else { continue };
+                let background = gtk::Button::with_label("Background");
+                crate::ui::class(&background, "act");
+                background.set_can_focus(false);
+                background.set_tooltip_text(Some("Open in a background tab · Enter"));
+                if let Some(access) = background.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&access, "Open history item in a background tab");
+                }
+                let weak = app.weak();
+                let url = background_url.clone();
+                background.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        app.new_tab(Some(&url), false, true);
+                    }
+                });
+                actions.pack_start(&background, false, false, 0);
+                actions.reorder_child(&background, 1);
+            }
             list.add(&row);
         }
         if shown == 0 {
@@ -2665,6 +3154,7 @@ impl Panels {
         let new_space_entry = gtk::Entry::new();
         crate::ui::class(&new_space_entry, "panel-input");
         new_space_entry.set_hexpand(true);
+        new_space_entry.set_width_chars(10);
         new_space_entry.set_max_length(crate::spaces::MAX_SPACE_NAME_LEN as i32);
         new_space_entry.set_placeholder_text(Some("New space name (e.g. Work, Reading)"));
         if let Some(a) = new_space_entry.accessible() {
@@ -2711,7 +3201,8 @@ impl Panels {
                 state.spaces.default_name().to_string(),
             )
         };
-        for space in all_spaces {
+        let total_spaces = all_spaces.len();
+        for (space_idx, space) in all_spaces.into_iter().enumerate() {
             let tab_count = space_counts.get(&space.id).copied().unwrap_or(0);
             let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
             crate::ui::class(&row, "panel-setting-row");
@@ -2721,6 +3212,7 @@ impl Panels {
             let name_entry = gtk::Entry::new();
             crate::ui::class(&name_entry, "panel-input");
             name_entry.set_hexpand(true);
+            name_entry.set_width_chars(10);
             name_entry.set_max_length(crate::spaces::MAX_SPACE_NAME_LEN as i32);
             name_entry.set_text(&space.name);
             if let Some(a) = name_entry.accessible() {
@@ -2766,11 +3258,74 @@ impl Panels {
                 });
             }
 
+            let dup_btn = gtk::Button::with_label("Duplicate");
+            crate::ui::class(&dup_btn, "act");
+            dup_btn.set_valign(gtk::Align::Center);
+            dup_btn.set_tooltip_text(Some("Duplicate this space's regular tabs into a new space"));
+            {
+                let weak = app.weak();
+                let sid = space.id.clone();
+                dup_btn.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        match app.duplicate_space(&sid) {
+                            Ok(created) => {
+                                app.flash_toast(&format!("Duplicated into \"{}\"", created.name));
+                                app.toggle_panel_switch(PanelKind::Settings);
+                            }
+                            Err(msg) => app.flash_error(msg),
+                        }
+                    }
+                });
+            }
+
             top.pack_start(&name_entry, true, true, 0);
             top.pack_start(&rename_btn, false, false, 0);
-            top.pack_start(&switch_btn, false, false, 0);
+
+            let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            actions.pack_start(&switch_btn, false, false, 0);
+            actions.pack_start(&dup_btn, false, false, 0);
 
             if !space.is_default() {
+                let up_btn = gtk::Button::with_label("\u{2191}");
+                crate::ui::class(&up_btn, "act");
+                up_btn.set_valign(gtk::Align::Center);
+                up_btn.set_sensitive(space_idx > 1);
+                up_btn.set_tooltip_text(Some("Move space up"));
+                if let Some(a) = up_btn.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Move space {} up", space.name));
+                }
+                {
+                    let weak = app.weak();
+                    let sid = space.id.clone();
+                    up_btn.connect_clicked(move |_| {
+                        if let Some(app) = weak.upgrade() {
+                            if app.move_space(&sid, -1) {
+                                app.toggle_panel_switch(PanelKind::Settings);
+                            }
+                        }
+                    });
+                }
+
+                let down_btn = gtk::Button::with_label("\u{2193}");
+                crate::ui::class(&down_btn, "act");
+                down_btn.set_valign(gtk::Align::Center);
+                down_btn.set_sensitive(space_idx + 1 < total_spaces);
+                down_btn.set_tooltip_text(Some("Move space down"));
+                if let Some(a) = down_btn.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Move space {} down", space.name));
+                }
+                {
+                    let weak = app.weak();
+                    let sid = space.id.clone();
+                    down_btn.connect_clicked(move |_| {
+                        if let Some(app) = weak.upgrade() {
+                            if app.move_space(&sid, 1) {
+                                app.toggle_panel_switch(PanelKind::Settings);
+                            }
+                        }
+                    });
+                }
+
                 let delete_btn = gtk::Button::with_label("Delete");
                 crate::ui::class(&delete_btn, "act");
                 crate::ui::class(&delete_btn, "danger");
@@ -2806,13 +3361,16 @@ impl Panels {
                         }
                     }
                 });
-                top.pack_start(&delete_btn, false, false, 0);
+                actions.pack_start(&up_btn, false, false, 0);
+                actions.pack_start(&down_btn, false, false, 0);
+                actions.pack_start(&delete_btn, false, false, 0);
             }
             row.pack_start(&top, false, true, 0);
+            row.pack_start(&actions, false, true, 0);
 
             let meta_text = if space.is_default() {
                 format!(
-                    "Default space (cannot be deleted) · {} {}",
+                    "Default space (anchored first, cannot be deleted) · {} {}",
                     tab_count,
                     if tab_count == 1 { "tab" } else { "tabs" }
                 )
@@ -2833,6 +3391,254 @@ impl Panels {
             spaces_sec.add(&row);
         }
         list.add(&spaces_sec);
+
+        // Named sessions & address list export/import (T31-T37, T48)
+        let sessions_sec = self.section(
+            app,
+            crate::icons::Icon::Tab,
+            "Named sessions",
+            "Explicitly save regular web pages in the active space (up to 24 named sessions), or import and export plain address lists. Private tabs are never saved or exported.",
+        );
+        let save_session_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        crate::ui::class(&save_session_row, "panel-setting-row");
+        let new_session_entry = gtk::Entry::new();
+        crate::ui::class(&new_session_entry, "panel-input");
+        new_session_entry.set_hexpand(true);
+        new_session_entry.set_width_chars(10);
+        new_session_entry.set_max_length(crate::tab_actions::MAX_SESSION_NAME_LEN as i32);
+        new_session_entry.set_placeholder_text(Some("Session name for current space"));
+        if let Some(a) = new_session_entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "New session name");
+        }
+        let save_session_btn = gtk::Button::with_label("Save session");
+        crate::ui::class(&save_session_btn, "act");
+        crate::ui::class(&save_session_btn, "primary");
+        save_session_btn.set_valign(gtk::Align::Center);
+        {
+            let weak = app.weak();
+            let entry_ref = new_session_entry.clone();
+            let do_save = std::rc::Rc::new(move || {
+                let Some(app) = weak.upgrade() else { return };
+                match app.save_named_session(&entry_ref.text()) {
+                    Ok((saved, skipped)) => {
+                        entry_ref.set_text("");
+                        if skipped > 0 {
+                            app.flash_toast(&format!(
+                                "Saved \"{}\" ({} tabs, {} private excluded)",
+                                saved.name,
+                                saved.tabs.len(),
+                                skipped
+                            ));
+                        } else {
+                            app.flash_toast(&format!(
+                                "Saved \"{}\" ({} tabs)",
+                                saved.name,
+                                saved.tabs.len()
+                            ));
+                        }
+                        app.toggle_panel_switch(PanelKind::Settings);
+                    }
+                    Err(msg) => app.flash_error(msg),
+                }
+            });
+            let s1 = do_save.clone();
+            save_session_btn.connect_clicked(move |_| s1());
+            let s2 = do_save.clone();
+            new_session_entry.connect_activate(move |_| s2());
+        }
+        save_session_row.pack_start(&new_session_entry, true, true, 0);
+        save_session_row.pack_start(&save_session_btn, false, false, 0);
+        sessions_sec.add(&save_session_row);
+
+        let list_tools_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        crate::ui::class(&list_tools_row, "panel-setting-row");
+        let export_urls_btn = gtk::Button::with_label("Export addresses\u{2026}");
+        crate::ui::class(&export_urls_btn, "act");
+        {
+            let weak = app.weak();
+            export_urls_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.export_space_urls_to_file();
+                }
+            });
+        }
+        let import_urls_btn = gtk::Button::with_label("Import list\u{2026}");
+        crate::ui::class(&import_urls_btn, "act");
+        {
+            let weak = app.weak();
+            import_urls_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.import_address_list_from_file();
+                }
+            });
+        }
+        let clip_urls_btn = gtk::Button::with_label("Open clipboard\u{2026}");
+        crate::ui::class(&clip_urls_btn, "act");
+        {
+            let weak = app.weak();
+            clip_urls_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_clipboard_urls_with_review();
+                }
+            });
+        }
+        list_tools_row.pack_start(&export_urls_btn, false, false, 0);
+        list_tools_row.pack_start(&import_urls_btn, false, false, 0);
+        list_tools_row.pack_start(&clip_urls_btn, false, false, 0);
+        sessions_sec.add(&list_tools_row);
+
+        let (saved_sessions, last_deleted_name) = {
+            let state = app.state.borrow();
+            (
+                state.named_sessions.sessions.clone(),
+                state.last_deleted_session.as_ref().map(|(_, s)| s.name.clone()),
+            )
+        };
+        if let Some(deleted_name) = last_deleted_name {
+            let undo_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            crate::ui::class(&undo_row, "panel-setting-row");
+            let undo_lbl = gtk::Label::new(Some(&format!("Deleted saved session \"{deleted_name}\"")));
+            crate::ui::class(&undo_lbl, "settingdesc");
+            undo_lbl.set_xalign(0.0);
+            undo_lbl.set_hexpand(true);
+            let undo_btn = gtk::Button::with_label("Undo delete");
+            crate::ui::class(&undo_btn, "act");
+            {
+                let weak = app.weak();
+                undo_btn.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        if let Some(name) = app.undo_delete_named_session() {
+                            app.flash_toast(&format!("Restored saved session \"{name}\""));
+                            app.toggle_panel_switch(PanelKind::Settings);
+                        }
+                    }
+                });
+            }
+            undo_row.pack_start(&undo_lbl, true, true, 0);
+            undo_row.pack_start(&undo_btn, false, false, 0);
+            sessions_sec.add(&undo_row);
+        }
+
+        if saved_sessions.is_empty() {
+            let empty = gtk::Label::new(Some("No named sessions saved yet."));
+            crate::ui::class(&empty, "settingdesc");
+            empty.set_xalign(0.0);
+            empty.set_margin_top(4);
+            empty.set_margin_bottom(6);
+            sessions_sec.add(&empty);
+        } else {
+            for session in saved_sessions {
+                let srow = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                crate::ui::class(&srow, "panel-setting-row");
+                let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let name_entry = gtk::Entry::new();
+                crate::ui::class(&name_entry, "panel-input");
+                name_entry.set_hexpand(true);
+                name_entry.set_width_chars(10);
+                name_entry.set_max_length(crate::tab_actions::MAX_SESSION_NAME_LEN as i32);
+                name_entry.set_text(&session.name);
+                if let Some(a) = name_entry.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&a, &format!("Rename session {}", session.name));
+                }
+
+                let rename_btn = gtk::Button::with_label("Rename");
+                crate::ui::class(&rename_btn, "act");
+                {
+                    let weak = app.weak();
+                    let sid = session.id.clone();
+                    let entry_ref = name_entry.clone();
+                    let do_rename = std::rc::Rc::new(move || {
+                        let Some(app) = weak.upgrade() else { return };
+                        match app.rename_named_session(&sid, &entry_ref.text()) {
+                            Ok(name) => {
+                                app.flash_toast(&format!("Renamed session to \"{name}\""));
+                                app.toggle_panel_switch(PanelKind::Settings);
+                            }
+                            Err(msg) => app.flash_error(msg),
+                        }
+                    });
+                    let r1 = do_rename.clone();
+                    rename_btn.connect_clicked(move |_| r1());
+                    let r2 = do_rename.clone();
+                    name_entry.connect_activate(move |_| r2());
+                }
+
+                let open_btn = gtk::Button::with_label("Open");
+                crate::ui::class(&open_btn, "act");
+                open_btn.set_tooltip_text(Some("Open saved session alongside current tabs"));
+                {
+                    let weak = app.weak();
+                    let sid = session.id.clone();
+                    let sname = session.name.clone();
+                    open_btn.connect_clicked(move |_| {
+                        if let Some(app) = weak.upgrade() {
+                            match app.open_named_session_alongside(&sid) {
+                                Ok(n) => app.flash_toast(&format!("Opened {n} tabs from \"{sname}\"")),
+                                Err(msg) => app.flash_error(&msg),
+                            }
+                        }
+                    });
+                }
+
+                let replace_btn = gtk::Button::with_label("Replace space");
+                crate::ui::class(&replace_btn, "act");
+                replace_btn.set_tooltip_text(Some("Replace regular tabs in the active space (asks confirmation first)"));
+                {
+                    let weak = app.weak();
+                    let sid = session.id.clone();
+                    let sname = session.name.clone();
+                    replace_btn.connect_clicked(move |_| {
+                        if let Some(app) = weak.upgrade() {
+                            match app.replace_space_with_named_session(&sid) {
+                                Ok(0) => {}
+                                Ok(n) => app.flash_toast(&format!("Replaced space with {n} tabs from \"{sname}\"")),
+                                Err(msg) => app.flash_error(&msg),
+                            }
+                        }
+                    });
+                }
+
+                let del_btn = gtk::Button::with_label("Delete");
+                crate::ui::class(&del_btn, "act");
+                crate::ui::class(&del_btn, "danger");
+                {
+                    let weak = app.weak();
+                    let sid = session.id.clone();
+                    del_btn.connect_clicked(move |_| {
+                        if let Some(app) = weak.upgrade() {
+                            match app.delete_named_session(&sid) {
+                                Ok(name) => {
+                                    app.flash_toast(&format!("Deleted saved session \"{name}\""));
+                                    app.toggle_panel_switch(PanelKind::Settings);
+                                }
+                                Err("Cancelled" | "Pending") => {}
+                                Err(msg) => app.flash_error(msg),
+                            }
+                        }
+                    });
+                }
+
+                top.pack_start(&name_entry, true, true, 0);
+                top.pack_start(&rename_btn, false, false, 0);
+                let sactions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                sactions.pack_start(&open_btn, false, false, 0);
+                sactions.pack_start(&replace_btn, false, false, 0);
+                sactions.pack_start(&del_btn, false, false, 0);
+                srow.pack_start(&top, false, true, 0);
+                srow.pack_start(&sactions, false, true, 0);
+
+                let smeta = gtk::Label::new(Some(&format!(
+                    "{} regular {}",
+                    session.tabs.len(),
+                    if session.tabs.len() == 1 { "tab" } else { "tabs" }
+                )));
+                crate::ui::class(&smeta, "settingdesc");
+                smeta.set_xalign(0.0);
+                srow.pack_start(&smeta, false, true, 0);
+                sessions_sec.add(&srow);
+            }
+        }
+        list.add(&sessions_sec);
 
         let browsing = self.section(app, crate::icons::Icon::Shield, "Browsing", "Blocking, memory use, and the bookmarks bar.");
         browsing.add(&self.setting_switch(app, "Block ads and trackers", "Rules enforced inside the engine, before a request is made.", prefs.shield, |app, on| {
@@ -2868,6 +3674,113 @@ impl Panels {
                 }
             },
         ));
+
+        // T11: Put eligible background tabs to sleep immediately.
+        let sleep_now_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        crate::ui::class(&sleep_now_row, "panel-setting-row");
+        let sleep_now_copy = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        sleep_now_copy.set_hexpand(true);
+        let sleep_now_title = gtk::Label::new(Some("Sleep background tabs now"));
+        crate::ui::class(&sleep_now_title, "setting");
+        sleep_now_title.set_xalign(0.0);
+        let sleep_now_desc = gtk::Label::new(Some(
+            "Immediately release inactive tabs without waiting for the idle timeout. Tabs playing audio, using camera/mic, or marked Keep Awake stay active.",
+        ));
+        crate::ui::class(&sleep_now_desc, "settingdesc");
+        sleep_now_desc.set_xalign(0.0);
+        sleep_now_desc.set_line_wrap(true);
+        sleep_now_copy.add(&sleep_now_title);
+        sleep_now_copy.add(&sleep_now_desc);
+        let sleep_now_btn = gtk::Button::with_label("Sleep tabs now");
+        crate::ui::class(&sleep_now_btn, "act");
+        sleep_now_btn.set_valign(gtk::Align::Center);
+        {
+            let weak = app.weak();
+            sleep_now_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.sleep_background_tabs_now();
+                }
+            });
+        }
+        sleep_now_row.pack_start(&sleep_now_copy, true, true, 0);
+        sleep_now_row.pack_start(&sleep_now_btn, false, false, 0);
+        browsing.add(&sleep_now_row);
+
+        // T13: Exact bounded host rules kept awake from sleeping.
+        let awake_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        crate::ui::class(&awake_box, "panel-setting-row");
+        let awake_title = gtk::Label::new(Some("Sites kept awake"));
+        crate::ui::class(&awake_title, "setting");
+        awake_title.set_xalign(0.0);
+        let awake_desc = gtk::Label::new(Some(
+            "Exact hostnames that never sleep automatically or during Sleep Background Tabs Now (up to 64 rules).",
+        ));
+        crate::ui::class(&awake_desc, "settingdesc");
+        awake_desc.set_xalign(0.0);
+        awake_desc.set_line_wrap(true);
+        awake_box.add(&awake_title);
+        awake_box.add(&awake_desc);
+
+        let awake_add_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let awake_entry = gtk::Entry::new();
+        crate::ui::class(&awake_entry, "panel-input");
+        awake_entry.set_hexpand(true);
+        awake_entry.set_width_chars(10);
+        awake_entry.set_placeholder_text(Some("Hostname (e.g. docs.rs or music.example.org)"));
+        if let Some(a) = awake_entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Hostname to keep awake");
+        }
+        let awake_add_btn = gtk::Button::with_label("Add site");
+        crate::ui::class(&awake_add_btn, "act");
+        {
+            let weak = app.weak();
+            let entry_ref = awake_entry.clone();
+            let do_add = std::rc::Rc::new(move || {
+                let Some(app) = weak.upgrade() else { return };
+                match app.add_keep_awake_host(&entry_ref.text()) {
+                    Ok(host) => {
+                        entry_ref.set_text("");
+                        app.flash_toast(&format!("Keeping {host} awake"));
+                        app.toggle_panel_switch(PanelKind::Settings);
+                    }
+                    Err(msg) => app.flash_error(msg),
+                }
+            });
+            let a1 = do_add.clone();
+            awake_add_btn.connect_clicked(move |_| a1());
+            let a2 = do_add.clone();
+            awake_entry.connect_activate(move |_| a2());
+        }
+        awake_add_row.pack_start(&awake_entry, true, true, 0);
+        awake_add_row.pack_start(&awake_add_btn, false, false, 0);
+        awake_box.add(&awake_add_row);
+
+        for host in &prefs.keep_awake_hosts {
+            let hrow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let hlbl = gtk::Label::new(Some(host));
+            crate::ui::class(&hlbl, "settingdesc");
+            hlbl.set_xalign(0.0);
+            hlbl.set_hexpand(true);
+            let rm_btn = gtk::Button::with_label("Remove");
+            crate::ui::class(&rm_btn, "act");
+            crate::ui::class(&rm_btn, "quiet");
+            {
+                let weak = app.weak();
+                let h = host.clone();
+                rm_btn.connect_clicked(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        if app.remove_keep_awake_host(&h) {
+                            app.flash_toast(&format!("Removed {h} from keep-awake sites"));
+                            app.toggle_panel_switch(PanelKind::Settings);
+                        }
+                    }
+                });
+            }
+            hrow.pack_start(&hlbl, true, true, 0);
+            hrow.pack_start(&rm_btn, false, false, 0);
+            awake_box.add(&hrow);
+        }
+        browsing.add(&awake_box);
 
         browsing.add(&self.setting_switch(
             app,
@@ -2942,10 +3855,215 @@ impl Panels {
             },
         ));
 
-        tabs.add(&self.setting_switch(app, "Open where you left off", "Tabs come back when the browser starts again.", prefs.restore_session, |app, on| {
-            app.prefs.borrow_mut().restore_session = on;
-            app.prefs.borrow().save();
-        }));
+        // T41: Startup behavior (Restore, Blank Start Page, or Custom Home).
+        tabs.add(&self.option_picker_row(
+            app,
+            "On startup",
+            "Choose whether Rill restores your previous regular tabs, starts on a blank Start Page, or opens your custom Home page.",
+            crate::store::StartupMode::all()
+                .iter()
+                .map(|m| m.title())
+                .collect(),
+            prefs.startup_mode.title(),
+            |app, chosen| {
+                if let Some(mode) = crate::store::StartupMode::all()
+                    .into_iter()
+                    .find(|m| m.title() == chosen)
+                {
+                    let empty_home = {
+                        let mut prefs = app.prefs.borrow_mut();
+                        prefs.startup_mode = mode;
+                        prefs.restore_session = mode == crate::store::StartupMode::Restore;
+                        prefs.save();
+                        prefs.home_url.trim().is_empty()
+                    };
+                    if mode == crate::store::StartupMode::Restore {
+                        app.save_session();
+                    } else if mode == crate::store::StartupMode::Home && empty_home {
+                        app.flash_toast("Set a Custom Home address below (Start Page is used until set)");
+                    }
+                }
+            },
+        ));
+
+        // T38: Custom Home page URL with scheme validation and blank-home fallback.
+        let home_row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        crate::ui::class(&home_row, "panel-setting-row");
+        let home_title = gtk::Label::new(Some("Custom Home address"));
+        crate::ui::class(&home_title, "setting");
+        home_title.set_xalign(0.0);
+        let home_desc = gtk::Label::new(Some(
+            "Full http:// or https:// URL opened by Home (Alt+Home) and \"Open custom Home page\" startup. Leave empty for the built-in Start Page.",
+        ));
+        crate::ui::class(&home_desc, "settingdesc");
+        home_desc.set_xalign(0.0);
+        home_desc.set_line_wrap(true);
+        let home_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let home_entry = gtk::Entry::new();
+        crate::ui::class(&home_entry, "panel-input");
+        home_entry.set_hexpand(true);
+        home_entry.set_width_chars(10);
+        home_entry.set_text(&prefs.home_url);
+        home_entry.set_placeholder_text(Some("https://example.org (empty = Start Page)"));
+        if let Some(a) = home_entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Custom Home address");
+        }
+        let home_save_btn = gtk::Button::with_label("Save");
+        crate::ui::class(&home_save_btn, "act");
+        {
+            let weak = app.weak();
+            let entry_ref = home_entry.clone();
+            let do_save = std::rc::Rc::new(move || {
+                let Some(app) = weak.upgrade() else { return };
+                match crate::tab_actions::validate_home_url(&entry_ref.text()) {
+                    Ok(valid) => {
+                        let mut prefs = app.prefs.borrow_mut();
+                        prefs.home_url = valid.clone();
+                        prefs.save();
+                        drop(prefs);
+                        entry_ref.set_text(&valid);
+                        if valid.is_empty() {
+                            app.flash_toast("Home reset to built-in Start Page");
+                        } else {
+                            app.flash_toast("Saved custom Home address");
+                        }
+                    }
+                    Err(msg) => app.flash_error(msg),
+                }
+            });
+            let h1 = do_save.clone();
+            home_save_btn.connect_clicked(move |_| h1());
+            let h2 = do_save.clone();
+            home_entry.connect_activate(move |_| h2());
+        }
+        let home_clear_btn = gtk::Button::with_label("Use Start Page");
+        crate::ui::class(&home_clear_btn, "act");
+        crate::ui::class(&home_clear_btn, "quiet");
+        {
+            let weak = app.weak();
+            let entry_ref = home_entry.clone();
+            home_clear_btn.connect_clicked(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    let mut prefs = app.prefs.borrow_mut();
+                    prefs.home_url.clear();
+                    prefs.save();
+                    drop(prefs);
+                    entry_ref.set_text("");
+                    app.flash_toast("Home reset to built-in Start Page");
+                }
+            });
+        }
+        home_controls.pack_start(&home_entry, true, true, 0);
+        home_controls.pack_start(&home_save_btn, false, false, 0);
+        home_controls.pack_start(&home_clear_btn, false, false, 0);
+        home_row.add(&home_title);
+        home_row.add(&home_desc);
+        home_row.add(&home_controls);
+        tabs.add(&home_row);
+
+        // T39: Default page zoom (50%..200%), retaining explicit per-site overrides.
+        let zoom_choices = [
+            ("50%", 0.50_f64),
+            ("67%", 0.67),
+            ("75%", 0.75),
+            ("80%", 0.80),
+            ("90%", 0.90),
+            ("100%", 1.00),
+            ("110%", 1.10),
+            ("125%", 1.25),
+            ("150%", 1.50),
+            ("175%", 1.75),
+            ("200%", 2.00),
+        ];
+        let active_zoom_label = zoom_choices
+            .iter()
+            .min_by(|a, b| {
+                (a.1 - prefs.default_zoom)
+                    .abs()
+                    .total_cmp(&(b.1 - prefs.default_zoom).abs())
+            })
+            .map(|(lbl, _)| *lbl)
+            .unwrap_or("100%");
+        tabs.add(&self.option_picker_row(
+            app,
+            "Default page zoom",
+            "Zoom level applied to pages without an explicit per-site zoom override.",
+            zoom_choices.iter().map(|(lbl, _)| *lbl).collect(),
+            active_zoom_label,
+            move |app, chosen| {
+                if let Some((_, level)) = zoom_choices.iter().find(|(lbl, _)| *lbl == chosen) {
+                    app.set_default_zoom(*level);
+                }
+            },
+        ));
+
+        // T40: New-tab placement within current space.
+        tabs.add(&self.option_picker_row(
+            app,
+            "New tab placement",
+            "Where newly opened tabs appear inside the active space.",
+            crate::store::NewTabPlacement::all()
+                .iter()
+                .map(|m| m.title())
+                .collect(),
+            prefs.new_tab_placement.title(),
+            |app, chosen| {
+                if let Some(mode) = crate::store::NewTabPlacement::all()
+                    .into_iter()
+                    .find(|m| m.title() == chosen)
+                {
+                    let mut prefs = app.prefs.borrow_mut();
+                    prefs.new_tab_placement = mode;
+                    prefs.save();
+                }
+            },
+        ));
+
+        // T42: Which tab activates after closing the active tab.
+        tabs.add(&self.option_picker_row(
+            app,
+            "After closing active tab",
+            "Which remaining tab in the space becomes active when you close the current tab.",
+            crate::store::CloseTabFocus::all()
+                .iter()
+                .map(|m| m.title())
+                .collect(),
+            prefs.close_tab_focus.title(),
+            |app, chosen| {
+                if let Some(mode) = crate::store::CloseTabFocus::all()
+                    .into_iter()
+                    .find(|m| m.title() == chosen)
+                {
+                    let mut prefs = app.prefs.borrow_mut();
+                    prefs.close_tab_focus = mode;
+                    prefs.save();
+                }
+            },
+        ));
+
+        // T43: Warn before bulk-closing multiple tabs.
+        tabs.add(&self.setting_switch(
+            app,
+            "Warn before bulk-closing tabs",
+            "Ask for confirmation when closing 3 or more tabs at once.",
+            prefs.warn_bulk_close,
+            |app, on| {
+                app.prefs.borrow_mut().warn_bulk_close = on;
+                app.prefs.borrow().save();
+            },
+        ));
+
+        // T44: Protect pinned tabs from ordinary close actions.
+        tabs.add(&self.setting_switch(
+            app,
+            "Protect pinned tabs from closing",
+            "Keep pinned tabs open on Ctrl+W or close clicks until you unpin them or choose Unpin & Close.",
+            prefs.protect_pinned_tabs,
+            |app, on| {
+                app.prefs.borrow_mut().protect_pinned_tabs = on;
+                app.prefs.borrow().save();
+            },
+        ));
         list.add(&tabs);
 
         let search = self.section(app, crate::icons::Icon::Search, "Search", "Where your words go, and what is sent while you type.");
@@ -4019,7 +5137,8 @@ impl Panels {
             let second_key = second_run.clone();
             row.connect_key_press_event(move |_, event| {
                 let name = event.keyval().name().unwrap_or_default();
-                if name == "Return" || name == "KP_Enter" {
+                let shift_held = event.state().contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                if row_enter_triggers_primary_action(&name, shift_held) {
                     if let Some(app) = app_key.upgrade() { run_row(&app); }
                     return crate::gtkx::inh(true);
                 }
@@ -4194,6 +5313,299 @@ fn bytes(n: u64) -> String {
     }
 }
 
+/// L07: explicit HTML export through a native save dialog and atomic write.
+#[derive(Clone, Copy)]
+enum HistoryScope {
+    Site,
+    Hour,
+    Today,
+}
+
+fn open_history_scope_dialog(app: &AppRef, scope: HistoryScope) {
+    let current_url = app.state.borrow().active_tab().map(|tab| tab.url.clone()).unwrap_or_default();
+    let site = crate::store::site_key(&current_url);
+    if matches!(scope, HistoryScope::Site) && site.is_empty() {
+        app.flash_toast("Open a site first to remove its history");
+        return;
+    }
+    let (headline, details) = match scope {
+        HistoryScope::Site => (
+            format!("Remove all visits to {site}?"),
+            "Only visits to this exact hostname are removed. This cannot be undone.",
+        ),
+        HistoryScope::Hour => (
+            "Remove the last hour of history?".to_string(),
+            "Visits from the past 60 minutes are removed. Older visits stay.",
+        ),
+        HistoryScope::Today => (
+            "Remove today's history?".to_string(),
+            "Every visit since local midnight is removed. Older days stay.",
+        ),
+    };
+    let app_for_action = app.clone();
+    app.show_confirmation("Remove history", &headline, details, "Remove", move || {
+        let now = now_secs();
+        let cutoff = match scope {
+            HistoryScope::Hour => now.saturating_sub(3600),
+            HistoryScope::Today => crate::store::local_day_start(now),
+            HistoryScope::Site => 0,
+        };
+        let mut state = app_for_action.state.borrow_mut();
+        state.history.retain(|entry| match scope {
+            HistoryScope::Site => crate::store::site_key(&entry.url) != site,
+            HistoryScope::Hour | HistoryScope::Today => entry.at < cutoff,
+        });
+        Records::save_history(&state.history);
+        drop(state);
+        app_for_action.toggle_panel_switch(PanelKind::History);
+    });
+}
+
+fn open_history_export_chooser(app: &AppRef, query: &str) {
+    let query = query.trim().to_ascii_lowercase();
+    let entries: Vec<crate::store::HistoryEntry> = app
+        .state
+        .borrow()
+        .history
+        .iter()
+        .filter(|entry| {
+            query.is_empty()
+                || format!("{} {} {}", entry.title, entry.url, crate::store::site_key(&entry.url))
+                    .to_ascii_lowercase()
+                    .contains(&query)
+        })
+        .cloned()
+        .collect();
+    if entries.is_empty() {
+        app.flash_toast("No matching history to export");
+        return;
+    }
+    let payload = crate::store::history_csv(&entries);
+    let dialog = gtk::FileChooserNative::new(
+        Some("Export selected history"),
+        Some(&app.ui.window),
+        gtk::FileChooserAction::Save,
+        Some("Export"),
+        Some("Cancel"),
+    );
+    dialog.set_do_overwrite_confirmation(true);
+    dialog.set_current_name("rill-history.csv");
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("CSV files (*.csv)"));
+    filter.add_pattern("*.csv");
+    dialog.add_filter(filter);
+    let weak = app.weak();
+    let count = entries.len();
+    dialog.connect_response(move |dialog, response| {
+        let chosen = if response == gtk::ResponseType::Accept { dialog.filename() } else { None };
+        dialog.destroy();
+        HISTORY_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+        if let (Some(app), Some(path)) = (weak.upgrade(), chosen) {
+            match crate::files::write_atomic_export(&path, payload.as_bytes()) {
+                Ok(()) => app.flash_toast(&format!("Exported {count} history pages")),
+                Err(_) => app.flash_error("Could not write history file"),
+            }
+        }
+    });
+    HISTORY_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+    dialog.show();
+}
+
+fn open_bookmarks_export_chooser(app: &AppRef) {
+    let payload = crate::store::bookmarks_html(&app.state.borrow().bookmarks);
+    let dialog = gtk::FileChooserNative::new(
+        Some("Export bookmarks as HTML"),
+        Some(&app.ui.window),
+        gtk::FileChooserAction::Save,
+        Some("Export"),
+        Some("Cancel"),
+    );
+    dialog.set_do_overwrite_confirmation(true);
+    dialog.set_current_name("rill-bookmarks.html");
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("HTML bookmarks (*.html *.htm)"));
+    filter.add_pattern("*.html");
+    filter.add_pattern("*.htm");
+    dialog.add_filter(filter);
+    let weak = app.weak();
+    dialog.connect_response(move |dialog, response| {
+        let chosen = if response == gtk::ResponseType::Accept { dialog.filename() } else { None };
+        dialog.destroy();
+        BOOKMARK_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+        if let (Some(app), Some(path)) = (weak.upgrade(), chosen) {
+            match crate::files::write_atomic_export(&path, payload.as_bytes()) {
+                Ok(()) => app.flash_toast("Exported bookmarks as HTML"),
+                Err(_) => app.flash_error("Could not write bookmarks file"),
+            }
+        }
+    });
+    BOOKMARK_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+    dialog.show();
+}
+
+/// L08: native open dialog, bounded read, safe-scheme deduplicating parser.
+fn open_bookmarks_import_chooser(app: &AppRef) {
+    let dialog = gtk::FileChooserNative::new(
+        Some("Import bookmarks HTML"),
+        Some(&app.ui.window),
+        gtk::FileChooserAction::Open,
+        Some("Import"),
+        Some("Cancel"),
+    );
+    dialog.set_select_multiple(false);
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("HTML bookmarks (*.html *.htm)"));
+    filter.add_pattern("*.html");
+    filter.add_pattern("*.htm");
+    dialog.add_filter(filter);
+    let weak = app.weak();
+    dialog.connect_response(move |dialog, response| {
+        let chosen = if response == gtk::ResponseType::Accept { dialog.filename() } else { None };
+        dialog.destroy();
+        BOOKMARK_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+        let Some(app) = weak.upgrade() else { return };
+        let Some(path) = chosen else { return };
+        let read_result = std::fs::File::open(&path).and_then(|file| {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(4 * 1024 * 1024)]).into_owned())
+        });
+        match read_result {
+            Ok(raw) => {
+                let (incoming, skipped) = crate::store::parse_bookmarks_html(&raw);
+                let mut added = 0usize;
+                let mut duplicates = 0usize;
+                let mut over_limit = 0usize;
+                {
+                    let mut state = app.state.borrow_mut();
+                    let mut seen: std::collections::HashSet<String> = state
+                        .bookmarks
+                        .iter()
+                        .map(|b| crate::tab_actions::duplicate_url_key(&b.url))
+                        .collect();
+                    for bookmark in incoming {
+                        let key = crate::tab_actions::duplicate_url_key(&bookmark.url);
+                        if !seen.insert(key) {
+                            duplicates += 1;
+                        } else if state.bookmarks.len() < crate::store::MAX_BOOKMARKS {
+                            state.bookmarks.push(bookmark);
+                            added += 1;
+                        } else {
+                            over_limit += 1;
+                        }
+                    }
+                    Records::save_bookmarks(&state.bookmarks);
+                }
+                clear_bookmark_undo();
+                app.render();
+                app.flash_toast(&format!(
+                    "Imported {added} bookmarks ({duplicates} duplicates, {skipped} unsafe/over-limit, {over_limit} capacity limit)"
+                ));
+                app.toggle_panel_switch(PanelKind::Bookmarks);
+            }
+            Err(_) => app.flash_error("Could not read bookmarks file"),
+        }
+    });
+    BOOKMARK_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+    dialog.show();
+}
+
+/// L01/L02: one native dialog for either editable field. Cancel is inert;
+/// Accept validates the address and resolves duplicate URLs by keeping the
+/// edited bookmark at its original position.
+fn open_bookmark_edit_dialog(app: &AppRef, url: &str, _position: usize, title_field: bool) {
+    let existing = app
+        .state
+        .borrow()
+        .bookmarks
+        .iter()
+        .find(|b| b.url == url)
+        .cloned();
+    let Some(bookmark) = existing else { return };
+    let dialog = gtk::Dialog::with_buttons(
+        Some(if title_field { "Edit bookmark title" } else { "Edit bookmark address" }),
+        Some(&app.ui.window),
+        gtk::DialogFlags::MODAL,
+        &[("Cancel", gtk::ResponseType::Cancel), ("Save", gtk::ResponseType::Accept)],
+    );
+    let area = dialog.content_area();
+    let field = gtk::Entry::new();
+    field.set_width_chars(10);
+    field.set_hexpand(true);
+    field.set_text(if title_field { &bookmark.title } else { &bookmark.url });
+    area.add(&field);
+    if let Some(access) = field.accessible() {
+        gtk::atk::prelude::AtkObjectExt::set_name(
+            &access,
+            if title_field { "Bookmark title" } else { "Bookmark address" },
+        );
+    }
+    field.show();
+    let weak = app.weak();
+    let old_url = bookmark.url.clone();
+    dialog.connect_response(move |dialog, response| {
+        let mut close_dialog = true;
+        if response == gtk::ResponseType::Accept {
+            if let Some(app) = weak.upgrade() {
+                let value = field.text().to_string();
+                let result = if title_field {
+                    app.set_bookmark_title(&old_url, &value)
+                } else {
+                    app.set_bookmark_address(&old_url, &value)
+                };
+                match result {
+                    Ok(()) => {
+                        clear_bookmark_undo();
+                        app.flash_toast("Bookmark saved");
+                        app.toggle_panel_switch(PanelKind::Bookmarks);
+                    }
+                    Err(message) => {
+                        app.flash_error(message);
+                        close_dialog = false;
+                    }
+                }
+            }
+        }
+        if close_dialog {
+            unsafe { dialog.destroy() };
+        }
+    });
+    dialog.show_all();
+}
+
+/// L14: change one bookmark's folder without touching its neighbours.
+fn open_bookmark_folder_dialog(app: &AppRef, url: &str, current: &str) {
+    let dialog = gtk::Dialog::with_buttons(
+        Some("Move bookmark to folder"),
+        Some(&app.ui.window),
+        gtk::DialogFlags::MODAL,
+        &[("Cancel", gtk::ResponseType::Cancel), ("Move", gtk::ResponseType::Accept)],
+    );
+    let area = dialog.content_area();
+    let field = gtk::Entry::new();
+    field.set_width_chars(10);
+    field.set_hexpand(true);
+    field.set_text(current);
+    area.add(&field);
+    field.show();
+    let weak = app.weak();
+    let url = url.to_string();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(app) = weak.upgrade() {
+                let folder = crate::store::sanitize_bookmark_folder(&field.text());
+                if app.set_bookmark_folder(&url, folder) {
+                    app.flash_toast("Bookmark moved");
+                    app.toggle_panel_switch(PanelKind::Bookmarks);
+                }
+            }
+        }
+        unsafe { dialog.destroy() };
+    });
+    dialog.show_all();
+}
+
 fn open_export_profile_chooser(app: &AppRef) {
     let dialog = gtk::FileChooserNative::new(
         Some("Export appearance & layout profile"),
@@ -4298,6 +5710,8 @@ mod download_words {
             got,
             total,
             private: false,
+            source_url: String::new(),
+            missing: false,
         }
     }
 

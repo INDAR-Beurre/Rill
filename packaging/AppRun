@@ -2,31 +2,91 @@
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export APPIMAGE_ROOT="$HERE"
+export APPDIR="$HERE"
+export APPRUN_STARTUP_APPDIR="$HERE"
+export APPRUN_STARTUP_WORKDIR="$HERE"
 export SEARCH_ASSETS="$HERE/usr/share/search"
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export WEBKIT_EXEC_PATH="$HERE/usr/lib/webkit2gtk-4.1"
 export WEBKIT_INJECTED_BUNDLE_PATH="$HERE/usr/lib/webkit2gtk-4.1/injected-bundle"
-# WebKitGTK compiles its helper directory into the library. AppRun's hooks
-# redirect those absolute reads to this AppDir, including helper processes.
-export APPRUN_STARTUP_WORKDIR="$HERE"
-export LD_PRELOAD="$HERE/usr/lib/libapprun_hooks.so${LD_PRELOAD:+:$LD_PRELOAD}"
-export GDK_PIXBUF_MODULEDIR="$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
-export GDK_PIXBUF_MODULE_FILE="$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
-export GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"
-export GTK_IM_MODULE_FILE="$HERE/usr/lib/gtk-3.0/3.0.0/immodules.cache"
+# WebKitGTK compiles its helper directory into libwebkit2gtk-4.1.so.0 and spawns
+# helpers through GLib posix_spawn(). librill_appimage_preload.so intercepts
+# posix_spawn/posix_spawnp/execv/execve and redirects hardcoded helper paths
+# (/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/*, /usr/lib/webkit2gtk-4.1/*,
+# /usr/libexec/webkit2gtk-4.1/*) to $WEBKIT_EXEC_PATH inside this AppDir.
+# ld.so splits LD_PRELOAD on whitespace, so expose the shims through a stable
+# space-free alias instead of skipping them when the AppDir path has spaces.
+# The alias is private to this run and is never placed in the user profile.
+PRELOAD_LIST=""
+if [ -f "$HERE/usr/lib/librill_appimage_preload.so" ] || [ -f "$HERE/usr/lib/libapprun_hooks.so" ]; then
+  case "$HERE" in
+    *[[:space:]]*|*:*|*'*'*|*'?'*|*'['*)
+      PRELOAD_ALIAS_ROOT="${TMPDIR:-/tmp}"
+      case "$PRELOAD_ALIAS_ROOT" in *[[:space:]:]*) PRELOAD_ALIAS_ROOT=/tmp ;; esac
+      PRELOAD_ALIAS_ID="$(id -u 2>/dev/null || echo 0)-$(printf '%s' "$HERE" | cksum | awk '{print $1 "-" $2}')"
+      PRELOAD_ALIAS_DIR="$PRELOAD_ALIAS_ROOT/rill-appimage-preload-$PRELOAD_ALIAS_ID"
+      if ! mkdir -p "$PRELOAD_ALIAS_DIR" 2>/dev/null; then
+        PRELOAD_ALIAS_DIR="/tmp/rill-appimage-preload-$PRELOAD_ALIAS_ID"
+        mkdir -p "$PRELOAD_ALIAS_DIR" 2>/dev/null || PRELOAD_ALIAS_DIR=""
+      fi
+      PRELOAD_DIR="$PRELOAD_ALIAS_DIR"
+      ;;
+    *)
+      if [ -f "$HERE/usr/lib/librill_appimage_preload.so" ]; then
+        PRELOAD_LIST="$HERE/usr/lib/librill_appimage_preload.so"
+      fi
+      if [ -f "$HERE/usr/lib/libapprun_hooks.so" ]; then
+        PRELOAD_LIST="${PRELOAD_LIST:+$PRELOAD_LIST:}$HERE/usr/lib/libapprun_hooks.so"
+      fi
+      ;;
+  esac
+  if [ -n "${PRELOAD_DIR:-}" ]; then
+    if [ -f "$HERE/usr/lib/librill_appimage_preload.so" ]; then
+      ln -sfn "$HERE/usr/lib/librill_appimage_preload.so" "$PRELOAD_DIR/librill_appimage_preload.so"
+      PRELOAD_LIST="$PRELOAD_DIR/librill_appimage_preload.so"
+    fi
+    if [ -f "$HERE/usr/lib/libapprun_hooks.so" ]; then
+      ln -sfn "$HERE/usr/lib/libapprun_hooks.so" "$PRELOAD_DIR/libapprun_hooks.so"
+      PRELOAD_LIST="${PRELOAD_LIST:+$PRELOAD_LIST:}$PRELOAD_DIR/libapprun_hooks.so"
+    fi
+  fi
+fi
+if [ -n "$PRELOAD_LIST" ]; then
+  export LD_PRELOAD="$PRELOAD_LIST${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+if [ -s "$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" ]; then
+  export GDK_PIXBUF_MODULEDIR="$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+  export GDK_PIXBUF_MODULE_FILE="$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+fi
+if [ -d "$HERE/usr/lib/gio/modules" ]; then
+  export GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"
+fi
+if [ -s "$HERE/usr/lib/gtk-3.0/3.0.0/immodules.cache" ]; then
+  export GTK_IM_MODULE_FILE="$HERE/usr/lib/gtk-3.0/3.0.0/immodules.cache"
+fi
 export GTK_PATH="$HERE/usr/lib/gtk-3.0"
 export GTK_DATA_PREFIX="$HERE/usr"
 export GTK_EXE_PREFIX="$HERE/usr"
-export XDG_DATA_DIRS="$HERE/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas"
-export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
-export FONTCONFIG_PATH="$HERE/etc/fonts"
-export XKB_CONFIG_ROOT="$HERE/usr/share/X11/xkb"
+if [ -f "$HERE/etc/fonts/fonts.conf" ]; then
+  export FONTCONFIG_FILE="$HERE/etc/fonts/fonts.conf"
+  export FONTCONFIG_PATH="$HERE/etc/fonts"
+fi
+if [ -d "$HERE/usr/share/X11/xkb" ]; then
+  export XKB_CONFIG_ROOT="$HERE/usr/share/X11/xkb"
+fi
 export GST_PLUGIN_PATH="$HERE/usr/lib/gstreamer-1.0"
 export GST_PLUGIN_SYSTEM_PATH="$HERE/usr/lib/gstreamer-1.0"
-export GST_PLUGIN_SCANNER="$HERE/usr/lib/gstreamer-1.0/gst-plugin-scanner"
-export LIBGL_DRIVERS_PATH="$HERE/usr/lib/dri${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
-export LIBVA_DRIVERS_PATH="$HERE/usr/lib/dri${LIBVA_DRIVERS_PATH:+:$LIBVA_DRIVERS_PATH}"
+if [ -x "$HERE/usr/lib/gstreamer-1.0/gst-plugin-scanner" ]; then
+  export GST_PLUGIN_SCANNER="$HERE/usr/lib/gstreamer-1.0/gst-plugin-scanner"
+fi
+# Graphics drivers (Mesa DRI / VA-API) stay host-provided so they match the
+# host's kernel, libdrm, and glibc loader. Only extend driver paths if a custom
+# AppDir explicitly ships them.
+if [ -d "$HERE/usr/lib/dri" ] && [ -n "$(find "$HERE/usr/lib/dri" -maxdepth 1 -name '*.so' -print -quit 2>/dev/null)" ]; then
+  export LIBGL_DRIVERS_PATH="$HERE/usr/lib/dri${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
+  export LIBVA_DRIVERS_PATH="$HERE/usr/lib/dri${LIBVA_DRIVERS_PATH:+:$LIBVA_DRIVERS_PATH}"
+fi
 export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
-# A bundled fontconfig must never load a second fontconfig from /usr/lib.
 exec "$HERE/usr/bin/search" "$@"

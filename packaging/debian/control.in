@@ -1,0 +1,19 @@
+Package: rill
+Version: @VERSION@-@REVISION@
+Section: web
+Priority: optional
+Architecture: amd64
+Maintainer: Rill contributors <https://github.com/INDAR-Beurre/Rill>
+Homepage: https://github.com/INDAR-Beurre/Rill
+Installed-Size: @INSTALLED_SIZE@
+Depends: libc6 (>= @GLIBC_FLOOR@), libwebkit2gtk-4.1-0 (>= 2.40), libjavascriptcoregtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, libglib2.0-0 | libglib2.0-0t64, libatk1.0-0 | libatk1.0-0t64, libcairo2, libpango-1.0-0, libsoup-3.0-0, libsqlite3-0, libgcc-s1, hicolor-icon-theme, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good
+Recommends: gstreamer1.0-libav, gstreamer1.0-plugins-bad, fonts-liberation | fonts-liberation2, ca-certificates
+Provides: www-browser
+Description: Small, fast, quiet native WebKit browser for Linux
+ Rill is a Rust, GTK 3, and WebKitGTK 4.1 web browser with native top tabs,
+ an optional vertical tab sidebar, Spaces, reading mode, content blocking,
+ and local-first history. It uses the shared system WebKitGTK engine rather
+ than bundling Chromium.
+ .
+ Installs /usr/bin/search and a /usr/bin/rill symlink while preserving the
+ existing search XDG profile directories (~/.config/search, ~/.local/share/search).

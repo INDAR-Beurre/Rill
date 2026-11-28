@@ -63,6 +63,75 @@ pub const DEFAULT_TOP_TAB_WIDTH: i32 = 144;
 pub const MIN_START_SHORTCUTS_COUNT: usize = 2;
 pub const MAX_START_SHORTCUTS_COUNT: usize = 12;
 pub const DEFAULT_START_SHORTCUTS_COUNT: usize = 8;
+pub const MIN_DEFAULT_ZOOM: f64 = 0.5;
+pub const MAX_DEFAULT_ZOOM: f64 = 2.0;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NewTabPlacement {
+    #[default]
+    Adjacent,
+    End,
+}
+
+impl NewTabPlacement {
+    pub fn title(self) -> &'static str {
+        match self {
+            NewTabPlacement::Adjacent => "Next to active tab",
+            NewTabPlacement::End => "At end of space",
+        }
+    }
+
+    pub fn all() -> [NewTabPlacement; 2] {
+        [NewTabPlacement::Adjacent, NewTabPlacement::End]
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartupMode {
+    #[default]
+    Restore,
+    Blank,
+    Home,
+}
+
+impl StartupMode {
+    pub fn title(self) -> &'static str {
+        match self {
+            StartupMode::Restore => "Restore previous tabs",
+            StartupMode::Blank => "Open a blank Start Page",
+            StartupMode::Home => "Open custom Home page",
+        }
+    }
+
+    pub fn all() -> [StartupMode; 3] {
+        [StartupMode::Restore, StartupMode::Blank, StartupMode::Home]
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseTabFocus {
+    #[default]
+    Right,
+    Left,
+    Recent,
+}
+
+impl CloseTabFocus {
+    pub fn title(self) -> &'static str {
+        match self {
+            CloseTabFocus::Right => "Next tab",
+            CloseTabFocus::Left => "Previous tab",
+            CloseTabFocus::Recent => "Most recently viewed",
+        }
+    }
+
+    pub fn all() -> [CloseTabFocus; 3] {
+        [CloseTabFocus::Right, CloseTabFocus::Left, CloseTabFocus::Recent]
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -210,6 +279,30 @@ pub struct Prefs {
     /// not shown on every launch. See src/welcome.rs.
     #[serde(default)]
     pub welcomed: bool,
+    /// T38: Custom Home page URL (`http://` or `https://`), or empty for built-in Start Page.
+    #[serde(default)]
+    pub home_url: String,
+    /// T39: Default page zoom level (0.5..=2.0), used when a site has no explicit override.
+    #[serde(default = "default_zoom_level")]
+    pub default_zoom: f64,
+    /// T40: Where new tabs open within the current space (adjacent to active or at end).
+    #[serde(default)]
+    pub new_tab_placement: NewTabPlacement,
+    /// T41: Startup behavior: restore previous tabs, blank Start Page, or custom Home page.
+    #[serde(default)]
+    pub startup_mode: StartupMode,
+    /// T42: Which tab activates after closing the active tab.
+    #[serde(default)]
+    pub close_tab_focus: CloseTabFocus,
+    /// T43: Warn before bulk-closing multiple tabs.
+    #[serde(default = "default_true")]
+    pub warn_bulk_close: bool,
+    /// T44: Protect pinned tabs from ordinary close actions until unpinned.
+    #[serde(default)]
+    pub protect_pinned_tabs: bool,
+    /// T13: Exact host rules kept awake from automatic and bulk tab sleeping.
+    #[serde(default)]
+    pub keep_awake_hosts: Vec<String>,
     /// Filled in by the browser at launch: whether the desktop is dark.
     #[serde(skip)]
     pub desktop_dark: bool,
@@ -219,6 +312,10 @@ pub struct Prefs {
     /// them meant a --fresh start never wrote a session at all.
     #[serde(skip)]
     pub skip_restore: bool,
+}
+
+fn default_zoom_level() -> f64 {
+    1.0
 }
 
 fn default_true() -> bool {
@@ -282,6 +379,14 @@ impl Default for Prefs {
             keywords: crate::keyword::defaults(),
             engine_suggestions: true,
             welcomed: false,
+            home_url: String::new(),
+            default_zoom: 1.0,
+            new_tab_placement: NewTabPlacement::Adjacent,
+            startup_mode: StartupMode::Restore,
+            close_tab_focus: CloseTabFocus::Right,
+            warn_bulk_close: true,
+            protect_pinned_tabs: false,
+            keep_awake_hosts: Vec::new(),
             desktop_dark: false,
             skip_restore: false,
         }
@@ -298,12 +403,20 @@ impl Prefs {
         let has_back = value.get("show_back_button").is_some();
         let has_forward = value.get("show_forward_button").is_some();
         let has_nav = value.get("show_nav_buttons").is_some();
+        let has_startup_mode = value.get("startup_mode").is_some();
         let mut prefs: Prefs = serde_json::from_value(value).ok()?;
         if !has_back {
             prefs.show_back_button = if has_nav { prefs.show_nav_buttons } else { true };
         }
         if !has_forward {
             prefs.show_forward_button = if has_nav { prefs.show_nav_buttons } else { true };
+        }
+        if !has_startup_mode {
+            prefs.startup_mode = if prefs.restore_session {
+                StartupMode::Restore
+            } else {
+                StartupMode::Blank
+            };
         }
         Some(prefs.sanitised())
     }
@@ -341,6 +454,13 @@ impl Prefs {
         if self.search_engine.trim().is_empty() {
             self.search_engine = "Startpage".into();
         }
+        if !self.default_zoom.is_finite() {
+            self.default_zoom = 1.0;
+        }
+        self.default_zoom = self.default_zoom.clamp(MIN_DEFAULT_ZOOM, MAX_DEFAULT_ZOOM);
+        self.home_url = crate::tab_actions::validate_home_url(&self.home_url).unwrap_or_default();
+        self.keep_awake_hosts = crate::tab_actions::sanitize_keep_awake_hosts(self.keep_awake_hosts);
+        self.restore_session = self.startup_mode == StartupMode::Restore;
         self
     }
 
@@ -406,6 +526,12 @@ pub struct TabRecord {
     /// after a restart returns to the tab you were last viewing there.
     #[serde(default)]
     pub space_active: bool,
+    /// T08: a muted tab keeps its choice across sleep, session save and restart.
+    #[serde(default)]
+    pub muted: bool,
+    /// T12: a tab kept awake keeps that choice across session save and restart.
+    #[serde(default)]
+    pub keep_awake: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -419,6 +545,524 @@ pub struct HistoryEntry {
 pub struct Bookmark {
     pub url: String,
     pub title: String,
+    /// L13: a plain label, never a path or an access-control boundary. Old
+    /// bookmarks without the field stay in the flat Default folder.
+    #[serde(default)]
+    pub folder: String,
+}
+
+impl Bookmark {
+    pub fn folder(&self) -> &str {
+        if self.folder.trim().is_empty() {
+            Bookmark::DEFAULT_FOLDER
+        } else {
+            self.folder.as_str()
+        }
+    }
+}
+
+impl Bookmark {
+    pub const DEFAULT_FOLDER: &'static str = "Bookmarks";
+}
+
+pub const MAX_BOOKMARK_FOLDER_LEN: usize = 48;
+pub const MAX_BOOKMARK_TITLE_LEN: usize = 200;
+pub const MAX_BOOKMARKS: usize = 2_000;
+
+/// L13/L15: normalise a folder label without inventing a hierarchy. A slash
+/// is kept as text, not interpreted as a path separator.
+pub fn sanitize_bookmark_folder(raw: &str) -> String {
+    let mut text: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_BOOKMARK_FOLDER_LEN)
+        .collect();
+    if text.trim().is_empty() {
+        text = Bookmark::DEFAULT_FOLDER.to_string();
+    }
+    text
+}
+
+pub fn bookmark_site(url: &str) -> String {
+    crate::shield::host_of(url)
+        .trim_start_matches("www.")
+        .to_ascii_lowercase()
+}
+
+pub fn bookmark_sort_key(bookmark: &Bookmark, by_site: bool) -> String {
+    if by_site {
+        let site = bookmark_site(&bookmark.url);
+        format!("{site}\u{1f}{}", bookmark.title.trim().to_lowercase())
+    } else {
+        bookmark.title.trim().to_lowercase()
+    }
+}
+
+pub fn rename_bookmark(
+    bookmarks: &mut [Bookmark],
+    url: &str,
+    raw_title: &str,
+) -> Result<(), &'static str> {
+    let title: String = raw_title
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_BOOKMARK_TITLE_LEN)
+        .collect();
+    if title.trim().is_empty() {
+        return Err("Enter a title for this bookmark");
+    }
+    let bookmark = bookmarks
+        .iter_mut()
+        .find(|bookmark| bookmark.url == url)
+        .ok_or("That bookmark no longer exists")?;
+    bookmark.title = title;
+    Ok(())
+}
+
+pub fn update_bookmark_address(
+    bookmarks: &mut Vec<Bookmark>,
+    old_url: &str,
+    raw_url: &str,
+) -> Result<(), &'static str> {
+    let parsed = crate::tab_actions::validate_home_url(raw_url)?;
+    if parsed.is_empty() {
+        return Err("Enter a full http:// or https:// address");
+    }
+    let position = bookmarks
+        .iter()
+        .position(|bookmark| bookmark.url == old_url)
+        .ok_or("That bookmark no longer exists")?;
+    let url = crate::tab_actions::duplicate_url_key(&parsed);
+    bookmarks[position].url = url.clone();
+    let mut index = 0;
+    while index < bookmarks.len() {
+        if index != position
+            && crate::tab_actions::duplicate_url_key(&bookmarks[index].url) == url
+        {
+            bookmarks.remove(index);
+            if index < position {
+                let edited = bookmarks.remove(position - 1);
+                bookmarks.insert(position.min(bookmarks.len()), edited);
+            }
+            break;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+pub fn set_bookmark_folder(bookmarks: &mut [Bookmark], url: &str, folder: &str) -> bool {
+    let Some(bookmark) = bookmarks.iter_mut().find(|bookmark| bookmark.url == url) else {
+        return false;
+    };
+    bookmark.folder = sanitize_bookmark_folder(folder);
+    true
+}
+
+pub fn move_bookmark(bookmarks: &mut Vec<Bookmark>, url: &str, delta: isize) -> bool {
+    let Some(from) = bookmarks.iter().position(|bookmark| bookmark.url == url) else {
+        return false;
+    };
+    let to = (from as isize)
+        .saturating_add(delta)
+        .clamp(0, bookmarks.len().saturating_sub(1) as isize) as usize;
+    if to == from {
+        return false;
+    }
+    let bookmark = bookmarks.remove(from);
+    bookmarks.insert(to, bookmark);
+    true
+}
+
+pub fn bookmark_matches_query(bookmark: &Bookmark, query: &str) -> bool {
+    let query = query.trim();
+    query.is_empty()
+        || format!("{} {} {}", bookmark.title, bookmark.url, bookmark.folder())
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+}
+
+/// L07–L11: validate and sanitize a bookmark address before exporting, opening
+/// in a background/private tab, or placing it on the clipboard. Only explicit
+/// `http://` and `https://` addresses are accepted, embedded credentials are
+/// stripped, and oversized or control-bearing inputs are rejected.
+pub fn safe_bookmark_url(raw_url: &str) -> Option<String> {
+    let parsed = crate::tab_actions::parse_explicit_web_url(raw_url)?;
+    let clean = crate::tab_actions::strip_url_credentials(&parsed);
+    if clean.len() > crate::tab_actions::MAX_URL_LEN || !crate::tab_actions::is_web_url(&clean) {
+        return None;
+    }
+    Some(clean)
+}
+
+/// HTML-escape bookmarks exported by L07. Quotes are escaped in both text and
+/// attributes so a title cannot break out of either context.
+pub fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Decode the five HTML entities used by Netscape bookmark files. Bounded by
+/// the caller's file limit; numeric entities outside Unicode are left alone.
+pub fn html_unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '&' {
+            out.push(ch);
+            continue;
+        }
+        let mut entity = String::new();
+        let mut terminated = false;
+        while let Some(next) = chars.peek() {
+            if *next == ';' {
+                chars.next();
+                terminated = true;
+                break;
+            }
+            if entity.len() >= 16 || next.is_whitespace() || *next == '<' || *next == '&' {
+                break;
+            }
+            entity.push(*next);
+            chars.next();
+        }
+        let decoded = if terminated {
+            match entity.as_str() {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" | "#39" => Some('\''),
+                "nbsp" => Some('\u{a0}'),
+                "colon" => Some(':'),
+                _ => {
+                    let number = entity
+                        .strip_prefix("#x")
+                        .or_else(|| entity.strip_prefix("#X"))
+                        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                        .or_else(|| entity.strip_prefix('#').and_then(|decimal| decimal.parse().ok()));
+                    number.and_then(char::from_u32)
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(decoded) = decoded {
+            out.push(decoded);
+        } else {
+            out.push('&');
+            out.push_str(&entity);
+            if terminated {
+                out.push(';');
+            }
+        }
+    }
+    out
+}
+
+/// Export the flat folder list in the Netscape format browsers understand.
+pub fn bookmarks_html(bookmarks: &[Bookmark]) -> String {
+    let mut out = String::from(
+        "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n<DL><p>\n",
+    );
+    let mut folders: Vec<&str> = bookmarks
+        .iter()
+        .filter(|bookmark| safe_bookmark_url(&bookmark.url).is_some())
+        .map(|bookmark| bookmark.folder())
+        .collect();
+    folders.sort();
+    folders.dedup();
+    for folder in folders {
+        out.push_str(&format!(
+            "    <DT><H3>{}</H3>\n    <DL><p>\n",
+            html_escape(folder)
+        ));
+        for (bookmark, safe_url) in bookmarks.iter().filter_map(|bookmark| {
+            (bookmark.folder() == folder)
+                .then(|| safe_bookmark_url(&bookmark.url).map(|url| (bookmark, url)))
+                .flatten()
+        }) {
+            out.push_str(&format!(
+                "        <DT><A HREF=\"{}\" ADD_DATE=\"0\">{}</A>\n",
+                html_escape(&safe_url),
+                html_escape(&bookmark.title)
+            ));
+        }
+        out.push_str("    </DL><p>\n");
+    }
+    out.push_str("</DL><p>\n");
+    out
+}
+
+/// Bounded, lenient Netscape bookmark parser for L08. Tags are scanned as
+/// text: this never builds a DOM, follows no links, and executes no script.
+pub fn parse_bookmarks_html(raw: &str) -> (Vec<Bookmark>, usize) {
+    const MAX_HTML: usize = 4 * 1024 * 1024;
+    const MAX_URL: usize = crate::tab_actions::MAX_URL_LEN;
+    let mut end = raw.len().min(MAX_HTML);
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    let raw = &raw[..end];
+    let lower = raw.to_ascii_lowercase();
+    let mut out: Vec<Bookmark> = Vec::new();
+    let mut skipped = 0usize;
+    let mut folder_stack = Vec::new();
+    let mut pending_folder: Option<String> = None;
+    let mut pos = 0usize;
+    while pos < lower.len() {
+        let Some(open) = lower[pos..].find('<') else { break };
+        let open = pos + open;
+        let bytes = lower.as_bytes();
+        let mut quote = None;
+        let mut close = None;
+        for (index, byte) in bytes.iter().enumerate().skip(open + 1) {
+            match (*byte, quote) {
+                (b'"' | b'\'', None) => quote = Some(*byte),
+                (byte, Some(active)) if byte == active => quote = None,
+                (b'>', None) => {
+                    close = Some(index + 1);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(tag_end) = close else { break };
+        let content = &lower[open + 1..tag_end - 1];
+        let original = &raw[open + 1..tag_end - 1];
+        if content.starts_with("!--") {
+            pos = lower[tag_end..]
+                .find("-->")
+                .map(|offset| tag_end + offset + 3)
+                .unwrap_or(lower.len());
+            continue;
+        }
+        let (closing, name, attributes) = html_tag_parts(content);
+        if closing && name == "dl" {
+            folder_stack.pop();
+            pending_folder = None;
+        } else if !closing && name == "dl" {
+            let folder = pending_folder.take().unwrap_or_else(|| {
+                folder_stack
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| Bookmark::DEFAULT_FOLDER.to_string())
+            });
+            folder_stack.push(folder);
+        } else if !closing && name == "script" {
+            pos = lower[tag_end..]
+                .find("</script")
+                .and_then(|offset| {
+                    let close_start = tag_end + offset;
+                    lower[close_start..]
+                        .find('>')
+                        .map(|end_offset| close_start + end_offset + 1)
+                })
+                .unwrap_or(lower.len());
+            continue;
+        } else if !closing && name == "h3" {
+            let (text, after) = html_element_text(raw, &lower, tag_end, "h3");
+            pending_folder = Some(sanitize_bookmark_folder(&text));
+            pos = after;
+            continue;
+        } else if !closing && name == "a" {
+            let attr_offset = content.len() - attributes.len();
+            let raw_url = html_attribute(&original[attr_offset..], attributes, "href");
+            let url = raw_url.map(html_unescape).map(|value| value.trim().to_string());
+            let (title, after) = html_element_text(raw, &lower, tag_end, "a");
+            if let Some(url) = url {
+                if url.len() <= MAX_URL
+                    && crate::tab_actions::parse_explicit_web_url(&url).is_some()
+                    && out.len() < MAX_BOOKMARKS
+                {
+                    let folder = pending_folder
+                        .as_deref()
+                        .or_else(|| folder_stack.last().map(String::as_str))
+                        .unwrap_or(Bookmark::DEFAULT_FOLDER);
+                    out.push(Bookmark {
+                        url: crate::tab_actions::strip_url_credentials(&url),
+                        title: if title.is_empty() {
+                            crate::shield::host_of(&url)
+                        } else {
+                            title
+                        },
+                        folder: sanitize_bookmark_folder(folder),
+                    });
+                } else {
+                    skipped += 1;
+                }
+            }
+            pos = after;
+            continue;
+        }
+        pos = tag_end;
+    }
+    (out, skipped)
+}
+
+fn html_tag_parts(content: &str) -> (bool, &str, &str) {
+    let content = content.trim_start();
+    let (closing, content) = if let Some(content) = content.strip_prefix('/') {
+        (true, content.trim_start())
+    } else {
+        (false, content)
+    };
+    let name_end = content
+        .find(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+        .unwrap_or(content.len());
+    let name = &content[..name_end];
+    let attrs = content[name_end..].trim_start();
+    (closing, name, attrs)
+}
+
+fn html_attribute<'a>(original: &'a str, attributes_lower: &str, wanted: &str) -> Option<&'a str> {
+    let lower_bytes = attributes_lower.as_bytes();
+    let mut index = 0;
+    while index < lower_bytes.len() {
+        while index < lower_bytes.len()
+            && (lower_bytes[index].is_ascii_whitespace() || lower_bytes[index] == b'/')
+        {
+            index += 1;
+        }
+        let start = index;
+        while index < lower_bytes.len()
+            && !lower_bytes[index].is_ascii_whitespace()
+            && lower_bytes[index] != b'='
+            && lower_bytes[index] != b'/'
+        {
+            index += 1;
+        }
+        if start == index {
+            break;
+        }
+        let name = &attributes_lower[start..index];
+        while index < lower_bytes.len() && lower_bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let mut value = None;
+        if index < lower_bytes.len() && lower_bytes[index] == b'=' {
+            index += 1;
+            while index < lower_bytes.len() && lower_bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            let start_value;
+            if index < lower_bytes.len() && matches!(lower_bytes[index], b'"' | b'\'') {
+                let quote = lower_bytes[index];
+                index += 1;
+                start_value = index;
+                while index < lower_bytes.len() && lower_bytes[index] != quote {
+                    index += 1;
+                }
+                value = original.get(start_value..index);
+                if index < lower_bytes.len() {
+                    index += 1;
+                }
+            } else {
+                start_value = index;
+                while index < lower_bytes.len() && !lower_bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                value = original.get(start_value..index);
+            }
+        }
+        if name.eq_ignore_ascii_case(wanted) {
+            return value;
+        }
+    }
+    None
+}
+
+fn html_element_text(raw: &str, lower: &str, start: usize, name: &str) -> (String, usize) {
+    let close_marker = format!("</{name}");
+    let Some(close_start_offset) = lower[start..].find(&close_marker) else {
+        return (String::new(), start);
+    };
+    let close_start = start + close_start_offset;
+    let text = &raw[start..close_start];
+    let mut plain = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let Some(offset) = text[cursor..].find('<') else {
+            plain.push_str(&text[cursor..]);
+            break;
+        };
+        let tag_start = cursor + offset;
+        plain.push_str(&text[cursor..tag_start]);
+        let Some(tag_offset) = text[tag_start..].find('>') else { break };
+        cursor = tag_start + tag_offset + 1;
+    }
+    let decoded = html_unescape(&plain);
+    let normalized = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+    let bounded = normalized.chars().take(MAX_BOOKMARK_TITLE_LEN).collect();
+    let after = lower[close_start..]
+        .find('>')
+        .map(|offset| close_start + offset + 1)
+        .unwrap_or(lower.len());
+    (bounded, after)
+}
+
+/// L21: only the selected, regular history rows reach this payload. Private
+/// visits never enter `history` in the first place; this is a second guard.
+pub fn history_csv(entries: &[HistoryEntry]) -> String {
+    let mut out = String::from("title,address,visited_at_unix\n");
+    for entry in entries {
+        let safe_url = crate::tab_actions::strip_url_credentials(&entry.url);
+        if !crate::tab_actions::is_web_url(&safe_url) {
+            continue;
+        }
+        let title = entry.title.replace(['\r', '\n'], " ");
+        out.push_str(&format!(
+            "\"{}\",\"{}\",{}\n",
+            title.replace('"', "\"\""),
+            safe_url.replace('"', "\"\""),
+            entry.at
+        ));
+    }
+    out
+}
+
+/// L16-L20: local-day boundaries in seconds since the Unix epoch. `now` is
+/// taken from the app clock so tests can pin a timezone-independent instant.
+pub fn local_day_start(now: u64) -> u64 {
+    let Some(local) = gtk::glib::DateTime::from_unix_local(now as i64).ok() else {
+        return now.saturating_sub(86_400);
+    };
+    // Search backwards in six-hour steps, then forward by seconds. Local
+    // days are 23 or 25 hours across DST, so a fixed 86,400 subtraction is
+    // wrong twice a year in most of Europe and North America.
+    let mut boundary = now.saturating_sub(local.hour() as u64 * 3600)
+        .saturating_sub(local.minute() as u64 * 60)
+        .saturating_sub(local.seconds() as u64);
+    while let Some(next) = gtk::glib::DateTime::from_unix_local(boundary as i64).ok() {
+        if next.hour() == 0 && next.minute() == 0 && next.seconds() == 0.0 {
+            return boundary;
+        }
+        if next.hour() > 12 {
+            boundary = boundary.saturating_add(3600);
+        } else {
+            boundary = boundary.saturating_sub(1800);
+        }
+        if now.saturating_sub(boundary) > 100_000 {
+            break;
+        }
+    }
+    now.saturating_sub(86_400)
+}
+
+pub fn site_key(url: &str) -> String {
+    crate::shield::host_of(url).to_ascii_lowercase()
 }
 
 
@@ -458,6 +1102,16 @@ impl Records {
 
     pub fn save_spaces_at(spaces: &crate::spaces::SpaceStore, snapshot: u64) -> bool {
         files::write_json_ordered(&Self::file("spaces.json"), spaces, snapshot)
+    }
+
+    pub fn load_named_sessions() -> crate::tab_actions::NamedSessionStore {
+        files::read_json::<crate::tab_actions::NamedSessionStore>(&Self::file("named_sessions.json"))
+            .map(|s| s.sanitised())
+            .unwrap_or_default()
+    }
+
+    pub fn save_named_sessions(store: &crate::tab_actions::NamedSessionStore) -> bool {
+        files::write_json(&Self::file("named_sessions.json"), store)
     }
 
     pub fn load_history() -> Vec<HistoryEntry> {
@@ -825,6 +1479,14 @@ mod tests {
             // Neither of these is written: one is answered at launch, the
             // other belongs to this run alone.
             welcomed: true,
+            home_url: "https://example.org/home".into(),
+            default_zoom: 1.25,
+            new_tab_placement: NewTabPlacement::End,
+            startup_mode: StartupMode::Blank,
+            close_tab_focus: CloseTabFocus::Recent,
+            warn_bulk_close: false,
+            protect_pinned_tabs: true,
+            keep_awake_hosts: vec!["docs.rs".into()],
             desktop_dark: true,
             skip_restore: true,
         };
@@ -1047,6 +1709,27 @@ mod tests {
         assert_eq!(loaded.toolbar_order[0], crate::customize::ToolbarAction::Home);
         assert!(loaded.toolbar_order.contains(&crate::customize::ToolbarAction::Address));
     }
+
+    #[test]
+    fn legacy_restore_session_migrates_to_startup_mode_and_clamps_new_prefs() {
+        let legacy_off = Prefs::from_json_str(r#"{"restore_session":false}"#).expect("parses");
+        assert_eq!(legacy_off.startup_mode, StartupMode::Blank);
+        assert!(!legacy_off.restore_session);
+
+        let legacy_on = Prefs::from_json_str(r#"{"restore_session":true}"#).expect("parses");
+        assert_eq!(legacy_on.startup_mode, StartupMode::Restore);
+        assert!(legacy_on.restore_session);
+
+        let clamped = Prefs::from_json_str(
+            r#"{"home_url":"javascript:alert(1)","default_zoom":9.5,"startup_mode":"home","keep_awake_hosts":["DOCS.RS","*.bad.test","docs.rs"]}"#,
+        )
+        .expect("parses");
+        assert_eq!(clamped.home_url, "");
+        assert_eq!(clamped.default_zoom, MAX_DEFAULT_ZOOM);
+        assert_eq!(clamped.startup_mode, StartupMode::Home);
+        assert!(!clamped.restore_session, "legacy field is migration input only");
+        assert_eq!(clamped.keep_awake_hosts, vec!["docs.rs"]);
+    }
 }
 
 #[cfg(test)]
@@ -1073,5 +1756,413 @@ mod naming_tests {
         let mut history = vec![entry("https://a.test/", "a.test")];
         Records::name_visit(&mut history, "https://a.test/", "");
         assert_eq!(history[0].title, "a.test");
+    }
+}
+
+#[cfg(test)]
+mod bookmark_batch1a_tests {
+    use super::*;
+
+    fn bm(url: &str, title: &str) -> Bookmark {
+        Bookmark {
+            url: url.to_string(),
+            title: title.to_string(),
+            folder: String::new(),
+        }
+    }
+
+    #[test]
+    fn l01_rename_bookmark_updates_title_and_rejects_empty_or_missing() {
+        let mut list = vec![bm("https://example.org/a", "Old")];
+        rename_bookmark(&mut list, "https://example.org/a", "  New\nTitle\t ").expect("rename ok");
+        assert_eq!(list[0].title, "NewTitle");
+        assert!(rename_bookmark(&mut list, "https://example.org/a", "   \n\t").is_err());
+        assert!(rename_bookmark(&mut list, "https://missing.example/", "Name").is_err());
+        let long = "x".repeat(MAX_BOOKMARK_TITLE_LEN + 40);
+        rename_bookmark(&mut list, "https://example.org/a", &long).expect("bounded");
+        assert_eq!(list[0].title.chars().count(), MAX_BOOKMARK_TITLE_LEN);
+    }
+
+    #[test]
+    fn l02_update_bookmark_address_validates_scheme_strips_creds_and_dedupes() {
+        let mut list = vec![
+            bm("https://a.example/", "Alpha"),
+            bm("https://b.example/", "Beta"),
+            bm("https://keep.example/", "Keep"),
+        ];
+        assert!(update_bookmark_address(&mut list, "https://a.example/", "javascript:alert(1)").is_err());
+        assert!(update_bookmark_address(&mut list, "https://a.example/", "file:///etc/passwd").is_err());
+        assert!(update_bookmark_address(&mut list, "https://a.example/", "data:text/html,hi").is_err());
+        assert!(update_bookmark_address(&mut list, "https://a.example/", "about:blank").is_err());
+        assert!(update_bookmark_address(&mut list, "https://a.example/", "blob:https://a.example/1").is_err());
+        assert!(update_bookmark_address(&mut list, "https://a.example/", "   ").is_err());
+        assert!(update_bookmark_address(&mut list, "https://missing.example/", "https://valid.example/").is_err());
+
+        update_bookmark_address(
+            &mut list,
+            "https://a.example/",
+            "https://user:secret@C.EXAMPLE:443/path",
+        )
+        .expect("valid https");
+        assert_eq!(list[0].url, "https://c.example/path");
+        assert_eq!(list[0].title, "Alpha");
+        assert!(!list[0].url.contains("user:"));
+        assert!(!list[0].url.contains("secret"));
+
+        update_bookmark_address(&mut list, "https://c.example/path", "https://B.EXAMPLE:443/")
+            .expect("merges duplicate");
+        assert_eq!(list.len(), 2, "the edited row survives and the duplicate is removed");
+        assert_eq!(list[0].url, "https://b.example/", "edited URL stays at its original position");
+        assert_eq!(list[0].title, "Alpha", "edited title is preserved");
+        assert_eq!(list[1].url, "https://keep.example/", "unrelated rows keep their order");
+
+        let mut reverse = vec![
+            bm("https://first.example/", "First"),
+            bm("https://mid.example/", "Middle"),
+            bm("https://last.example/", "Last"),
+        ];
+        update_bookmark_address(
+            &mut reverse,
+            "https://last.example/",
+            "https://user:pass@FIRST.EXAMPLE:443/#",
+        )
+        .expect("merges duplicate earlier in list");
+        assert_eq!(reverse.len(), 2);
+        assert_eq!(
+            reverse.iter().map(|b| (b.url.as_str(), b.title.as_str())).collect::<Vec<_>>(),
+            vec![
+                ("https://mid.example/", "Middle"),
+                ("https://first.example/", "Last"),
+            ],
+            "edited row survives at its trailing position when duplicate was earlier"
+        );
+    }
+
+    #[test]
+    fn l03_l04_move_bookmark_up_and_down_clamps_boundaries() {
+        let mut list = vec![
+            bm("https://one.example/", "One"),
+            bm("https://two.example/", "Two"),
+            bm("https://three.example/", "Three"),
+        ];
+        assert!(!move_bookmark(&mut list, "https://one.example/", -1));
+        assert!(!move_bookmark(&mut list, "https://three.example/", 1));
+        assert!(move_bookmark(&mut list, "https://two.example/", -1));
+        assert_eq!(list[0].url, "https://two.example/");
+        assert_eq!(list[1].url, "https://one.example/");
+        assert!(move_bookmark(&mut list, "https://two.example/", 1));
+        assert_eq!(list[0].url, "https://one.example/");
+        assert_eq!(list[1].url, "https://two.example/");
+        assert!(!move_bookmark(&mut list, "https://missing.example/", 1));
+    }
+
+    #[test]
+    fn l05_l06_sort_by_title_and_site_are_stable_and_case_insensitive() {
+        let mut list = vec![
+            bm("https://www.zeta.example/2", "beta"),
+            bm("https://alpha.example/1", "Beta"),
+            bm("https://beta.example/3", "alpha"),
+        ];
+        list.sort_by_key(|b| bookmark_sort_key(b, false));
+        assert_eq!(
+            list.iter().map(|b| b.url.as_str()).collect::<Vec<_>>(),
+            vec![
+                "https://beta.example/3",
+                "https://www.zeta.example/2",
+                "https://alpha.example/1",
+            ],
+            "L05: case-insensitive sort preserves relative order of equal keys"
+        );
+
+        let mut by_site = vec![
+            bm("https://www.docs.example/z", "Same"),
+            bm("https://docs.example/a", "Same"),
+            bm("https://aardvark.example/1", "First"),
+        ];
+        by_site.sort_by_key(|b| bookmark_sort_key(b, true));
+        assert_eq!(
+            by_site.iter().map(|b| b.url.as_str()).collect::<Vec<_>>(),
+            vec![
+                "https://aardvark.example/1",
+                "https://www.docs.example/z",
+                "https://docs.example/a",
+            ],
+            "L06: host extraction strips www., sorts by host then title, and stays stable"
+        );
+    }
+
+    #[test]
+    fn l07_l08_html_export_escapes_strips_creds_and_roundtrips_safely() {
+        let exported = bookmarks_html(&[
+            bm(
+                "https://user:pass@example.org/q?a=1&b=2",
+                "Tom & Jerry <\"Quotes\"> 'Single' Café",
+            ),
+            bm("javascript:alert(1)", "Evil"),
+        ]);
+        assert!(exported.contains("<!DOCTYPE NETSCAPE-Bookmark-file-1>"));
+        assert!(exported.contains("https://example.org/q?a=1&amp;b=2"));
+        assert!(!exported.contains("user:pass"));
+        assert!(!exported.contains("javascript:"));
+        assert!(exported.contains("Tom &amp; Jerry &lt;&quot;Quotes&quot;&gt; &#39;Single&#39; Café"));
+        assert!(!exported.contains(".ics"));
+
+        let (parsed, skipped) = parse_bookmarks_html(&exported);
+        assert_eq!(skipped, 0);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "https://example.org/q?a=1&b=2");
+        assert_eq!(parsed[0].title, "Tom & Jerry <\"Quotes\"> 'Single' Café");
+    }
+
+    #[test]
+    fn l08_html_import_rejects_unsafe_schemes_scripts_and_bounds_input() {
+        let raw = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+        <DL><p>
+            <!-- <A HREF="https://commented.example/">Ignored</A> -->
+            <SCRIPT>var s = '<A HREF="https://scripted.example/">No</A>';</SCRIPT>
+            <DT><A HREF="javascript:alert(1)">Bad JS</A>
+            <DT><A HREF="data:text/html,hi">Bad Data</A>
+            <DT><A HREF="file:///etc/passwd">Bad File</A>
+            <DT><A HREF="https://alice:secret@good.example/a?x=1&amp;y=2">Good &amp; Safe</A>
+            <DT><A HREF='http://plain.example/page'></A>
+        </DL><p>"#;
+        let (parsed, skipped) = parse_bookmarks_html(raw);
+        assert_eq!(skipped, 3);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].url, "https://good.example/a?x=1&y=2");
+        assert_eq!(parsed[0].title, "Good & Safe");
+        assert_eq!(parsed[1].url, "http://plain.example/page");
+        assert_eq!(parsed[1].title, "plain.example");
+    }
+
+    #[test]
+    fn l08_html_import_respects_max_bookmarks_and_utf8_boundary() {
+        let mut huge = String::from("<DL>");
+        for i in 0..(MAX_BOOKMARKS + 10) {
+            huge.push_str(&format!("<DT><A HREF=\"https://s{i}.example/\">Site {i}</A>\n"));
+        }
+        huge.push_str("</DL>");
+        let (parsed, skipped) = parse_bookmarks_html(&huge);
+        assert_eq!(parsed.len(), MAX_BOOKMARKS);
+        assert_eq!(skipped, 10);
+
+        let mut over_4mb = "é".repeat(2 * 1024 * 1024 + 50);
+        over_4mb.push_str("<A HREF=\"https://tail.example/\">Tail</A>");
+        let (parsed_tail, _) = parse_bookmarks_html(&over_4mb);
+        assert!(parsed_tail.is_empty());
+    }
+
+    #[test]
+    fn l07_atomic_export_writes_and_replaces_without_temp_leftovers() {
+        let dir = std::env::temp_dir().join(format!(
+            "rill-l07-export-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("bookmarks.html");
+        let html = bookmarks_html(&[bm("https://example.org/", "Example")]);
+        crate::files::write_atomic_export(&target, html.as_bytes()).expect("atomic export");
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), html);
+        let tmps: Vec<_> = std::fs::read_dir(&dir)
+            .expect("readdir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(tmps.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bookmark_batch1b_tests {
+    use super::*;
+    use crate::app::{DownloadRec, Tab, TAB_LIMIT};
+
+    fn bm(url: &str, title: &str) -> Bookmark {
+        Bookmark {
+            url: url.to_string(),
+            title: title.to_string(),
+            folder: String::new(),
+        }
+    }
+
+    #[test]
+    fn l11_safe_bookmark_url_strips_credentials_and_rejects_unsafe_schemes() {
+        let dirty = "  https://alice:secret@docs.example.org/guide?tab=1#top  ";
+        assert_eq!(
+            safe_bookmark_url(dirty).as_deref(),
+            Some("https://docs.example.org/guide?tab=1#top")
+        );
+
+        let http = "http://user@plain.example:8080/path";
+        assert_eq!(
+            safe_bookmark_url(http).as_deref(),
+            Some("http://plain.example:8080/path")
+        );
+
+        for unsafe_url in [
+            "",
+            "   ",
+            "javascript:alert(1)",
+            "JAVASCRIPT:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "about:blank",
+            "blob:https://example.org/1234",
+            "ftp://files.example.org/pub",
+            "https://example.org/bad\nline",
+            "https://example.org/bad\r\nheader",
+            "https://example.org/with spaces",
+        ] {
+            assert_eq!(
+                safe_bookmark_url(unsafe_url),
+                None,
+                "L11 must reject unsafe or malformed URL {unsafe_url:?}"
+            );
+        }
+
+        let huge = format!("https://example.org/{}", "a".repeat(crate::tab_actions::MAX_URL_LEN));
+        assert_eq!(
+            safe_bookmark_url(&huge),
+            None,
+            "L11 must reject oversized URLs"
+        );
+    }
+
+    #[test]
+    fn l09_background_open_insertion_preserves_active_tab_and_respects_space_and_limit() {
+        let mut active = Tab::new(1);
+        active.url = "https://active.example/".to_string();
+        let mut other = Tab::new(2);
+        other.url = "https://other.example/".to_string();
+        let tabs = vec![active, other];
+        let space = crate::spaces::default_space_id();
+
+        let adjacent = crate::tab_actions::new_tab_insert_index(
+            &tabs,
+            1,
+            &space,
+            NewTabPlacement::Adjacent,
+        );
+        assert_eq!(adjacent, 1, "L09 background tab opens adjacent to active without replacing it");
+
+        let at_end = crate::tab_actions::new_tab_insert_index(
+            &tabs,
+            1,
+            &space,
+            NewTabPlacement::End,
+        );
+        assert_eq!(at_end, 2, "L09 background tab honors EndOfSpace placement");
+        assert_eq!(
+            safe_bookmark_url("https://user:pass@news.example/article").as_deref(),
+            Some("https://news.example/article")
+        );
+        assert!(TAB_LIMIT >= 40, "TAB_LIMIT remains bounded");
+    }
+
+    #[test]
+    fn l10_private_bookmark_tab_stays_out_of_regular_pages_closed_tabs_zoom_and_downloads() {
+        let bookmark_url =
+            safe_bookmark_url("https://user:pass@private.example/secret-doc")
+                .expect("safe bookmark url");
+
+        let mut regular_tab = Tab::new(1);
+        regular_tab.url = "https://regular.example/".to_string();
+        regular_tab.private = false;
+        let mut private_tab = Tab::new(2);
+        private_tab.url = bookmark_url.clone();
+        private_tab.private = true;
+        let tabs = vec![regular_tab, private_tab];
+        let (regular_pages, skipped_private) =
+            crate::tab_actions::space_regular_web_pages(&tabs, &crate::spaces::default_space_id());
+        assert_eq!(skipped_private, 1);
+        assert_eq!(regular_pages.len(), 1);
+        assert_eq!(regular_pages[0].1, "https://regular.example/");
+
+        let mut closed_stack = Vec::new();
+        crate::app::push_closed_tab(&mut closed_stack, &tabs[1], 1);
+        assert!(
+            closed_stack.is_empty(),
+            "L10: closing a privately opened bookmark tab must not enter closed-tab recovery"
+        );
+
+        let mut zoom_map = BTreeMap::new();
+        zoom_map.insert("private.example".to_string(), 1.5);
+        assert_eq!(
+            crate::tab_actions::zoom_override(&zoom_map, &bookmark_url, true),
+            None,
+            "L10: private bookmark tab must not read regular per-host zoom overrides"
+        );
+        assert_eq!(
+            crate::tab_actions::zoom_override(&zoom_map, &bookmark_url, false),
+            Some(1.5)
+        );
+
+        let private_download = DownloadRec {
+            id: 1,
+            name: "secret.pdf".into(),
+            path: "/tmp/secret.pdf".into(),
+            done: true,
+            failed: false,
+            got: 1024,
+            total: 1024,
+            private: true,
+            source_url: bookmark_url,
+            missing: false,
+        };
+        let kept: Vec<_> = [private_download]
+            .into_iter()
+            .filter(|entry| (entry.done || entry.failed) && !entry.private)
+            .collect();
+        assert!(
+            kept.is_empty(),
+            "L10: private tab downloads stay excluded from persistence filter"
+        );
+    }
+
+    #[test]
+    fn l12_bookmark_removal_and_position_restore_preserves_order_and_dedupe_key() {
+        let mut list = vec![
+            bm("https://one.example/", "One"),
+            bm("https://two.example/", "Two"),
+            bm("https://three.example/", "Three"),
+        ];
+        let index = list
+            .iter()
+            .position(|kept| kept.url == "https://two.example/")
+            .expect("present");
+        let removed = list.remove(index);
+        assert_eq!(index, 1);
+        assert_eq!(list.len(), 2);
+
+        let restore_at = index.min(list.len());
+        list.insert(restore_at, removed.clone());
+        assert_eq!(
+            list.iter().map(|b| b.url.as_str()).collect::<Vec<_>>(),
+            vec![
+                "https://one.example/",
+                "https://two.example/",
+                "https://three.example/",
+            ]
+        );
+
+        let canonical_key = crate::tab_actions::duplicate_url_key(&removed.url);
+        assert_eq!(
+            crate::tab_actions::duplicate_url_key("https://TWO.EXAMPLE:443/"),
+            canonical_key,
+            "L12: canonical URL key detects equivalent duplicate bookmark"
+        );
+
+        let tail_idx = list
+            .iter()
+            .position(|kept| kept.url == "https://three.example/")
+            .expect("tail");
+        let tail = list.remove(tail_idx);
+        list.clear();
+        let clamped_at = tail_idx.min(list.len());
+        list.insert(clamped_at, tail);
+        assert_eq!(clamped_at, 0, "L12: restore clamps index when list shrank");
+        assert_eq!(list[0].url, "https://three.example/");
     }
 }

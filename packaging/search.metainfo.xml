@@ -10,22 +10,23 @@
     <p>It uses the shared system WebKit engine rather than bundling Chromium.</p>
   </description>
   <launchable type="desktop-id">Search.desktop</launchable>
-  <url type="homepage">https://github.com/INDAR-Beurre/search-linux</url>
-  <url type="bugtracker">https://github.com/INDAR-Beurre/search-linux/issues</url>
+  <url type="homepage">https://github.com/INDAR-Beurre/Rill</url>
+  <url type="bugtracker">https://github.com/INDAR-Beurre/Rill/issues</url>
   <developer_name>Rill contributors</developer_name>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.2.0" date="2026-11-28"/>
     <release version="1.1.0" date="2026-11-27"/>
     <release version="1.0.2" date="2026-11-21"/>
     <release version="1.0.1" date="2026-11-20"/>
   </releases>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/INDAR-Beurre/search-linux/main/docs/screenshots/rill-f48/top-tabs-light.png</image>
+      <image>https://raw.githubusercontent.com/INDAR-Beurre/Rill/main/docs/screenshots/rill-f48/top-tabs-light.png</image>
       <caption>Rill start page and top tabs in light mode</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/INDAR-Beurre/search-linux/main/docs/screenshots/rill-f48/top-tabs-dark.png</image>
+      <image>https://raw.githubusercontent.com/INDAR-Beurre/Rill/main/docs/screenshots/rill-f48/top-tabs-dark.png</image>
       <caption>Rill start page in dark mode</caption>
     </screenshot>
   </screenshots>

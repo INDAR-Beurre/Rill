@@ -1,0 +1,33 @@
+Rill @VERSION@ (Linux x86_64 native binary tarball)
+===================================================
+
+This archive contains the native Rill browser binary (`bin/search` and `bin/rill`
+symlink) compiled against the system shared libraries listed in `BUILD_INFO.txt`.
+
+Requirements
+------------
+- Linux x86_64 with glibc >= @GLIBC_FLOOR@
+- GTK 3 (`libgtk-3.so.0`)
+- WebKitGTK 4.1 >= 2.40 (`libwebkit2gtk-4.1.so.0`, `libjavascriptcoregtk-4.1.so.0`)
+- libsoup 3 (`libsoup-3.0.so.0`)
+- SQLite 3 (`libsqlite3.so.0`)
+- GStreamer base & good plugins (required for WebAudio / `<audio>` playback)
+  Optional: GStreamer libav/bad/ugly plugins for H.264/VP9 video
+
+Quick install (per-user, no root required)
+------------------------------------------
+  ./install.sh
+  ~/.local/bin/rill
+
+System-wide install
+-------------------
+  sudo ./install.sh --prefix /usr/local
+
+Uninstall
+---------
+  ./uninstall.sh
+  # or: sudo ./uninstall.sh --prefix /usr/local
+
+Uninstalling removes only installed program files and desktop metadata. Your
+profile data (`~/.config/search`, `~/.local/share/search`, `~/.cache/search`)
+is preserved.

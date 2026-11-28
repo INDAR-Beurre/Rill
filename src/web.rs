@@ -498,7 +498,8 @@ pub(crate) fn attach(app: &AppRef, tab: TabId, view: &WebView) {
                         } else {
                             curtain::sync_for_url(&app, &uri);
                         }
-                        view.set_zoom_level(app.zoom_for(&uri));
+                        let private = app.state.borrow().tab(tab).is_some_and(|t| t.private);
+                        view.set_zoom_level(app.zoom_for(&uri, private));
                     }
                 }
                 // The page can keep arriving long after it is committed: a
@@ -1075,6 +1076,7 @@ fn install_context(app: &AppRef, context: &WebContext) {
             .request()
             .and_then(|request| request.uri().map(|uri| uri.to_string()))
             .unwrap_or_default();
+        let source_address = came_from.clone();
         // The tab that asked, kept now: by the time the download finishes the
         // focused tab may be another one.
         let asked_from = download.web_view().and_then(|view| app.id_of_page(&view));
@@ -1106,6 +1108,8 @@ fn install_context(app: &AppRef, context: &WebContext) {
                     .map(|r| r.content_length())
                     .unwrap_or(0),
                 private,
+                source_url: crate::tab_actions::strip_url_credentials(&source_address),
+                missing: false,
             };
             app.state.borrow_mut().downloads.insert(0, record);
             ACTIVE_DOWNLOADS.with(|map| {

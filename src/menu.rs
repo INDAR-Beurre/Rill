@@ -15,6 +15,8 @@ pub enum Pick {
     LinkTab(String),
     LinkPrivate(String),
     CopyLink(String),
+    CopyCleanLink(String),
+    OpenSelectedUrl,
     Search,
     Keep,
 }
@@ -32,9 +34,13 @@ pub fn choose(private: bool, link: Option<&str>, has_selection: bool, page: &str
             picks.push(Pick::LinkPrivate(link.to_string()));
         }
         picks.push(Pick::CopyLink(link.to_string()));
+        if crate::tab_actions::is_web_url(link) && crate::tab_actions::has_tracking_params(link) {
+            picks.push(Pick::CopyCleanLink(link.to_string()));
+        }
     }
     if has_selection {
         picks.push(Pick::Search);
+        picks.push(Pick::OpenSelectedUrl);
     }
     if is_web_page(page) {
         picks.push(Pick::Keep);
@@ -55,6 +61,8 @@ pub fn label(pick: &Pick, engine: &str, kept: bool) -> String {
         Pick::LinkTab(_) => "Open link in new tab".into(),
         Pick::LinkPrivate(_) => "Open link in private tab".into(),
         Pick::CopyLink(_) => "Copy link address".into(),
+        Pick::CopyCleanLink(_) => "Copy clean link (strip tracking)".into(),
+        Pick::OpenSelectedUrl => "Open selected web address".into(),
         Pick::Search => format!("Search {engine} for the selection"),
         Pick::Keep if kept => "Stop keeping this page".into(),
         Pick::Keep => "Keep this page".into(),
@@ -138,9 +146,33 @@ fn run(app: &AppRef, tab: TabId, pick: &Pick) {
         }
         Pick::CopyLink(link) => {
             let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-            clipboard.set_text(link);
+            clipboard.set_text(&crate::tab_actions::strip_url_credentials(link));
             clipboard.store();
             app.flash_toast("Link address copied");
+        }
+        Pick::CopyCleanLink(link) => {
+            let clean = crate::tab_actions::strip_tracking_params(link);
+            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+            clipboard.set_text(&clean);
+            clipboard.store();
+            app.flash_toast("Clean link copied");
+        }
+        Pick::OpenSelectedUrl => {
+            let Some(view) = app.view(tab) else { return };
+            let weak = app.weak();
+            js::run(&view, "window.getSelection().toString()", move |result| {
+                let Some(app) = weak.upgrade() else { return };
+                match result {
+                    Ok(text) => match crate::tab_actions::parse_explicit_web_url(&text) {
+                        Some(url) => {
+                            let private = app.state.borrow().tab(tab).is_some_and(|t| t.private);
+                            app.new_tab_in_space(Some(&url), private, false, Some(tab));
+                        }
+                        None => app.flash_toast("Selection is not a valid http:// or https:// address"),
+                    },
+                    Err(error) => app.flash_toast(&format!("No selection: {error}")),
+                }
+            });
         }
         Pick::Search => {
             // The selection is read from the page when the item is chosen, not
@@ -219,5 +251,22 @@ mod tests {
     fn keep_on_a_kept_page_says_it_will_stop_keeping() {
         assert_eq!(label(&Pick::Keep, "DuckDuckGo", true), "Stop keeping this page");
         assert_ne!(label(&Pick::Keep, "DuckDuckGo", true), label(&Pick::Keep, "DuckDuckGo", false));
+    }
+
+    #[test]
+    fn clean_link_and_selected_url_items_appear_when_relevant() {
+        let tracked = choose(
+            false,
+            Some("https://a.test/post?id=7&utm_source=feed&fbclid=xyz"),
+            false,
+            "https://x.test/",
+        );
+        assert!(tracked.iter().any(|p| matches!(p, Pick::CopyCleanLink(_))));
+
+        let clean = choose(false, Some("https://a.test/post?id=7"), false, "https://x.test/");
+        assert!(!clean.iter().any(|p| matches!(p, Pick::CopyCleanLink(_))));
+
+        let selected = choose(false, None, true, "https://x.test/");
+        assert!(selected.contains(&Pick::OpenSelectedUrl));
     }
 }

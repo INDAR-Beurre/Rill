@@ -215,7 +215,7 @@ pub fn open(app: &App) {
         tls,
         &Records::load_permissions(),
         private,
-        app.zoom_for(&url),
+        app.zoom_for(&url, private),
         extensions::here(&url),
     );
     let title = if model.host.is_empty() { "This page".to_string() } else { model.host.clone() };

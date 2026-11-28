@@ -1313,14 +1313,15 @@ mod tests {
     #[test]
     fn bookmarks_are_deduplicated_and_capped_without_unsafe_schemes() {
         let mut bookmarks = vec![
-            Bookmark { title: "One".into(), url: "https://EXAMPLE.com/".into() },
-            Bookmark { title: "Duplicate".into(), url: "https://example.com/#section".into() },
-            Bookmark { title: "Script".into(), url: "javascript:alert(1)".into() },
+            Bookmark { title: "One".into(), url: "https://EXAMPLE.com/".into(), folder: String::new() },
+            Bookmark { title: "Duplicate".into(), url: "https://example.com/#section".into(), folder: String::new() },
+            Bookmark { title: "Script".into(), url: "javascript:alert(1)".into(), folder: String::new() },
         ];
         for index in 0..10 {
             bookmarks.push(Bookmark {
                 title: format!("Page {index}"),
                 url: format!("https://example.com/{index}"),
+                folder: String::new(),
             });
         }
         let links = bookmark_links(&bookmarks);
@@ -1332,10 +1333,10 @@ mod tests {
     #[test]
     fn bookmark_links_distinguish_same_host_paths() {
         let bookmarks = vec![
-            Bookmark { title: "Office Commun".into(), url: "http://127.0.0.1:8080/office".into() },
-            Bookmark { title: "The Long Read".into(), url: "http://127.0.0.1:8080/long".into() },
-            Bookmark { title: "Root".into(), url: "https://www.example.com/".into() },
-            Bookmark { title: "Local".into(), url: "file:///tmp/notes.html".into() },
+            Bookmark { title: "Office Commun".into(), url: "http://127.0.0.1:8080/office".into(), folder: String::new() },
+            Bookmark { title: "The Long Read".into(), url: "http://127.0.0.1:8080/long".into(), folder: String::new() },
+            Bookmark { title: "Root".into(), url: "https://www.example.com/".into(), folder: String::new() },
+            Bookmark { title: "Local".into(), url: "file:///tmp/notes.html".into(), folder: String::new() },
         ];
         let links = bookmark_links(&bookmarks);
         assert_eq!(links.len(), 4);
@@ -1465,6 +1466,7 @@ mod tests {
             .map(|i| Bookmark {
                 title: format!("Site {i}"),
                 url: format!("https://site{i}.example/"),
+                folder: String::new(),
             })
             .collect();
         assert_eq!(bookmark_links_capped(&bookmarks, 4).len(), 4);

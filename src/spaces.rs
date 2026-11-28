@@ -230,6 +230,91 @@ impl SpaceStore {
         }
         Ok(removed)
     }
+
+    /// T23: Move a custom space up (`delta < 0`) or down (`delta > 0`),
+    /// keeping `DEFAULT_SPACE_ID` explicitly anchored at index 0.
+    pub fn move_space(&mut self, id: &str, delta: isize) -> bool {
+        if delta == 0 || id == DEFAULT_SPACE_ID {
+            return false;
+        }
+        let Some(pos) = self.spaces.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        if pos == 0 {
+            return false;
+        }
+        let target = if delta < 0 {
+            if pos <= 1 {
+                return false;
+            }
+            pos - 1
+        } else {
+            let next = pos + 1;
+            if next >= self.spaces.len() {
+                return false;
+            }
+            next
+        };
+        self.spaces.swap(pos, target);
+        true
+    }
+
+    /// T27 / T28: Return the next (`delta > 0`) or previous (`delta < 0`) space
+    /// ID in order, wrapping predictably across all spaces.
+    #[cfg(test)]
+    pub fn step_space(&self, delta: isize) -> Option<&Space> {
+        if self.spaces.len() < 2 || delta == 0 {
+            return None;
+        }
+        let cur = self
+            .spaces
+            .iter()
+            .position(|s| s.id == self.active_space)
+            .unwrap_or(0);
+        let len = self.spaces.len();
+        let next = if delta > 0 {
+            (cur + 1) % len
+        } else {
+            (cur + len - 1) % len
+        };
+        self.spaces.get(next)
+    }
+
+    /// T29: Filter spaces by a search query (case-insensitive words / fuzzy match).
+    pub fn filter(&self, query: &str) -> Vec<&Space> {
+        let lower = query.trim().to_lowercase();
+        if lower.is_empty() {
+            return self.spaces.iter().collect();
+        }
+        let words: Vec<&str> = lower.split_whitespace().collect();
+        self.spaces
+            .iter()
+            .filter(|s| crate::fuzzy::score(&words, &s.name.to_lowercase()).is_some())
+            .collect()
+    }
+
+    /// T24: Generate a bounded, unique name for a duplicated space.
+    pub fn unique_copy_name(&self, source_name: &str) -> String {
+        let base = sanitize_space_name(source_name).unwrap_or_else(|_| "Space".to_string());
+        for suffix_num in 1..=99usize {
+            let suffix = if suffix_num == 1 {
+                " (copy)".to_string()
+            } else {
+                format!(" (copy {suffix_num})")
+            };
+            let max_base = MAX_SPACE_NAME_LEN.saturating_sub(suffix.chars().count());
+            let head: String = base.chars().take(max_base).collect();
+            let candidate = format!("{}{suffix}", head.trim_end());
+            if !self
+                .spaces
+                .iter()
+                .any(|s| s.name.to_lowercase() == candidate.to_lowercase())
+            {
+                return candidate;
+            }
+        }
+        format!("Space {}", self.next_space_seq)
+    }
 }
 
 #[cfg(test)]
@@ -337,5 +422,48 @@ mod tests {
         let second = store.create("Research").unwrap();
         assert!(store.rename(&second.id, "ÉQUIPE").is_err());
         assert_eq!(store.sanitised().space(&first.id).unwrap().name, "Équipe");
+    }
+
+    #[test]
+    fn move_space_anchors_default_and_preserves_stable_ids() {
+        let mut store = SpaceStore::default();
+        let a = store.create("Alpha").unwrap();
+        let b = store.create("Beta").unwrap();
+        let c = store.create("Gamma").unwrap();
+
+        assert!(!store.move_space(DEFAULT_SPACE_ID, 1));
+        assert!(!store.move_space(&a.id, -1));
+        assert!(store.move_space(&c.id, -1));
+        assert_eq!(
+            store.spaces.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec![DEFAULT_SPACE_ID, a.id.as_str(), c.id.as_str(), b.id.as_str()]
+        );
+        assert!(store.move_space(&a.id, 1));
+        assert_eq!(
+            store.spaces.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec![DEFAULT_SPACE_ID, c.id.as_str(), a.id.as_str(), b.id.as_str()]
+        );
+        assert!(!store.move_space(&b.id, 1));
+    }
+
+    #[test]
+    fn step_filter_and_unique_copy_name_behave_predictably() {
+        let mut store = SpaceStore::default();
+        let work = store.create("Work").unwrap();
+        let play = store.create("Play").unwrap();
+
+        assert_eq!(store.step_space(1).map(|s| s.id.as_str()), Some(work.id.as_str()));
+        assert_eq!(store.step_space(-1).map(|s| s.id.as_str()), Some(play.id.as_str()));
+        store.set_active(&play.id);
+        assert_eq!(store.step_space(1).map(|s| s.id.as_str()), Some(DEFAULT_SPACE_ID));
+
+        assert_eq!(store.filter("wo").len(), 1);
+        assert_eq!(store.filter("wo")[0].id, work.id);
+        assert!(store.filter("zzzz").is_empty());
+
+        let copy1 = store.unique_copy_name("Work");
+        assert_eq!(copy1, "Work (copy)");
+        store.create(&copy1).unwrap();
+        assert_eq!(store.unique_copy_name("Work"), "Work (copy 2)");
     }
 }

@@ -172,6 +172,32 @@ pub struct Offer {
     pub title: String,
     pub url: String,
     pub kind: String,
+    /// Exact open tab ID when this row represents an open tab (including in another Space, T30).
+    pub tab_id: Option<TabId>,
+    /// Space name shown when the open tab belongs to a different Space than the active one.
+    pub space_name: Option<String>,
+}
+
+impl Offer {
+    pub fn simple(title: String, url: String, kind: &str) -> Self {
+        Self {
+            title,
+            url,
+            kind: kind.to_string(),
+            tab_id: None,
+            space_name: None,
+        }
+    }
+
+    pub fn open_tab(title: String, url: String, tab_id: TabId, space_name: Option<String>) -> Self {
+        Self {
+            title,
+            url,
+            kind: "Open".to_string(),
+            tab_id: Some(tab_id),
+            space_name,
+        }
+    }
 }
 
 pub struct Omnibox {
@@ -566,7 +592,7 @@ impl Omnibox {
                 }
                 // Never a picked row: the clipboard is what was asked for.
                 app.omni.picked.set(-1);
-                choose(&app, &target, false, false);
+                choose(&app, &target, false, false, None);
             });
             menu.append(&separator);
             menu.append(&item);
@@ -917,12 +943,15 @@ impl Omnibox {
             texts.add(&url_line);
             crate::ui::pack(&hbox, &texts, true);
 
-            let kind_hint = match offer.kind.as_str() {
-                "Open" => Some("Switch to tab"),
-                "Bookmark" => Some("Bookmark"),
+            let kind_hint: Option<String> = match offer.kind.as_str() {
+                "Open" => Some(match offer.space_name.as_deref() {
+                    Some(space) => format!("Switch · {space}"),
+                    None => "Switch to tab".to_string(),
+                }),
+                "Bookmark" => Some("Bookmark".to_string()),
                 _ => None,
             };
-            if let Some(hint_text) = kind_hint {
+            if let Some(hint_text) = kind_hint.as_deref() {
                 let hint = gtk::Label::new(Some(hint_text));
                 crate::ui::class(&hint, "sgkind");
                 hint.set_hexpand(false);
@@ -940,9 +969,10 @@ impl Omnibox {
             let target = offer.url.clone();
             let from_key = target.clone();
             let open_row = offer.kind == "Open";
+            let target_tab_id = offer.tab_id;
             row.connect_button_press_event(move |_, event| {
                 if let Some(app) = app_weak.upgrade() {
-                    choose(&app, &target, opens_beside(Some(event.state())), open_row);
+                    choose(&app, &target, opens_beside(Some(event.state())), open_row, target_tab_id);
                 }
                 crate::gtkx::inh(true)
             });
@@ -962,7 +992,7 @@ impl Omnibox {
                     return crate::gtkx::inh(false);
                 }
                 if let Some(app) = app_weak.upgrade() {
-                    choose(&app, &from_key, opens_beside(Some(event.state())), open_row);
+                    choose(&app, &from_key, opens_beside(Some(event.state())), open_row, target_tab_id);
                 }
                 crate::gtkx::inh(true)
             });
@@ -1115,6 +1145,14 @@ impl Omnibox {
         picked >= 0 && self.offers.borrow().get(picked as usize).is_some_and(|offer| offer.kind == "Open")
     }
 
+    pub fn picked_tab_id(&self) -> Option<TabId> {
+        let picked = self.picked.get();
+        if picked < 0 {
+            return None;
+        }
+        self.offers.borrow().get(picked as usize).and_then(|offer| offer.tab_id)
+    }
+
     pub fn picked_url(&self) -> Option<String> {
         let picked = self.picked.get();
         if picked < 0 {
@@ -1200,7 +1238,7 @@ fn opens_beside(state: Option<gtk::gdk::ModifierType>) -> bool {
 /// this tab. Taking it puts the field away, always — a field left standing
 /// over the page it just opened holds the next keystroke somewhere the user is
 /// not looking, and the page it names is no longer the page under it.
-fn choose(app: &App, target: &str, beside: bool, open_row: bool) {
+fn choose(app: &App, target: &str, beside: bool, open_row: bool, open_tab_id: Option<TabId>) {
     if beside {
         // A chosen tab closes the field from `select`, so the order here is
         // the tab first: at the tab limit `new_tab` refuses and says so, and a
@@ -1213,19 +1251,29 @@ fn choose(app: &App, target: &str, beside: bool, open_row: bool) {
     // goes to that tab, so picking it does not make a second copy of the page.
     let open = if open_row {
         let state = app.state.borrow();
-        let active_space = state.active_space_id();
-        let tabs: Vec<(TabId, &str, bool)> = state
-            .tabs
-            .iter()
-            .filter(|tab| tab.space_id == active_space)
-            .map(|tab| (tab.id, tab.url.as_str(), tab.private))
-            .collect();
-        same_privacy_tab(&tabs, state.active, target)
+        let active_private = state.active_tab().is_some_and(|t| t.private);
+        if let Some(tid) = open_tab_id {
+            // T30: Allow jumping to an exact open tab across spaces while
+            // strictly preserving the private/regular boundary.
+            state
+                .tab(tid)
+                .filter(|tab| tab.private == active_private)
+                .map(|tab| tab.id)
+        } else {
+            let active_space = state.active_space_id();
+            let tabs: Vec<(TabId, &str, bool)> = state
+                .tabs
+                .iter()
+                .filter(|tab| tab.space_id == active_space)
+                .map(|tab| (tab.id, tab.url.as_str(), tab.private))
+                .collect();
+            same_privacy_tab(&tabs, state.active, target)
+        }
     } else {
         None
     };
     if let Some(id) = open {
-        // select() puts the field away itself.
+        app.close_omni();
         app.select(id);
         return;
     }
@@ -1247,7 +1295,8 @@ fn same_privacy_tab(tabs: &[(TabId, &str, bool)], active: TabId, target: &str) -
 pub fn commit(app: &App) {
     if let Some(url) = app.omni.picked_url() {
         let open_row = app.omni.picked_is_open_tab();
-        choose(app, &url, opens_beside(gtk::current_event_state()), open_row);
+        let open_tab_id = app.omni.picked_tab_id();
+        choose(app, &url, opens_beside(gtk::current_event_state()), open_row, open_tab_id);
         return;
     }
     let typed = app.omni.entry.text().to_string();
@@ -1263,7 +1312,7 @@ pub fn commit(app: &App) {
         app.close_omni();
         return;
     }
-    choose(app, &target, opens_beside(gtk::current_event_state()), false);
+    choose(app, &target, opens_beside(gtk::current_event_state()), false, None);
 }
 
 #[cfg(test)]

@@ -130,6 +130,14 @@ thread_local! {
     // more than one.
     static MEMORY_TIMER: std::cell::RefCell<Option<glib::SourceId>> =
         const { std::cell::RefCell::new(None) };
+    // Native file choosers and response-driven dialogs must outlive the
+    // callback that created them and the nested popovers that launched them.
+    // One lifetime slot for every dialog keeps Cancel and Accept paths
+    // symmetric and makes bench-driven responses deterministic.
+    static FILE_CHOOSERS: RefCell<Vec<gtk::FileChooserNative>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_DIALOGS: RefCell<Vec<gtk::Dialog>> = const { RefCell::new(Vec::new()) };
+    static OPEN_MENUS: RefCell<Vec<gtk::Menu>> = const { RefCell::new(Vec::new()) };
+    static BATCH_CLOSE_SUPPRESS: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn current() -> Option<AppRef> {
@@ -149,11 +157,14 @@ pub struct Tab {
     pub can_forward: bool,
     pub failed: bool,
     pub asleep: bool,
+    pub muted: bool,
+    pub keep_awake: bool,
     pub row: Option<TabRow>,
     pub pin: Option<ui::PinWidget>,
     pub top_tab: Option<TabRow>,
     pub top_pin: Option<ui::PinWidget>,
     pub last_seen: u64,
+    pub last_activated: u64,
     /// Last time the page was making sound. Runtime only, never saved.
     pub last_audible: Option<std::time::Instant>,
     /// The page has an element in full screen (a video) right now.
@@ -231,15 +242,47 @@ impl Tab {
             can_forward: false,
             failed: false,
             asleep: false,
+            muted: false,
+            keep_awake: false,
             row: None,
             pin: None,
             top_tab: None,
             top_pin: None,
             last_seen: crate::store::now_secs(),
+            last_activated: 0,
             last_audible: None,
             page_full: false,
             window_was_full: false,
             nav_epoch: 0,
+        }
+    }
+
+    pub fn clone_meta(&self) -> Tab {
+        Tab {
+            id: self.id,
+            space_id: self.space_id.clone(),
+            url: self.url.clone(),
+            title: self.title.clone(),
+            pinned: self.pinned,
+            private: self.private,
+            loading: self.loading,
+            progress: self.progress,
+            can_back: self.can_back,
+            can_forward: self.can_forward,
+            failed: self.failed,
+            asleep: self.asleep,
+            muted: self.muted,
+            keep_awake: self.keep_awake,
+            row: None,
+            pin: None,
+            top_tab: None,
+            top_pin: None,
+            last_seen: self.last_seen,
+            last_activated: self.last_activated,
+            last_audible: self.last_audible,
+            page_full: self.page_full,
+            window_was_full: self.window_was_full,
+            nav_epoch: self.nav_epoch,
         }
     }
 }
@@ -269,6 +312,13 @@ pub struct DownloadRec {
     /// because the person asked for it to be saved.
     #[serde(skip)]
     pub private: bool,
+    /// L26: the request address, kept only for this run when private. It is
+    /// never persisted, copied into diagnostics, or sent anywhere.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_url: String,
+    /// L30: a settled record whose file disappeared since it completed.
+    #[serde(default, skip)]
+    pub missing: bool,
 }
 
 pub struct ErrorPage {
@@ -390,14 +440,21 @@ mod popup_tests {
 }
 
 pub const CLOSED_TAB_LIMIT: usize = 50;
+static NEXT_CLOSED_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_closed_id() -> u64 {
+    NEXT_CLOSED_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClosedTab {
+    pub id: u64,
     pub space_id: String,
     pub url: String,
     pub title: String,
     pub pinned: bool,
     pub index: usize,
+    pub ordinal: usize,
 }
 
 pub fn push_closed_tab(stack: &mut Vec<ClosedTab>, tab: &Tab, index: usize) {
@@ -408,11 +465,13 @@ pub fn push_closed_tab(stack: &mut Vec<ClosedTab>, tab: &Tab, index: usize) {
         stack.remove(0);
     }
     stack.push(ClosedTab {
+        id: next_closed_id(),
         space_id: tab.space_id.clone(),
-        url: tab.url.clone(),
+        url: crate::tab_actions::strip_url_credentials(&tab.url),
         title: tab.title.clone(),
         pinned: tab.pinned,
         index,
+        ordinal: index,
     });
 }
 
@@ -429,7 +488,17 @@ pub fn restore_closed_tab(tabs: &mut Vec<Tab>, next_id: &mut TabId, closed: Clos
     tab.title = closed.title;
     tab.pinned = closed.pinned;
     tab.asleep = false;
-    let at = closed.index.min(tabs.len());
+    let partition: Vec<usize> = tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.space_id == tab.space_id && item.pinned == tab.pinned)
+        .map(|(index, _)| index)
+        .collect();
+    let at = partition
+        .get(closed.ordinal)
+        .copied()
+        .or_else(|| partition.last().map(|index| index + 1))
+        .unwrap_or_else(|| closed.index.min(tabs.len()));
     tabs.insert(at, tab);
     id
 }
@@ -451,6 +520,10 @@ pub struct State {
     /// The last window each tab asked for and was refused, for its card.
     pub blocked: BTreeMap<TabId, BlockedPopup>,
     pub closed_tabs: Vec<ClosedTab>,
+    pub closed_batches: Vec<crate::tab_actions::ClosedBatch>,
+    pub activation_seq: u64,
+    pub named_sessions: crate::tab_actions::NamedSessionStore,
+    pub last_deleted_session: Option<(usize, crate::tab_actions::NamedSession)>,
 }
 
 impl State {
@@ -589,6 +662,16 @@ pub fn record_zoom(zoom_by_host: &mut BTreeMap<String, f64>, private: bool, url:
     }
 }
 
+/// L43: clear exactly one host's explicit zoom override. Private pages never
+/// read or write `zoom_by_host`, so this cannot touch a private tab.
+pub fn clear_host_zoom(zoom_by_host: &mut BTreeMap<String, f64>, url: &str) -> bool {
+    let key = zoom_key(url);
+    if key.is_empty() {
+        return false;
+    }
+    zoom_by_host.remove(&key).is_some()
+}
+
 pub fn pin_columns(usable_width: i32) -> usize {
     (((usable_width + 3) / (35 + 3)).max(1)) as usize
 }
@@ -706,6 +789,23 @@ fn tab_subtitle(url: &str, private: bool, asleep: bool) -> String {
         subtitle.push_str(&path);
     }
     if asleep { format!("{subtitle} · sleeping") } else { subtitle }
+}
+
+fn tab_subtitle_with_flags(
+    url: &str,
+    private: bool,
+    asleep: bool,
+    keep_awake: bool,
+    muted: bool,
+) -> String {
+    let mut out = tab_subtitle(url, private, asleep);
+    if !asleep && keep_awake {
+        out.push_str(" · awake");
+    }
+    if muted {
+        out.push_str(" · muted");
+    }
+    out
 }
 
 /// A failed tab's row says what failed, instead of falling back to the bare
@@ -874,7 +974,9 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
     // written before records carried `active` or `space_id` migrates cleanly
     // into Default, and per-space active tabs are remembered across restarts.
     let mut restored_active: Option<TabId> = None;
-    if prefs.restore_session && !prefs.skip_restore {
+    let should_restore = !prefs.skip_restore
+        && prefs.startup_mode == crate::store::StartupMode::Restore;
+    if should_restore {
         // Restore obeys the same cap as opening new tabs, so an oversized
         // or hand-edited session file can't start the browser with more
         // tabs than it would ever let you open.
@@ -885,6 +987,8 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
             tab.url = record.url;
             tab.title = record.title;
             tab.pinned = record.pinned;
+            tab.muted = record.muted;
+            tab.keep_awake = record.keep_awake;
             tab.asleep = !tab.url.is_empty();
             if record.space_active && !space_active_tabs.contains_key(&space_id) {
                 space_active_tabs.insert(space_id.clone(), next_id);
@@ -900,9 +1004,16 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         }
     }
     if !tabs.iter().any(|t| t.space_id == active_space) {
-        let mut blank = Tab::new(next_id);
-        blank.space_id = active_space.clone();
-        tabs.push(blank);
+        let mut initial = Tab::new(next_id);
+        initial.space_id = active_space.clone();
+        if !prefs.skip_restore
+            && prefs.startup_mode == crate::store::StartupMode::Home
+            && crate::tab_actions::is_web_url(&prefs.home_url)
+        {
+            initial.url = prefs.home_url.clone();
+            initial.asleep = false;
+        }
+        tabs.push(initial);
         next_id += 1;
     }
     let active = restored_active
@@ -926,6 +1037,10 @@ pub fn start(mut prefs: crate::store::Prefs) -> AppRef {
         hide_origin: None,
         blocked: BTreeMap::new(),
         closed_tabs: Vec::new(),
+        closed_batches: Vec::new(),
+        activation_seq: 1,
+        named_sessions: Records::load_named_sessions(),
+        last_deleted_session: None,
     };
 
     let omni = Omnibox::new(&palette);
@@ -1274,11 +1389,13 @@ impl App {
             // row title until navigate() replaces it with the resolved one.
             tab.url = if background { url.unwrap_or("").to_string() } else { String::new() };
             tab.asleep = url.is_none();
-            let at = state
-                .position(anchor_id)
-                .filter(|&p| state.tabs[p].space_id == target_space)
-                .map(|p| p + 1)
-                .unwrap_or(state.tabs.len());
+            let placement = self.prefs.borrow().new_tab_placement;
+            let at = crate::tab_actions::new_tab_insert_index(
+                &state.tabs,
+                anchor_id,
+                &target_space,
+                placement,
+            );
             state.tabs.insert(at, tab);
             id
         };
@@ -1454,7 +1571,12 @@ impl App {
         // show() fills the field with the current address; a switcher starts
         // empty so the first letter typed is already a filter.
         entry.set_text("");
-        entry.set_placeholder_text(Some("Switch to a tab"));
+        let multi_space = self.state.borrow().spaces.spaces.len() > 1;
+        entry.set_placeholder_text(Some(if multi_space {
+            "Switch to a tab across spaces"
+        } else {
+            "Switch to a tab"
+        }));
         // The focus grab waits for an idle so the field is mapped first. A
         // switcher closed before that idle runs (Escape, or a tab picked in the
         // same burst of events) used to get focus back anyway. That left the
@@ -1561,9 +1683,15 @@ impl App {
         if self.state.borrow().blocked.contains_key(&id) {
             self.show_blocked_card(id);
         }
-        if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
-            tab.asleep = false;
-            tab.last_seen = crate::store::now_secs();
+        {
+            let mut state = self.state.borrow_mut();
+            state.activation_seq = state.activation_seq.saturating_add(1);
+            let seq = state.activation_seq;
+            if let Some(tab) = state.tab_mut(id) {
+                tab.asleep = false;
+                tab.last_seen = crate::store::now_secs();
+                tab.last_activated = seq;
+            }
         }
         let find_query = if self.find.try_borrow().map(|f| f.visible).unwrap_or(false) {
             if let Ok(find) = self.find.try_borrow() {
@@ -1693,6 +1821,21 @@ impl App {
     }
 
     pub fn close_tab(&self, id: TabId) {
+        self.close_tab_with_policy(id, false);
+    }
+
+    pub fn close_tab_force(&self, id: TabId) {
+        self.close_tab_with_policy(id, true);
+    }
+
+    fn close_tab_with_policy(&self, id: TabId, allow_protected_pin: bool) {
+        if !allow_protected_pin && self.prefs.borrow().protect_pinned_tabs {
+            let is_pinned = self.state.borrow().tab(id).is_some_and(|t| t.pinned);
+            if is_pinned {
+                self.flash_toast("Pinned tab is protected — unpin it first");
+                return;
+            }
+        }
         let trace = std::env::var_os("SEARCH_TRACE_CLOSE").is_some();
         let started = std::time::Instant::now();
         // A prompt the tab is waiting on is refused before the tab goes, and
@@ -1755,7 +1898,7 @@ impl App {
             let visual_before = state.space_tab_ids_visual(&closed_space);
             let visual_pos = visual_before.iter().position(|&tid| tid == id).unwrap_or(0);
             let removed = state.tabs.remove(index);
-            if is_source_file.is_none() {
+            if is_source_file.is_none() && !BATCH_CLOSE_SUPPRESS.with(Cell::get) {
                 push_closed_tab(&mut state.closed_tabs, &removed, index);
             }
             let remaining_in_space = state.space_tab_ids_visual(&closed_space);
@@ -1766,8 +1909,14 @@ impl App {
                 fresh.space_id = closed_space.clone();
                 state.tabs.push(fresh);
             }
+            let close_focus = self.prefs.borrow().close_tab_focus;
             let space_after = state.space_tab_ids_visual(&closed_space);
-            if let Some(&replacement) = space_after.get(visual_pos.min(space_after.len().saturating_sub(1))) {
+            if let Some(replacement) = crate::tab_actions::choose_next_active_after_close(
+                visual_pos,
+                &space_after,
+                &state.tabs,
+                close_focus,
+            ) {
                 if state.space_active_tabs.get(&closed_space) == Some(&id) {
                     state.space_active_tabs.insert(closed_space.clone(), replacement);
                 }
@@ -1850,7 +1999,14 @@ impl App {
         let Some(app) = current() else { return };
         let Some(view) = web::view_for(&app, id) else { return };
         view.set_widget_name(&format!("page-{id}"));
-        let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
+        let (url, muted, private) = self
+            .state
+            .borrow()
+            .tab(id)
+            .map(|t| (t.url.clone(), t.muted, t.private))
+            .unwrap_or_default();
+        view.set_is_muted(muted);
+        view.set_zoom_level(self.zoom_for(&url, private));
         self.tone_for(&view);
         self.ui.stack.add_named(&view, &format!("tab-{id}"));
         view.show_all();
@@ -2441,10 +2597,10 @@ impl App {
                 let info = {
                     let state = self.state.borrow();
                     state.tab(id).and_then(|t| {
-                        t.row.as_ref().map(|row| (row.event.clone(), row.title.clone(), row.subtitle.clone(), row.close.clone(), t.asleep))
+                        t.row.as_ref().map(|row| (row.event.clone(), row.title.clone(), row.subtitle.clone(), row.close.clone(), t.asleep, t.keep_awake))
                     })
                 };
-                if let Some((event, title, subtitle, close, asleep)) = info {
+                if let Some((event, title, subtitle, close, asleep, keep_awake)) = info {
                     event.set_size_request(-1, height);
                     subtitle.set_visible(height >= 44);
                     let context = event.style_context();
@@ -2457,6 +2613,11 @@ impl App {
                         context.add_class("asleep");
                     } else {
                         context.remove_class("asleep");
+                    }
+                    if keep_awake {
+                        context.add_class("keep-awake");
+                    } else {
+                        context.remove_class("keep-awake");
                     }
                     let title_ctx = title.style_context();
                     if id == active {
@@ -2486,29 +2647,7 @@ impl App {
                 .tabs
                 .iter()
                 .filter(|t| !t.pinned && t.space_id == space_id)
-                .map(|t| Tab {
-                    id: t.id,
-                    space_id: t.space_id.clone(),
-                    url: t.url.clone(),
-                    title: t.title.clone(),
-                    pinned: t.pinned,
-                    private: t.private,
-                    loading: t.loading,
-                    progress: t.progress,
-                    can_back: t.can_back,
-                    can_forward: t.can_forward,
-                    failed: t.failed,
-                    asleep: t.asleep,
-                    row: None,
-                    pin: None,
-                    top_tab: None,
-                    top_pin: None,
-                    last_seen: t.last_seen,
-                    last_audible: t.last_audible,
-                    page_full: t.page_full,
-                    window_was_full: t.window_was_full,
-                    nav_epoch: t.nav_epoch,
-                })
+                .map(Tab::clone_meta)
                 .collect();
             (tabs, state.active)
         };
@@ -2536,7 +2675,16 @@ impl App {
                 tab.id == active,
                 ui::TabState { asleep: tab.asleep, loading: tab.loading, private: tab.private },
             );
-            row.subtitle.set_text(&tab_subtitle(&tab.url, tab.private, tab.asleep));
+            row.subtitle.set_text(&tab_subtitle_with_flags(
+                &tab.url,
+                tab.private,
+                tab.asleep,
+                tab.keep_awake,
+                tab.muted,
+            ));
+            if tab.keep_awake {
+                row.event.style_context().add_class("keep-awake");
+            }
             let icon = self.tab_favicon_surface(tab.id, &tab.url, tab.private);
             if let Some(surface) = icon.as_ref() {
                 if !tab.private && !tab.loading {
@@ -2730,11 +2878,22 @@ impl App {
     /// The tooltip and accessible name for a pin. One place for the first
     /// draw and for the in-place update after a tab switch, so they cannot
     /// drift apart.
-    fn pin_words(title: &str, live: bool) -> (String, String) {
+    fn pin_words_with_flags(title: &str, live: bool, keep_awake: bool, muted: bool) -> (String, String) {
+        let mut notes = Vec::new();
         if live {
-            (format!("{title}\nActive tab"), format!("Pinned tab: {title}, active"))
-        } else {
+            notes.push("active");
+        }
+        if keep_awake {
+            notes.push("kept awake");
+        }
+        if muted {
+            notes.push("muted");
+        }
+        if notes.is_empty() {
             (title.to_string(), format!("Pinned tab: {title}"))
+        } else {
+            let suffix = notes.join(", ");
+            (format!("{title}\n{suffix}"), format!("Pinned tab: {title}, {suffix}"))
         }
     }
 
@@ -2819,14 +2978,20 @@ impl App {
         {
             let state = self.state.borrow();
             for (id, _, title, _, live, _, _) in &pinned {
-                let Some(tile) = state.tab(*id).and_then(|tab| tab.pin.as_ref()) else { continue };
+                let Some(tab) = state.tab(*id) else { continue };
+                let Some(tile) = tab.pin.as_ref() else { continue };
                 let context = tile.event.style_context();
                 if *live {
                     context.add_class("live");
                 } else {
                     context.remove_class("live");
                 }
-                let (tip, name) = Self::pin_words(title, *live);
+                if tab.keep_awake {
+                    context.add_class("keep-awake");
+                } else {
+                    context.remove_class("keep-awake");
+                }
+                let (tip, name) = Self::pin_words_with_flags(title, *live, tab.keep_awake, tab.muted);
                 tile.event.set_tooltip_text(Some(&tip));
                 if let Some(access) = tile.event.accessible() {
                     gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
@@ -2851,6 +3016,15 @@ impl App {
             let live = *live;
             let private = *private;
             let tile = ui::pin_tile(letter, live, private, *self.palette.borrow());
+            let (keep_awake, muted) = self
+                .state
+                .borrow()
+                .tab(id)
+                .map(|t| (t.keep_awake, t.muted))
+                .unwrap_or((false, false));
+            if keep_awake {
+                tile.event.style_context().add_class("keep-awake");
+            }
             if private {
                 ui::mark_glyph(&tile.icon, crate::icons::Icon::Mask, None, 16, self.palette.borrow().muted);
                 tile.icon.set_no_show_all(false);
@@ -2862,7 +3036,7 @@ impl App {
                 tile.icon.show_all();
                 tile.letter.hide();
             }
-            let (tip, name) = Self::pin_words(title, live);
+            let (tip, name) = Self::pin_words_with_flags(title, live, keep_awake, muted);
             tile.event.set_tooltip_text(Some(&tip));
             if let Some(access) = tile.event.accessible() {
                 gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
@@ -3089,10 +3263,12 @@ impl App {
         {
             let state = self.state.borrow();
             for (id, _, title, _, live, _, _) in &pinned {
-                let Some(tile) = state.tab(*id).and_then(|tab| tab.top_pin.as_ref()) else { continue };
+                let Some(tab) = state.tab(*id) else { continue };
+                let Some(tile) = tab.top_pin.as_ref() else { continue };
                 let context = tile.event.style_context();
                 if *live { context.add_class("live"); } else { context.remove_class("live"); }
-                let (tip, name) = Self::pin_words(title, *live);
+                if tab.keep_awake { context.add_class("keep-awake"); } else { context.remove_class("keep-awake"); }
+                let (tip, name) = Self::pin_words_with_flags(title, *live, tab.keep_awake, tab.muted);
                 tile.event.set_tooltip_text(Some(&tip));
                 if let Some(access) = tile.event.accessible() {
                     gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
@@ -3114,6 +3290,15 @@ impl App {
         )];
         for (id, letter, title, url, live, private, _) in pinned {
             let tile = ui::top_pin_chip(&letter, live, private, *self.palette.borrow());
+            let (keep_awake, muted) = self
+                .state
+                .borrow()
+                .tab(id)
+                .map(|t| (t.keep_awake, t.muted))
+                .unwrap_or((false, false));
+            if keep_awake {
+                tile.event.style_context().add_class("keep-awake");
+            }
             if private {
                 ui::mark_glyph(&tile.icon, crate::icons::Icon::Mask, None, 15, self.palette.borrow().muted);
                 tile.icon.set_no_show_all(false);
@@ -3125,7 +3310,7 @@ impl App {
                 tile.icon.show_all();
                 tile.letter.hide();
             }
-            let (tip, name) = Self::pin_words(&title, live);
+            let (tip, name) = Self::pin_words_with_flags(&title, live, keep_awake, muted);
             tile.event.set_tooltip_text(Some(&tip));
             if let Some(access) = tile.event.accessible() {
                 gtk::atk::prelude::AtkObjectExt::set_name(&access, &name);
@@ -3295,14 +3480,44 @@ impl App {
                 let info = {
                     let state = self.state.borrow();
                     state.tab(id).and_then(|t| {
-                        t.top_tab.as_ref().map(|row| (row.event.clone(), row.title.clone(), row.close.clone(), t.asleep))
+                        t.top_tab.as_ref().map(|row| {
+                            (
+                                row.event.clone(),
+                                row.title.clone(),
+                                row.close.clone(),
+                                t.asleep,
+                                t.keep_awake,
+                                t.muted,
+                                t.title.clone(),
+                                t.url.clone(),
+                                t.private,
+                            )
+                        })
                     })
                 };
-                if let Some((event, title, close, asleep)) = info {
+                if let Some((event, title, close, asleep, keep_awake, muted, tab_title, tab_url, private)) = info {
                     event.set_size_request(top_tab_width, tab_height);
                     let context = event.style_context();
                     if id == active { context.add_class("live"); } else { context.remove_class("live"); }
                     if asleep { context.add_class("asleep"); } else { context.remove_class("asleep"); }
+                    if keep_awake { context.add_class("keep-awake"); } else { context.remove_class("keep-awake"); }
+                    let mut tip = if tab_url.is_empty() {
+                        if private { "Private tab".to_string() } else { "New tab".to_string() }
+                    } else {
+                        format!(
+                            "{}\n{}",
+                            if tab_title.is_empty() { "Untitled" } else { tab_title.as_str() },
+                            crate::tab_actions::strip_url_credentials(&tab_url)
+                        )
+                    };
+                    let mut flags = Vec::new();
+                    if asleep { flags.push("sleeping"); }
+                    if keep_awake && !asleep { flags.push("kept awake"); }
+                    if muted { flags.push("muted"); }
+                    if !flags.is_empty() {
+                        tip.push_str(&format!("\n{}", flags.join(" · ")));
+                    }
+                    event.set_tooltip_text(Some(&tip));
                     let title_ctx = title.style_context();
                     if id == active { title_ctx.add_class("liveword"); } else { title_ctx.remove_class("liveword"); }
                     let prelit = |w: &gtk::Widget| w.state_flags().contains(gtk::StateFlags::PRELIGHT);
@@ -3323,7 +3538,7 @@ impl App {
         let (tabs, active) = {
             let state = self.state.borrow();
             let space_id = state.active_space_id();
-            let list: Vec<(TabId, String, String, char, bool, bool, bool)> = state
+            let list: Vec<(TabId, String, String, char, bool, bool, bool, bool)> = state
                 .tabs
                 .iter()
                 .filter(|t| !t.pinned && t.space_id == space_id)
@@ -3337,7 +3552,7 @@ impl App {
                     } else {
                         t.title.clone()
                     };
-                    (t.id, title, t.url.clone(), t.letter(), t.asleep, t.loading, t.private)
+                    (t.id, title, t.url.clone(), t.letter(), t.asleep, t.loading, t.private, t.keep_awake)
                 })
                 .collect();
             (list, state.active)
@@ -3347,7 +3562,7 @@ impl App {
             gtk::TargetFlags::SAME_APP,
             0,
         )];
-        for (id, title, url, letter, asleep, loading, private) in tabs {
+        for (id, title, url, letter, asleep, loading, private, keep_awake) in tabs {
             let chip = ui::top_tab_chip(
                 &title,
                 *self.palette.borrow(),
@@ -3355,6 +3570,9 @@ impl App {
                 id == active,
                 ui::TabState { asleep, loading, private },
             );
+            if keep_awake {
+                chip.event.style_context().add_class("keep-awake");
+            }
             chip.event.set_size_request(top_tab_width, tab_height);
             let icon = self.tab_favicon_surface(id, &url, private);
             if let Some(surface) = icon.as_ref() {
@@ -3365,8 +3583,21 @@ impl App {
             let tip = if url.is_empty() {
                 if private { "Private tab".to_string() } else { "New tab".to_string() }
             } else {
-                format!("{}\n{}", if title.is_empty() { "Untitled" } else { title.as_str() }, url)
+                format!(
+                    "{}\n{}",
+                    if title.is_empty() { "Untitled" } else { title.as_str() },
+                    crate::tab_actions::strip_url_credentials(&url)
+                )
             };
+            let muted = self.state.borrow().tab(id).is_some_and(|t| t.muted);
+            let mut tip = tip;
+            let mut flags = Vec::new();
+            if asleep { flags.push("sleeping"); }
+            if keep_awake && !asleep { flags.push("kept awake"); }
+            if muted { flags.push("muted"); }
+            if !flags.is_empty() {
+                tip.push_str(&format!("\n{}", flags.join(" · ")));
+            }
             chip.event.set_tooltip_text(Some(&tip));
             if let Some(access) = chip.event.accessible() {
                 gtk::atk::prelude::AtkObjectExt::set_name(&access, &tip);
@@ -3558,7 +3789,7 @@ impl App {
         self.ui.forward.set_sensitive(forward);
         self.ui.reload.set_sensitive(!url.is_empty());
         self.ui.reader.set_sensitive(!url.is_empty());
-        self.ui.bookmark.set_sensitive(!url.is_empty());
+        self.ui.bookmark.set_sensitive(!url.is_empty() && !private);
         self.ui.address_label.set_text(&chrome_address(&url, private));
         // Round-68 review: the trusted origin stays its own chip, but the
         // path that actually failed is now visible beside it. Keeping the two
@@ -3692,7 +3923,15 @@ impl App {
                 .map(|row| (row.title.clone(), row.letter.clone()));
             let pin_letter = tab.pin.as_ref().map(|pin| pin.letter.clone());
             let top_pin_letter = tab.top_pin.as_ref().map(|pin| pin.letter.clone());
-            (title, letter, row, top_tab, pin_letter, top_pin_letter, tab_subtitle(&tab.url, tab.private, tab.asleep))
+            (
+                title,
+                letter,
+                row,
+                top_tab,
+                pin_letter,
+                top_pin_letter,
+                tab_subtitle_with_flags(&tab.url, tab.private, tab.asleep, tab.keep_awake, tab.muted),
+            )
         };
         let (title, letter, row, top_tab, pin_letter, top_pin_letter, subtitle) = info;
         if let Some((row_title, row_letter, row_subtitle)) = row {
@@ -4267,9 +4506,15 @@ impl App {
         }
     }
 
-    /// Navigate the active tab to the minimal Start Page while preserving
-    /// private/regular tab isolation.
+    /// Navigate the active tab to the configured Home page (T38), or to the
+    /// minimal Start Page when none is set, while preserving private/regular
+    /// tab isolation.
     pub fn go_home(&self) {
+        let custom_home = self.prefs.borrow().home_url.clone();
+        if crate::tab_actions::is_web_url(&custom_home) {
+            self.navigate_active(&custom_home);
+            return;
+        }
         let active = self.active_id();
         if self.reading.get() {
             self.reader();
@@ -5035,7 +5280,12 @@ impl App {
     }
 
     pub fn copy_address(&self) {
-        let url = self.state.borrow().active_tab().map(|t| t.url.clone()).unwrap_or_default();
+        let url = self
+            .state
+            .borrow()
+            .active_tab()
+            .map(|t| crate::tab_actions::strip_url_credentials(&t.url))
+            .unwrap_or_default();
         let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
         clipboard.set_text(&url);
         clipboard.store();
@@ -5122,9 +5372,9 @@ impl App {
     /// Tabs that have not been looked at let go of their page. The tab keeps
     /// its address and title; the page is made again when it is selected.
     pub fn sleep_others(&self) {
-        let (enabled, minutes) = {
+        let (enabled, minutes, keep_awake_hosts) = {
             let prefs = self.prefs.borrow();
-            (prefs.memory_saver, prefs.sleep_minutes as u64)
+            (prefs.memory_saver, prefs.sleep_minutes as u64, prefs.keep_awake_hosts.clone())
         };
         if !enabled {
             return;
@@ -5141,6 +5391,8 @@ impl App {
                     tab.id != active
                         && !tab.asleep
                         && !tab.loading
+                        && !tab.keep_awake
+                        && !crate::tab_actions::is_host_kept_awake(&tab.url, &keep_awake_hosts)
                         && may_sleep(tab.last_audible, instant_now, minutes)
                         && now.saturating_sub(tab.last_seen) > minutes * 60
                 })
@@ -5348,33 +5600,51 @@ impl App {
         // Ctrl K lists open tabs only, and all of them up to the list's eight
         // seats instead of the usual three.
         let switching = tab_switcher_on();
-        let tab_seats = if switching { 8 } else { 3 };
+        let tab_seats = if switching { 12 } else { 3 };
         let state = self.state.borrow();
         let active_space = state.active_space_id();
-        let mut open: Vec<(i32, usize, Offer)> = Vec::new();
+        let active_private = state.active_tab().is_some_and(|t| t.private);
+        let mut open: Vec<(i32, usize, usize, Offer)> = Vec::new();
         for (index, tab) in state.tabs.iter().enumerate() {
-            if tab.url.is_empty() || tab.space_id != active_space {
+            if tab.url.is_empty() || tab.private != active_private {
                 continue;
             }
-            let hay = format!("{} {}", tab.title, tab.url).to_lowercase();
-            // Two tabs on the same page are one suggestion, not two.
-            if open.iter().any(|(_, _, o)| o.url == tab.url) {
+            // T30: Ctrl+K tab switcher searches across ALL spaces (preserving privacy boundary);
+            // ordinary address bar keeps open-tab suggestions scoped to the current space.
+            if !switching && tab.space_id != active_space {
+                continue;
+            }
+            let space_name = if tab.space_id != active_space {
+                state.spaces.space(&tab.space_id).map(|s| s.name.clone())
+            } else {
+                None
+            };
+            let hay = match space_name.as_deref() {
+                Some(sname) => format!("{} {} {}", tab.title, tab.url, sname).to_lowercase(),
+                None => format!("{} {}", tab.title, tab.url).to_lowercase(),
+            };
+            // Deduplicate identical URLs within the same space, while letting
+            // distinct spaces keep their own switch target.
+            if open.iter().any(|(_, _, _, o)| o.url == tab.url && o.space_name == space_name) {
                 continue;
             }
             if hit(&hay) {
+                let space_penalty = if tab.space_id == active_space { 0 } else { 1 };
                 open.push((
                     strength(&tab.title, &tab.url),
+                    space_penalty,
                     index,
-                    Offer {
-                        title: if tab.title.is_empty() { tab.url.clone() } else { tab.title.clone() },
-                        url: tab.url.clone(),
-                        kind: "Open".into(),
-                    },
+                    Offer::open_tab(
+                        if tab.title.is_empty() { tab.url.clone() } else { tab.title.clone() },
+                        tab.url.clone(),
+                        tab.id,
+                        space_name,
+                    ),
                 ));
             }
         }
-        open.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        for (_, _, offer) in open.into_iter().take(tab_seats) {
+        open.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        for (_, _, _, offer) in open.into_iter().take(tab_seats) {
             offers.push(offer);
         }
         // The tab switcher stops here: no kept pages, no history and no
@@ -5392,11 +5662,7 @@ impl App {
             }
             let hay = format!("{} {}", bookmark.title, bookmark.url).to_lowercase();
             if hit(&hay) && !offers.iter().any(|o| o.url == bookmark.url) {
-                offers.push(Offer {
-                    title: bookmark.title.clone(),
-                    url: bookmark.url.clone(),
-                    kind: "Bookmark".into(),
-                });
+                offers.push(Offer::simple(bookmark.title.clone(), bookmark.url.clone(), "Bookmark"));
                 kept += 1;
             }
         }
@@ -5407,15 +5673,15 @@ impl App {
             let hay = format!("{} {}", entry.title, entry.url).to_lowercase();
             // One row per address: a page visited twice is not two suggestions.
             if hit(&hay) && !offers.iter().any(|o| o.url == entry.url) {
-                offers.push(Offer {
-                    title: if entry.title.is_empty() {
+                offers.push(Offer::simple(
+                    if entry.title.is_empty() {
                         crate::shield::host_of(&entry.url)
                     } else {
                         entry.title.clone()
                     },
-                    url: entry.url.clone(),
-                    kind: "History".into(),
-                });
+                    entry.url.clone(),
+                    "History",
+                ));
             }
         }
         offers.truncate(8);
@@ -5434,11 +5700,10 @@ impl App {
             drop(prefs);
             if let Some((url, name, rest)) = shortcut {
                 if !offers.iter().any(|o| o.url == url) {
-                    offers.insert(0, Offer {
-                        title: format!("Search {name} for \"{rest}\""),
-                        url,
-                        kind: "Keyword".into(),
-                    });
+                    offers.insert(
+                        0,
+                        Offer::simple(format!("Search {name} for \"{rest}\""), url, "Keyword"),
+                    );
                     offers.truncate(8);
                 }
             } else if is_search && !offers.iter().any(|o| o.url == target) {
@@ -5455,11 +5720,10 @@ impl App {
                             || url.split('/').any(|part| part == words.to_lowercase())
                     });
                 let insert_at = exact.map(|index| index + 1).unwrap_or(0);
-                offers.insert(insert_at, Offer {
-                    title: format!("Search for \"{words}\""),
-                    url: target,
-                    kind: "Search".into(),
-                });
+                offers.insert(
+                    insert_at,
+                    Offer::simple(format!("Search for \"{words}\""), target, "Search"),
+                );
                 offers.truncate(8);
             }
         }
@@ -5490,11 +5754,7 @@ impl App {
                 }
                 let hay = format!("{} {}", bookmark.title, bookmark.url).to_lowercase();
                 if hit(&hay) && !offers.iter().any(|o| o.url == bookmark.url) {
-                    offers.push(Offer {
-                        title: bookmark.title.clone(),
-                        url: bookmark.url.clone(),
-                        kind: "Bookmark".into(),
-                    });
+                    offers.push(Offer::simple(bookmark.title.clone(), bookmark.url.clone(), "Bookmark"));
                 }
             }
         }
@@ -5508,11 +5768,12 @@ impl App {
             }
             let hay = format!("{} {}", tab.title, tab.url).to_lowercase();
             if hit(&hay) && !offers.iter().any(|o| o.url == tab.url) {
-                offers.push(Offer {
-                    title: if tab.title.is_empty() { tab.url.clone() } else { tab.title.clone() },
-                    url: tab.url.clone(),
-                    kind: "Open".into(),
-                });
+                offers.push(Offer::open_tab(
+                    if tab.title.is_empty() { tab.url.clone() } else { tab.title.clone() },
+                    tab.url.clone(),
+                    tab.id,
+                    None,
+                ));
             }
         }
         if !private {
@@ -5522,15 +5783,15 @@ impl App {
                 }
                 let hay = format!("{} {}", entry.title, entry.url).to_lowercase();
                 if hit(&hay) && !offers.iter().any(|o| o.url == entry.url) {
-                    offers.push(Offer {
-                        title: if entry.title.is_empty() {
+                    offers.push(Offer::simple(
+                        if entry.title.is_empty() {
                             crate::shield::host_of(&entry.url)
                         } else {
                             entry.title.clone()
                         },
-                        url: entry.url.clone(),
-                        kind: "History".into(),
-                    });
+                        entry.url.clone(),
+                        "History",
+                    ));
                 }
             }
         }
@@ -5538,20 +5799,15 @@ impl App {
         let prefs = self.prefs.borrow().clone();
         if let Some((url, name, rest)) = crate::keyword::find_named(trimmed, &prefs.keywords) {
             if !offers.iter().any(|o| o.url == url) {
-                offers.insert(0, Offer {
-                    title: format!("Search {name} for \"{rest}\""),
-                    url,
-                    kind: "Keyword".into(),
-                });
+                offers.insert(
+                    0,
+                    Offer::simple(format!("Search {name} for \"{rest}\""), url, "Keyword"),
+                );
             }
         } else {
             let target = plain_target(trimmed, &|query| prefs.search_url(query));
             if target == prefs.search_url(trimmed) && !offers.iter().any(|o| o.url == target) {
-                offers.push(Offer {
-                    title: format!("Search for \"{trimmed}\""),
-                    url: target,
-                    kind: "Search".into(),
-                });
+                offers.push(Offer::simple(format!("Search for \"{trimmed}\""), target, "Search"));
             }
         }
         let no_engine = query_path(trimmed).is_some();
@@ -5574,11 +5830,7 @@ impl App {
                         }
                         let url = prefs.search_url(&word);
                         if !offers.iter().any(|o| o.url == url) {
-                            offers.push(Offer {
-                                title: word,
-                                url,
-                                kind: "Suggest".into(),
-                            });
+                            offers.push(Offer::simple(word, url, "Suggest"));
                         }
                     }
                 }
@@ -5633,7 +5885,7 @@ impl App {
                         // The search is built directly with the engine the field uses.
                         let url = prefs.search_url(&word);
                         if !offers.iter().any(|o| o.url == url) {
-                            offers.push(Offer { title: word, url, kind: "Suggest".into() });
+                            offers.push(Offer::simple(word, url, "Suggest"));
                         }
                     }
                 }
@@ -5832,6 +6084,29 @@ impl App {
     }
 
     pub fn toggle_panel_switch(&self, kind: PanelKind) {
+        if kind == PanelKind::Settings {
+            let (was_open, saved_filter, saved_scroll) = {
+                let panels = self.panels.borrow();
+                let open = panels.open == Some(PanelKind::Settings);
+                let filter = panels.filter.borrow().clone();
+                let scroll = panels.scroll.vadjustment().value();
+                (open, filter, scroll)
+            };
+            if was_open {
+                if saved_filter.is_empty() {
+                    self.open_panel(PanelKind::Settings);
+                } else {
+                    self.open_panel_filtered(PanelKind::Settings, &saved_filter);
+                }
+                let scroll_ref = self.panels.borrow().scroll.clone();
+                glib::idle_add_local_once(move || {
+                    let adj = scroll_ref.vadjustment();
+                    let max_val = (adj.upper() - adj.page_size()).max(0.0);
+                    adj.set_value(saved_scroll.clamp(0.0, max_val));
+                });
+                return;
+            }
+        }
         self.open_panel(kind);
     }
 
@@ -6250,26 +6525,107 @@ impl App {
         }
     }
 
+    /// Persist a bookmark edit and refresh every surface that shows the list.
+    fn commit_bookmarks(&self) {
+        let bookmarks = self.state.borrow().bookmarks.clone();
+        crate::panels::clear_bookmark_undo();
+        Records::save_bookmarks(&bookmarks);
+        self.render();
+    }
+
+    /// L01: rename one bookmark. Empty titles fall back to the address so a
+    /// row never becomes nameless.
+    pub fn set_bookmark_title(&self, url: &str, raw_title: &str) -> Result<(), &'static str> {
+        let mut state = self.state.borrow_mut();
+        crate::store::rename_bookmark(&mut state.bookmarks, url, raw_title)?;
+        drop(state);
+        self.commit_bookmarks();
+        Ok(())
+    }
+
+    /// L02: validate a replacement address and merge into an existing row when
+    /// the new address is already kept, preserving the edited title.
+    pub fn set_bookmark_address(&self, old_url: &str, raw_url: &str) -> Result<(), &'static str> {
+        let mut state = self.state.borrow_mut();
+        crate::store::update_bookmark_address(&mut state.bookmarks, old_url, raw_url)?;
+        drop(state);
+        self.commit_bookmarks();
+        Ok(())
+    }
+
+    /// L14: set the flat folder label on exactly one bookmark.
+    pub fn set_bookmark_folder(&self, url: &str, folder: String) -> bool {
+        let mut state = self.state.borrow_mut();
+        if !crate::store::set_bookmark_folder(&mut state.bookmarks, url, &folder) {
+            return false;
+        }
+        drop(state);
+        self.commit_bookmarks();
+        true
+    }
+
+    /// L03/L04: move one bookmark within the list, clamped at both ends.
+    pub fn move_bookmark(&self, url: &str, delta: isize) -> bool {
+        let mut state = self.state.borrow_mut();
+        if !crate::store::move_bookmark(&mut state.bookmarks, url, delta) {
+            return false;
+        }
+        drop(state);
+        self.commit_bookmarks();
+        true
+    }
+
+    /// L43: clear one host's zoom override and reapply the default to its
+    /// live regular views, leaving other hosts and private tabs untouched.
+    pub fn clear_zoom_for_current_site(&self) -> bool {
+        let (url, private, id) = {
+            let state = self.state.borrow();
+            let Some(tab) = state.tab(state.active) else { return false };
+            (tab.url.clone(), tab.private, tab.id)
+        };
+        if private {
+            self.flash_toast("Private tabs have no saved site zoom to clear");
+            return false;
+        }
+        let removed = crate::app::clear_host_zoom(&mut self.zoom_by_host.borrow_mut(), &url);
+        if let Some(view) = self.view(id) {
+            view.set_zoom_level(self.prefs.borrow().default_zoom);
+        }
+        if removed {
+            self.flash_toast("Cleared zoom for this site");
+        }
+        removed
+    }
+
     pub fn add_bookmark(&self) {
-        let (tab_id, url, title, private) = {
+        let (tab_id, raw_url, title, private) = {
             let state = self.state.borrow();
             match state.active_tab() {
                 Some(tab) => (tab.id, tab.url.clone(), tab.title.clone(), tab.private),
                 None => return,
             }
         };
-        if url.is_empty() {
+        if private {
+            self.flash_toast("Bookmarks cannot be saved from a private tab");
             return;
         }
-        if !private {
-            if let Some(surface) = self.icons.borrow().get(&tab_id).cloned() {
-                self.cache_favicon(&url, &surface);
-            }
+        let Some(url) = crate::tab_actions::parse_explicit_web_url(&raw_url) else {
+            self.flash_toast("Only HTTP and HTTPS pages can be bookmarked");
+            return;
+        };
+        let url = crate::tab_actions::strip_url_credentials(&url);
+        if let Some(surface) = self.icons.borrow().get(&tab_id).cloned() {
+            self.cache_favicon(&url, &surface);
         }
         let (toast, turned_bar_on) = {
             let mut state = self.state.borrow_mut();
-            let result = if state.bookmarks.iter().any(|b| b.url == url) {
-                state.bookmarks.retain(|b| b.url != url);
+            let key = crate::tab_actions::duplicate_url_key(&url);
+            let result = if state.bookmarks.iter().any(|bookmark| {
+                crate::tab_actions::duplicate_url_key(&bookmark.url) == key
+            }) {
+                state.bookmarks.retain(|bookmark| {
+                    crate::tab_actions::duplicate_url_key(&bookmark.url) != key
+                });
                 ("No longer kept", false)
             } else {
                 let first = state.bookmarks.is_empty();
@@ -6278,10 +6634,12 @@ impl App {
                     crate::store::Bookmark {
                         url: url.clone(),
                         title: if title.is_empty() { url } else { title },
+                        folder: String::new(),
                     },
                 );
                 ("Kept", first)
             };
+            crate::panels::clear_bookmark_undo();
             Records::save_bookmarks(&state.bookmarks);
             result
         };
@@ -6602,7 +6960,7 @@ impl App {
         let level = self
             .view(self.active_id())
             .map(|v| v.zoom_level())
-            .unwrap_or(1.0);
+            .unwrap_or_else(|| self.prefs.borrow().default_zoom);
         (level * 100.0).round() as i32
     }
 
@@ -6629,20 +6987,49 @@ impl App {
             .tab(active)
             .map(|t| (t.url.clone(), t.private))
             .unwrap_or((String::new(), true));
-        view.set_zoom_level(1.0);
+        let default = self.prefs.borrow().default_zoom;
+        view.set_zoom_level(default);
         if !private {
             self.zoom_by_host.borrow_mut().remove(&zoom_key(&url));
         }
     }
 
-    /// The zoom a page at this address should start at: what was last set on
-    /// its host this session, else the engine's default.
-    pub fn zoom_for(&self, url: &str) -> f64 {
-        let key = zoom_key(url);
-        if key.is_empty() {
-            return 1.0;
+    /// T39: Update default page zoom (clamped to 50%..200%) and immediately
+    /// apply it to live views that do not have an explicit per-site override.
+    pub fn set_default_zoom(&self, level: f64) {
+        if !level.is_finite() {
+            return;
         }
-        self.zoom_by_host.borrow().get(&key).copied().unwrap_or(1.0)
+        let clamped = level.clamp(crate::store::MIN_DEFAULT_ZOOM, crate::store::MAX_DEFAULT_ZOOM);
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.default_zoom = clamped;
+            prefs.save();
+        }
+        let overrides = self.zoom_by_host.borrow().clone();
+        let targets: Vec<(TabId, String, bool)> = self
+            .state
+            .borrow()
+            .tabs
+            .iter()
+            .map(|t| (t.id, t.url.clone(), t.private))
+            .collect();
+        for (id, url, private) in targets {
+            let key = zoom_key(&url);
+            if !private && !key.is_empty() && overrides.contains_key(&key) {
+                continue;
+            }
+            if let Some(view) = self.view(id) {
+                view.set_zoom_level(clamped);
+            }
+        }
+    }
+
+    /// The zoom a page at this address should start at: what was last set on
+    /// its host this session, else the user's configured default zoom (T39).
+    pub fn zoom_for(&self, url: &str, private: bool) -> f64 {
+        let default = self.prefs.borrow().default_zoom;
+        crate::tab_actions::zoom_override(&self.zoom_by_host.borrow(), url, private).unwrap_or(default)
     }
 
     /// Prints the active page through the engine's own dialog, over the window.
@@ -6694,7 +7081,7 @@ impl App {
     /// space's last active tab marked. Private tabs are never persisted.
     /// Returns None when session restore is off.
     fn session_records(&self) -> Option<Vec<TabRecord>> {
-        if !self.prefs.borrow().restore_session {
+        if self.prefs.borrow().startup_mode != crate::store::StartupMode::Restore {
             return None;
         }
         let state = self.state.borrow();
@@ -6797,6 +7184,16 @@ impl App {
                     closed.space_id = crate::spaces::default_space_id();
                 }
             }
+            for batch in &mut state.closed_batches {
+                if batch.space_id == id {
+                    batch.space_id = crate::spaces::default_space_id();
+                }
+                for tab in &mut batch.tabs {
+                    if tab.space_id == id {
+                        tab.space_id = crate::spaces::default_space_id();
+                    }
+                }
+            }
             state.space_active_tabs.remove(id);
             let next_active = if was_active_space {
                 let current = state.active;
@@ -6890,6 +7287,182 @@ impl App {
         true
     }
 
+    /// T23: Reorder a custom Space up (`delta < 0`) or down (`delta > 0`),
+    /// preserving stable IDs and anchoring Default at index 0.
+    pub fn move_space(&self, id: &str, delta: isize) -> bool {
+        let snapshot = {
+            let mut state = self.state.borrow_mut();
+            if !state.spaces.move_space(id, delta) {
+                return false;
+            }
+            state.spaces.clone()
+        };
+        Records::save_spaces(&snapshot);
+        self.render();
+        true
+    }
+
+    /// T27 / T28: Cycle to the next (`delta > 0`) or previous (`delta < 0`) Space.
+    pub fn cycle_space(&self, delta: isize) {
+        let target = {
+            let state = self.state.borrow();
+            crate::tab_actions::space_cycle_target(
+                &state.spaces.spaces,
+                state.active_space_id(),
+                &state.tabs,
+                delta,
+            )
+        };
+        if let Some((space_id, tab_id)) = target {
+            if self.activate_space_tab(&space_id, tab_id) {
+                let name = self.state.borrow().spaces.active().name.clone();
+                self.flash_toast(&format!("Space: {name}"));
+            }
+        }
+    }
+
+    /// T24: Duplicate a Space's regular tabs into a newly created Space without
+    /// leaking any private tabs. Atomic on space-cap or tab-cap refusal.
+    pub fn duplicate_space(&self, source_space_id: &str) -> Result<crate::spaces::Space, &'static str> {
+        let (created, snapshot, new_first_tab) = {
+            let mut state = self.state.borrow_mut();
+            let Some(source_name) = state.spaces.space(source_space_id).map(|s| s.name.clone()) else {
+                return Err("Space not found");
+            };
+            if state.spaces.spaces.len() >= crate::spaces::MAX_SPACES {
+                return Err("Space limit reached");
+            }
+            let plan = crate::tab_actions::plan_space_duplicate(&state.tabs, source_space_id, TAB_LIMIT)?;
+            let copy_name = state.spaces.unique_copy_name(&source_name);
+            let created = state.spaces.create(&copy_name)?;
+            let mut first_id = None;
+            for rec in plan {
+                let id = state.next_id;
+                state.next_id += 1;
+                let mut tab = Tab::new(id);
+                tab.space_id = created.id.clone();
+                tab.url = rec.url;
+                tab.title = rec.title;
+                tab.pinned = rec.pinned;
+                tab.asleep = !tab.url.is_empty();
+                if first_id.is_none() {
+                    first_id = Some(id);
+                }
+                state.tabs.push(tab);
+            }
+            if let Some(fid) = first_id {
+                state.space_active_tabs.insert(created.id.clone(), fid);
+            }
+            (created, state.spaces.clone(), first_id)
+        };
+        Records::save_spaces(&snapshot);
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        if let Some(fid) = new_first_tab {
+            self.select(fid);
+        } else {
+            self.render();
+        }
+        self.save_session();
+        Ok(created)
+    }
+
+    /// T26: Atomically create a new Space and move `tab_id` into it. If either
+    /// space creation or leaving the source space would violate limits, neither
+    /// mutation takes effect.
+    pub fn move_tab_to_new_space(&self, tab_id: TabId, raw_name: &str) -> Result<crate::spaces::Space, &'static str> {
+        let (created, snapshot, replacement) = {
+            let mut state = self.state.borrow_mut();
+            let Some(old_space) = state.tab(tab_id).map(|t| t.space_id.clone()) else {
+                return Err("Tab not found");
+            };
+            let was_active = state.active == tab_id && state.spaces.active_space == old_space;
+            let sole_in_old = state.tabs.iter().filter(|t| t.space_id == old_space).count() == 1;
+            if was_active && sole_in_old && state.tabs.len() >= TAB_LIMIT {
+                return Err("Close a tab before moving the last tab into a new space");
+            }
+            // Validate space creation first before mutating any tab.
+            let created = state.spaces.create(raw_name)?;
+            if let Some(tab) = state.tab_mut(tab_id) {
+                tab.space_id = created.id.clone();
+            }
+            state.space_active_tabs.insert(created.id.clone(), tab_id);
+            let replacement = if was_active {
+                let next = state
+                    .tabs
+                    .iter()
+                    .find(|t| t.space_id == old_space)
+                    .map(|t| t.id)
+                    .unwrap_or_else(|| {
+                        let fresh_id = state.next_id;
+                        state.next_id += 1;
+                        let mut fresh = Tab::new(fresh_id);
+                        fresh.space_id = old_space.clone();
+                        state.tabs.push(fresh);
+                        fresh_id
+                    });
+                state.space_active_tabs.insert(old_space, next);
+                Some(next)
+            } else {
+                None
+            };
+            (created, state.spaces.clone(), replacement)
+        };
+        Records::save_spaces(&snapshot);
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        if let Some(next_id) = replacement {
+            self.select(next_id);
+        } else {
+            self.render();
+        }
+        self.save_session();
+        Ok(created)
+    }
+
+    pub fn prompt_move_tab_to_new_space(&self, tab_id: TabId) {
+        let weak = self.weak();
+        let entry_slot: Rc<RefCell<Option<gtk::Entry>>> = Rc::new(RefCell::new(None));
+        let build_slot = entry_slot.clone();
+        let action_slot = entry_slot.clone();
+        self.show_action_dialog(
+            "Move Tab to New Space",
+            &[("Cancel", gtk::ResponseType::Cancel), ("Create & Move", gtk::ResponseType::Accept)],
+            move |dialog| {
+                let content = dialog.content_area();
+                content.set_spacing(8);
+                content.set_margin_start(14);
+                content.set_margin_end(14);
+                content.set_margin_top(12);
+                content.set_margin_bottom(10);
+                let hint = gtk::Label::new(Some("Enter a name for the new space. This tab will move into it."));
+                hint.set_xalign(0.0);
+                hint.set_line_wrap(true);
+                let entry = gtk::Entry::new();
+                entry.set_max_length(crate::spaces::MAX_SPACE_NAME_LEN as i32);
+                entry.set_placeholder_text(Some("e.g. Research, Docs"));
+                entry.set_activates_default(true);
+                if let Some(a) = entry.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&a, "New space name");
+                }
+                content.add(&hint);
+                content.add(&entry);
+                *build_slot.borrow_mut() = Some(entry);
+            },
+            move |response| {
+                if response != gtk::ResponseType::Accept {
+                    return;
+                }
+                let Some(app) = weak.upgrade() else { return };
+                let raw = action_slot.borrow().as_ref().map(|e| e.text().to_string()).unwrap_or_default();
+                match app.move_tab_to_new_space(tab_id, &raw) {
+                    Ok(space) => app.flash_toast(&format!("Moved tab to new space \"{}\"", space.name)),
+                    Err(msg) => app.flash_error(msg),
+                }
+            },
+        );
+    }
+
     pub fn open_space_switcher(&self, anchor: &gtk::Button) {
         if let Some(existing) = self.space_popover.borrow_mut().take() {
             let was_visible = existing.is_visible();
@@ -6908,66 +7481,216 @@ impl App {
             gtk::PositionType::Bottom
         });
 
-        let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        container.set_size_request(220, -1);
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        container.set_size_request(256, -1);
 
-        let (spaces, active_id, counts) = {
+        let (space_store, active_id, active_name, counts) = {
             let state = self.state.borrow();
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
             for tab in &state.tabs {
                 *counts.entry(tab.space_id.clone()).or_insert(0) += 1;
             }
             (
-                state.spaces.spaces.clone(),
+                state.spaces.clone(),
                 state.spaces.active_space.clone(),
+                state.spaces.active().name.clone(),
                 counts,
             )
         };
 
-        for space in spaces {
-            let btn = gtk::Button::new();
-            crate::ui::class(&btn, "menu-row");
-            if space.id == active_id {
-                crate::ui::class(&btn, "active-space-row");
-            }
-            btn.set_relief(gtk::ReliefStyle::None);
-            btn.set_widget_name(&format!("space-switch-{}", space.id));
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-            let title_text = if space.id == active_id {
-                format!("\u{2713}  {}", space.name)
-            } else {
-                format!("    {}", space.name)
-            };
-            let title = gtk::Label::new(Some(&title_text));
-            crate::ui::class(&title, "menu-row-title");
-            title.set_xalign(0.0);
-            title.set_hexpand(true);
-            title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            let n = counts.get(&space.id).copied().unwrap_or(0);
-            let badge = gtk::Label::new(Some(&n.to_string()));
-            crate::ui::class(&badge, "menu-row-accel");
-            row.pack_start(&title, true, true, 0);
-            row.pack_end(&badge, false, false, 0);
-            btn.add(&row);
+        // T29: Search the space switcher with keyboard navigation & empty state.
+        let search_entry = gtk::Entry::new();
+        crate::ui::class(&search_entry, "panel-input");
+        search_entry.set_placeholder_text(Some("Filter spaces\u{2026}"));
+        if let Some(a) = search_entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Filter spaces");
+        }
+        container.pack_start(&search_entry, false, true, 0);
+
+        let list_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let empty_lbl = gtk::Label::new(Some("No matching spaces"));
+        crate::ui::class(&empty_lbl, "settingdesc");
+        empty_lbl.set_xalign(0.0);
+        empty_lbl.set_margin_start(10);
+        empty_lbl.set_margin_top(6);
+        empty_lbl.set_margin_bottom(6);
+
+        let visible_ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let populate = {
+            let list_box = list_box.clone();
+            let empty_lbl = empty_lbl.clone();
+            let space_store = space_store.clone();
+            let active_id = active_id.clone();
+            let counts = counts.clone();
             let weak = self.weak();
-            let target_id = space.id.clone();
             let pop_weak = popover.downgrade();
-            btn.connect_clicked(move |_| {
+            let visible_ids = visible_ids.clone();
+            Rc::new(move |query: &str| {
+                for child in list_box.children() {
+                    list_box.remove(&child);
+                }
+                let mut shown = Vec::new();
+                for space in space_store.filter(query) {
+                    shown.push(space.id.clone());
+                    let btn = gtk::Button::new();
+                    crate::ui::class(&btn, "menu-row");
+                    if space.id == active_id {
+                        crate::ui::class(&btn, "active-space-row");
+                    }
+                    btn.set_relief(gtk::ReliefStyle::None);
+                    btn.set_widget_name(&format!("space-switch-{}", space.id));
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+                    let title_text = if space.id == active_id {
+                        format!("\u{2713}  {}", space.name)
+                    } else {
+                        format!("    {}", space.name)
+                    };
+                    let title = gtk::Label::new(Some(&title_text));
+                    crate::ui::class(&title, "menu-row-title");
+                    title.set_xalign(0.0);
+                    title.set_hexpand(true);
+                    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    let n = counts.get(&space.id).copied().unwrap_or(0);
+                    let badge = gtk::Label::new(Some(&n.to_string()));
+                    crate::ui::class(&badge, "menu-row-accel");
+                    row.pack_start(&title, true, true, 0);
+                    row.pack_end(&badge, false, false, 0);
+                    btn.add(&row);
+                    let weak_c = weak.clone();
+                    let target_id = space.id.clone();
+                    let pop_w = pop_weak.clone();
+                    btn.connect_clicked(move |_| {
+                        if let Some(pop) = pop_w.upgrade() {
+                            pop.popdown();
+                        }
+                        if let Some(app) = weak_c.upgrade() {
+                            app.switch_space(&target_id);
+                        }
+                    });
+                    list_box.pack_start(&btn, false, true, 0);
+                }
+                if shown.is_empty() {
+                    list_box.pack_start(&empty_lbl, false, true, 0);
+                }
+                *visible_ids.borrow_mut() = shown;
+                list_box.show_all();
+            })
+        };
+        populate("");
+        {
+            let populate = populate.clone();
+            search_entry.connect_changed(move |entry| {
+                populate(&entry.text());
+            });
+        }
+        {
+            let weak = self.weak();
+            let pop_weak = popover.downgrade();
+            let visible_ids = visible_ids.clone();
+            search_entry.connect_activate(move |_| {
+                if let Some(first) = visible_ids.borrow().first().cloned() {
+                    if let Some(pop) = pop_weak.upgrade() {
+                        pop.popdown();
+                    }
+                    if let Some(app) = weak.upgrade() {
+                        app.switch_space(&first);
+                    }
+                }
+            });
+        }
+        {
+            let list_ref = list_box.clone();
+            search_entry.connect_key_press_event(move |_, event| {
+                if event.keyval() == gtk::gdk::keys::constants::Down {
+                    if let Some(first) = list_ref.children().into_iter().find(|w| w.is::<gtk::Button>()) {
+                        first.grab_focus();
+                        return crate::gtkx::inh(true);
+                    }
+                }
+                crate::gtkx::inh(false)
+            });
+        }
+        let list_scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+        list_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        list_scroll.set_propagate_natural_height(true);
+        list_scroll.set_max_content_height(260);
+        list_scroll.add(&list_box);
+        container.pack_start(&list_scroll, false, true, 0);
+
+        // T25: Inline rename of the current space directly from its switcher.
+        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
+        let rename_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        rename_box.set_margin_start(4);
+        rename_box.set_margin_end(4);
+        rename_box.set_margin_top(2);
+        rename_box.set_margin_bottom(2);
+        let rename_entry = gtk::Entry::new();
+        crate::ui::class(&rename_entry, "panel-input");
+        rename_entry.set_hexpand(true);
+        rename_entry.set_max_length(crate::spaces::MAX_SPACE_NAME_LEN as i32);
+        rename_entry.set_text(&active_name);
+        rename_entry.set_placeholder_text(Some("Rename current space"));
+        if let Some(a) = rename_entry.accessible() {
+            gtk::atk::prelude::AtkObjectExt::set_name(&a, "Rename current space");
+        }
+        let rename_btn = gtk::Button::with_label("Rename");
+        crate::ui::class(&rename_btn, "act");
+        {
+            let weak = self.weak();
+            let sid = active_id.clone();
+            let entry_ref = rename_entry.clone();
+            let pop_weak = popover.downgrade();
+            let do_rename = Rc::new(move || {
+                let Some(app) = weak.upgrade() else { return };
+                match app.rename_space(&sid, &entry_ref.text()) {
+                    Ok(name) => {
+                        if let Some(pop) = pop_weak.upgrade() {
+                            pop.popdown();
+                        }
+                        app.flash_toast(&format!("Renamed space to \"{name}\""));
+                    }
+                    Err(msg) => app.flash_error(msg),
+                }
+            });
+            let r1 = do_rename.clone();
+            rename_btn.connect_clicked(move |_| r1());
+            let r2 = do_rename.clone();
+            rename_entry.connect_activate(move |_| r2());
+        }
+        rename_box.pack_start(&rename_entry, true, true, 0);
+        rename_box.pack_start(&rename_btn, false, false, 0);
+        container.pack_start(&rename_box, false, true, 0);
+
+        // Quick space actions: Duplicate regular pages (T24) and Manage Spaces.
+        let dup_btn = gtk::Button::new();
+        crate::ui::class(&dup_btn, "menu-row");
+        dup_btn.set_relief(gtk::ReliefStyle::None);
+        let dup_lbl = gtk::Label::new(Some("Duplicate Space (regular pages)"));
+        crate::ui::class(&dup_lbl, "menu-row-title");
+        dup_lbl.set_xalign(0.0);
+        dup_btn.add(&dup_lbl);
+        {
+            let weak = self.weak();
+            let sid = active_id.clone();
+            let pop_weak = popover.downgrade();
+            dup_btn.connect_clicked(move |_| {
                 if let Some(pop) = pop_weak.upgrade() {
                     pop.popdown();
                 }
                 if let Some(app) = weak.upgrade() {
-                    app.switch_space(&target_id);
+                    match app.duplicate_space(&sid) {
+                        Ok(created) => app.flash_toast(&format!("Duplicated into \"{}\"", created.name)),
+                        Err(msg) => app.flash_error(msg),
+                    }
                 }
             });
-            container.pack_start(&btn, false, true, 0);
         }
+        container.pack_start(&dup_btn, false, true, 0);
 
-        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, true, 0);
         let manage = gtk::Button::new();
         crate::ui::class(&manage, "menu-row");
         manage.set_relief(gtk::ReliefStyle::None);
-        let manage_lbl = gtk::Label::new(Some("Manage Spaces in Settings\u{2026}"));
+        let manage_lbl = gtk::Label::new(Some("Manage Spaces & Sessions in Settings\u{2026}"));
         crate::ui::class(&manage_lbl, "menu-row-title");
         manage_lbl.set_xalign(0.0);
         manage.add(&manage_lbl);
@@ -6979,7 +7702,7 @@ impl App {
                     pop.popdown();
                 }
                 if let Some(app) = weak.upgrade() {
-                    app.open_panel(PanelKind::Settings);
+                    app.open_panel_filtered(PanelKind::Settings, "Spaces");
                 }
             });
         }
@@ -6998,71 +7721,1745 @@ impl App {
         });
         *self.space_popover.borrow_mut() = Some(popover.clone());
         popover.popup();
+        search_entry.grab_focus();
     }
 
     // ---- menus and toasts ----------------------------------------------
 
+    fn activate_space_tab(&self, space_id: &str, tab_id: TabId) -> bool {
+        if !self.state.borrow().spaces.space(space_id).is_some()
+            || !self.state.borrow().tab(tab_id).is_some_and(|t| t.space_id == space_id)
+        {
+            return false;
+        }
+        let snapshot = {
+            let mut state = self.state.borrow_mut();
+            let prev_space = state.spaces.active_space.clone();
+            let prev_active = state.active;
+            if state.tab(prev_active).is_some_and(|t| t.space_id == prev_space) {
+                state.space_active_tabs.insert(prev_space, prev_active);
+            }
+            if state.spaces.active_space != space_id {
+                state.spaces.set_active(space_id);
+            }
+            state.space_active_tabs.insert(space_id.to_string(), tab_id);
+            state.spaces.clone()
+        };
+        Records::save_spaces(&snapshot);
+        self.close_space_switcher();
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        self.select(tab_id);
+        true
+    }
+
+    /// Register a response-driven dialog. `show()` returns immediately; the
+    /// handler owns one-shot action state and destroys the widget on Cancel,
+    /// Accept, destroy or window close. Bench sends the same response through
+    /// `dialog_response`.
+    fn show_action_dialog<F, F2>(&self, title: &str, buttons: &[(&str, gtk::ResponseType)], build: F, action: F2)
+    where
+        F: FnOnce(&gtk::Dialog),
+        F2: FnOnce(gtk::ResponseType) + 'static,
+    {
+        let flags = gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT;
+        let pairs: Vec<(String, gtk::ResponseType)> = buttons
+            .iter()
+            .map(|(label, response)| (label.to_string(), *response))
+            .collect();
+        let refs: Vec<(&str, gtk::ResponseType)> = pairs
+            .iter()
+            .map(|(label, response)| (label.as_str(), *response))
+            .collect();
+        let dialog = gtk::Dialog::with_buttons(Some(title), Some(&self.ui.window), flags, &refs);
+        dialog.set_widget_name("rill-action-dialog");
+        dialog.set_default_response(*buttons.first().map(|(_, r)| r).unwrap_or(&gtk::ResponseType::Cancel));
+        build(&dialog);
+        dialog.content_area().show_all();
+        let action = std::cell::RefCell::new(Some(action));
+        dialog.connect_response(move |dialog, response| {
+            if let Some(action) = action.borrow_mut().take() {
+                action(response);
+            }
+            unsafe { dialog.destroy() };
+            ACTIVE_DIALOGS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+        });
+        ACTIVE_DIALOGS.with(|c| c.borrow_mut().push(dialog.clone()));
+        dialog.show();
+    }
+
+    pub(crate) fn show_confirmation<F>(&self, title: &str, headline: &str, details: &str, confirm_label: &str, action: F)
+    where
+        F: FnOnce() + 'static,
+    {
+        let title = title.to_string();
+        let headline = headline.to_string();
+        let details = details.to_string();
+        let label = confirm_label.to_string();
+        self.show_action_dialog(
+            &title,
+            &[("Cancel", gtk::ResponseType::Cancel), (&label, gtk::ResponseType::Accept)],
+            move |dialog| {
+                let content = dialog.content_area();
+                content.set_spacing(8);
+                content.set_margin_start(14);
+                content.set_margin_end(14);
+                content.set_margin_top(12);
+                content.set_margin_bottom(10);
+                let head = gtk::Label::new(Some(&headline));
+                head.set_xalign(0.0);
+                head.set_line_wrap(true);
+                crate::ui::class(&head, "setting");
+                content.add(&head);
+                if !details.is_empty() {
+                    let body = gtk::Label::new(Some(&details));
+                    body.set_xalign(0.0);
+                    body.set_line_wrap(true);
+                    body.set_max_width_chars(64);
+                    crate::ui::class(&body, "settingdesc");
+                    content.add(&body);
+                }
+            },
+            move |response| {
+                if response == gtk::ResponseType::Accept {
+                    action();
+                }
+            },
+        );
+    }
+
+    /// Bench-only deterministic path for a confirmation: emits Accept or
+    /// Cancel on the most recently shown action dialog without a pointer.
+    #[allow(dead_code)]
+    pub fn bench_dialog_response(&self, accept: bool) -> bool {
+        let response = if accept {
+            gtk::ResponseType::Accept
+        } else {
+            gtk::ResponseType::Cancel
+        };
+        ACTIVE_DIALOGS.with(|c| {
+            let dialog = c.borrow().last().cloned();
+            if let Some(dialog) = dialog {
+                dialog.response(response);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    fn confirm_bulk_close<F>(&self, targets: &[TabId], action_label: &str, action: F)
+    where
+        F: FnOnce() + 'static,
+    {
+        if !self.prefs.borrow().warn_bulk_close
+            || targets.len() < crate::tab_actions::BULK_CLOSE_WARN_THRESHOLD
+        {
+            action();
+            return;
+        }
+        let (preview, private_count) = {
+            let state = self.state.borrow();
+            let mut lines = Vec::new();
+            let mut privs = 0usize;
+            for &tid in targets {
+                if let Some(tab) = state.tab(tid) {
+                    if tab.private {
+                        privs += 1;
+                    }
+                    if lines.len() < 5 {
+                        let label = if !tab.title.trim().is_empty() {
+                            tab.title.trim().to_string()
+                        } else if !tab.url.trim().is_empty() {
+                            crate::shield::host_of(&tab.url)
+                        } else {
+                            "New tab".to_string()
+                        };
+                        let short: String = label.chars().take(54).collect();
+                        lines.push(format!("\u{2022} {short}"));
+                    }
+                }
+            }
+            if targets.len() > lines.len() {
+                lines.push(format!("\u{2026}and {} more", targets.len() - lines.len()));
+            }
+            (lines.join("\n"), privs)
+        };
+        let headline = format!("{action_label} ({} tabs)?", targets.len());
+        let details = if private_count > 0 {
+            format!("{preview}\n\nIncludes {private_count} private tab(s), which cannot be restored after closing.")
+        } else {
+            format!("{preview}\n\nRegular pages can be restored from Recently Closed.")
+        };
+        self.show_confirmation("Confirm Bulk Close", &headline, &details, "Close Tabs", action);
+    }
+
+    fn close_tabs_batch(&self, anchor: Option<TabId>, targets: Vec<TabId>, label: &str) {
+        if targets.is_empty() {
+            return;
+        }
+        let weak = self.weak();
+        let targets_for_dialog = targets.clone();
+        let anchor_for_dialog = anchor;
+        let label_for_dialog = label.to_string();
+        self.confirm_bulk_close(&targets, label, move || {
+            if let Some(app) = weak.upgrade() {
+                app.perform_batch_close(anchor_for_dialog, targets_for_dialog, &label_for_dialog);
+            }
+        });
+    }
+
+    fn perform_batch_close(&self, anchor: Option<TabId>, targets: Vec<TabId>, label: &str) {
+        let (active, space_id, batch_tabs) = {
+            let state = self.state.borrow();
+            let live: Vec<TabId> = targets
+                .iter()
+                .copied()
+                .filter(|id| state.tab(*id).is_some())
+                .collect();
+            let space_id = anchor
+                .and_then(|a| state.tab(a).map(|t| t.space_id.clone()))
+                .unwrap_or_else(|| state.spaces.active_space.clone());
+            let mut closed = Vec::new();
+            for (idx, tab) in state.tabs.iter().enumerate() {
+                if live.contains(&tab.id) && !tab.private && !tab.url.trim().is_empty() {
+                    closed.push(ClosedTab {
+                        id: next_closed_id(),
+                        space_id: tab.space_id.clone(),
+                        url: crate::tab_actions::strip_url_credentials(&tab.url),
+                        title: tab.title.clone(),
+                        pinned: tab.pinned,
+                        index: idx,
+                        ordinal: state.tabs[..idx]
+                            .iter()
+                            .filter(|before| before.space_id == tab.space_id && before.pinned == tab.pinned)
+                            .count(),
+                    });
+                }
+            }
+            (state.active, space_id, closed)
+        };
+        if let Some(keep) = anchor {
+            if active != keep && targets.contains(&active) && self.state.borrow().tab(keep).is_some() {
+                self.select(keep);
+            }
+        }
+        let is_batch = batch_tabs.len() >= 2;
+        if is_batch {
+            let mut state = self.state.borrow_mut();
+            crate::tab_actions::push_closed_batch(&mut state.closed_batches, &space_id, label, batch_tabs);
+            let batches = state.closed_batches.clone();
+            state.closed_tabs = crate::tab_actions::retain_unbatched_closed_tabs(
+                std::mem::take(&mut state.closed_tabs),
+                &batches,
+                CLOSED_TAB_LIMIT,
+            );
+        }
+        let live: Vec<TabId> = self.state.borrow().tabs.iter().map(|t| t.id).collect();
+        let before = live.len();
+        BATCH_CLOSE_SUPPRESS.with(|s| s.set(is_batch));
+        for id in targets.into_iter().rev().filter(|id| live.contains(id)) {
+            self.close_tab(id);
+        }
+        BATCH_CLOSE_SUPPRESS.with(|s| s.set(false));
+        let count = before.saturating_sub(self.state.borrow().tabs.len());
+        if count == 0 {
+            return;
+        }
+        self.flash_toast(&format!("Closed {count} {}", if count == 1 { "tab" } else { "tabs" }));
+    }
+
     pub fn close_other_tabs(&self, keep: TabId) {
-        let (targets, active) = {
+        let targets: Vec<TabId> = {
             let state = self.state.borrow();
             let Some(keep_space) = state.tab(keep).map(|t| t.space_id.clone()) else { return };
-            let targets: Vec<TabId> = state
+            state
                 .tabs
                 .iter()
                 .filter(|t| t.space_id == keep_space && t.id != keep && !t.pinned)
                 .map(|t| t.id)
-                .collect();
-            (targets, state.active)
+                .collect()
         };
-        if targets.is_empty() {
-            return;
-        }
-        if active != keep && targets.contains(&active) {
-            self.select(keep);
-        }
-        for id in targets.into_iter().rev() {
-            self.close_tab(id);
-        }
+        self.close_tabs_batch(Some(keep), targets, "Close other tabs");
     }
 
     pub fn close_tabs_below(&self, anchor: TabId) {
-        let (targets, active) = {
+        let targets: Vec<TabId> = {
             let state = self.state.borrow();
             let Some(pos) = state.position(anchor) else { return };
             if state.tabs[pos].pinned {
                 return;
             }
             let anchor_space = state.tabs[pos].space_id.clone();
-            let targets: Vec<TabId> = state.tabs[pos + 1..]
+            state.tabs[pos + 1..]
                 .iter()
                 .filter(|t| t.space_id == anchor_space && !t.pinned)
                 .map(|t| t.id)
-                .collect();
-            (targets, state.active)
+                .collect()
+        };
+        self.close_tabs_batch(Some(anchor), targets, "Close tabs to the right");
+    }
+
+    pub fn close_tabs_left(&self, anchor: TabId) {
+        let targets = {
+            let state = self.state.borrow();
+            crate::tab_actions::tabs_to_left(&state.tabs, anchor)
+        };
+        self.close_tabs_batch(Some(anchor), targets, "Close tabs to the left");
+    }
+
+    pub fn close_duplicate_tabs(&self, keep: TabId) {
+        let targets = {
+            let state = self.state.borrow();
+            crate::tab_actions::duplicate_tabs_to_close(&state.tabs, keep)
         };
         if targets.is_empty() {
+            self.flash_toast("No duplicate tabs in this space");
             return;
         }
-        if active != anchor && targets.contains(&active) {
-            self.select(anchor);
+        self.close_tabs_batch(Some(keep), targets, "Close duplicate tabs");
+    }
+
+    pub fn close_same_site_tabs(&self, anchor: TabId) {
+        let targets = {
+            let state = self.state.borrow();
+            crate::tab_actions::other_site_tabs_to_close(&state.tabs, anchor)
+        };
+        if targets.is_empty() {
+            self.flash_toast("No other unpinned tabs from this site");
+            return;
         }
-        for id in targets.into_iter().rev() {
-            self.close_tab(id);
+        self.close_tabs_batch(Some(anchor), targets, "Close other tabs from this site");
+    }
+
+    pub fn move_tab_to_edge(&self, id: TabId, to_start: bool) {
+        let moved = {
+            let mut state = self.state.borrow_mut();
+            crate::tab_actions::move_tab_to_edge(&mut state.tabs, id, to_start)
+        };
+        if moved {
+            self.pin_signature.replace(None);
+            self.top_pin_signature.replace(None);
+            self.render();
+            self.save_session();
         }
+    }
+
+    pub fn sort_space_tabs_by_title(&self) {
+        let changed = {
+            let mut state = self.state.borrow_mut();
+            let space_id = state.spaces.active_space.clone();
+            crate::tab_actions::sort_unpinned_tabs_by_title(&mut state.tabs, &space_id)
+        };
+        if changed {
+            self.render();
+            self.save_session();
+            self.flash_toast("Sorted unpinned tabs by title");
+        } else {
+            self.flash_toast("Tabs are already sorted by title");
+        }
+    }
+
+    pub fn group_space_tabs_by_site(&self) {
+        let changed = {
+            let mut state = self.state.borrow_mut();
+            let space_id = state.spaces.active_space.clone();
+            crate::tab_actions::group_unpinned_tabs_by_site(&mut state.tabs, &space_id)
+        };
+        if changed {
+            self.render();
+            self.save_session();
+            self.flash_toast("Grouped unpinned tabs by site");
+        } else {
+            self.flash_toast("Tabs are already grouped by site");
+        }
+    }
+
+    pub fn reload_space_tabs(&self) {
+        let targets = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id();
+            crate::tab_actions::space_reload_targets(&state.tabs, space_id)
+        };
+        if targets.is_empty() {
+            self.flash_toast("No active web tabs to reload in this space");
+            return;
+        }
+        let count = targets.len();
+        for id in targets {
+            self.reload_tab(id);
+        }
+        self.flash_toast(&format!("Reloaded {count} {}", if count == 1 { "tab" } else { "tabs" }));
+    }
+
+    pub fn stop_space_loads(&self) {
+        let targets = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id();
+            crate::tab_actions::space_stop_targets(&state.tabs, space_id)
+        };
+        let mut stopped = 0usize;
+        for id in targets {
+            if let Some(view) = self.view(id) {
+                if view.is_loading() {
+                    view.stop_loading();
+                    stopped += 1;
+                }
+            }
+        }
+        if stopped == 0 {
+            self.flash_toast("No loading tabs in this space");
+        } else {
+            self.flash_toast(&format!("Stopped {stopped} loading {}", if stopped == 1 { "tab" } else { "tabs" }));
+        }
+    }
+
+    pub fn toggle_tab_mute(&self, id: TabId) {
+        let next = {
+            let mut state = self.state.borrow_mut();
+            let Some(tab) = state.tab_mut(id) else { return };
+            tab.muted = !tab.muted;
+            tab.muted
+        };
+        if let Some(view) = self.view(id) {
+            view.set_is_muted(next);
+        }
+        self.update_row_title(id);
+        self.schedule_session();
+        self.flash_toast(if next { "Tab muted" } else { "Tab unmuted" });
+    }
+
+    pub fn mute_other_tabs(&self, keep: TabId) {
+        let targets = {
+            let mut state = self.state.borrow_mut();
+            let ids = crate::tab_actions::other_space_tab_ids(&state.tabs, keep);
+            for &tid in &ids {
+                if let Some(tab) = state.tab_mut(tid) {
+                    tab.muted = true;
+                }
+            }
+            ids
+        };
+        if targets.is_empty() {
+            self.flash_toast("No other tabs in this space");
+            return;
+        }
+        for &tid in &targets {
+            if let Some(view) = self.view(tid) {
+                view.set_is_muted(true);
+            }
+            self.update_row_title(tid);
+        }
+        self.schedule_session();
+        self.flash_toast(&format!("Muted {} other {}", targets.len(), if targets.len() == 1 { "tab" } else { "tabs" }));
+    }
+
+    pub fn unmute_space_tabs(&self) {
+        let targets: Vec<TabId> = {
+            let mut state = self.state.borrow_mut();
+            let space_id = state.spaces.active_space.clone();
+            let mut ids = Vec::new();
+            for tab in state.tabs.iter_mut().filter(|t| t.space_id == space_id) {
+                tab.muted = false;
+                ids.push(tab.id);
+            }
+            ids
+        };
+        for &tid in &targets {
+            if let Some(view) = self.view(tid) {
+                view.set_is_muted(false);
+            }
+            self.update_row_title(tid);
+        }
+        self.schedule_session();
+        self.flash_toast("Unmuted all tabs in this space");
+    }
+
+    fn sleep_tab_ids(&self, ids: &[TabId]) -> usize {
+        let mut slept = 0usize;
+        for &id in ids {
+            if self.view(id).is_some_and(|view| {
+                view.is_playing_audio()
+                    || is_capturing(view.camera_capture_state(), view.microphone_capture_state())
+            }) {
+                continue;
+            }
+            self.retire_page_layers(id);
+            if let Some(view) = self.view(id) {
+                let private = self.state.borrow().tab(id).is_some_and(|t| t.private);
+                if private {
+                    if let Some(manager) = view.user_content_manager() {
+                        curtain::forget_manager(&manager);
+                    }
+                }
+                self.ui.stack.remove(&view);
+                // SAFETY: the view was just taken out of its container and is not used again.
+                unsafe { view.destroy() };
+            }
+            if let Some(tab) = self.state.borrow_mut().tab_mut(id) {
+                tab.asleep = true;
+                slept += 1;
+            }
+        }
+        if slept > 0 {
+            self.render();
+        }
+        slept
+    }
+
+    pub fn sleep_tab_now(&self, id: TabId) {
+        let active = self.active_id();
+        let keep_awake_hosts = self.prefs.borrow().keep_awake_hosts.clone();
+        let eligible = {
+            let state = self.state.borrow();
+            state
+                .tab(id)
+                .is_some_and(|tab| crate::tab_actions::tab_eligible_for_manual_sleep(tab, active, &keep_awake_hosts))
+        };
+        if !eligible {
+            self.flash_toast("Tab cannot sleep right now (active, loading, blank, or kept awake)");
+            return;
+        }
+        if self.sleep_tab_ids(&[id]) == 0 {
+            self.flash_toast("Tab kept awake while playing audio or using camera/microphone");
+        } else {
+            self.flash_toast("Tab put to sleep");
+        }
+    }
+
+    pub fn sleep_background_tabs_now(&self) {
+        let active = self.active_id();
+        let keep_awake_hosts = self.prefs.borrow().keep_awake_hosts.clone();
+        let candidates: Vec<TabId> = {
+            let state = self.state.borrow();
+            state
+                .tabs
+                .iter()
+                .filter(|tab| crate::tab_actions::tab_eligible_for_manual_sleep(tab, active, &keep_awake_hosts))
+                .map(|tab| tab.id)
+                .collect()
+        };
+        let slept = self.sleep_tab_ids(&candidates);
+        if slept == 0 {
+            self.flash_toast("No eligible background tabs to sleep");
+        } else {
+            self.flash_toast(&format!("Put {slept} background {} to sleep", if slept == 1 { "tab" } else { "tabs" }));
+        }
+    }
+
+    pub fn toggle_tab_keep_awake(&self, id: TabId) {
+        let kept = {
+            let mut state = self.state.borrow_mut();
+            let Some(tab) = state.tab_mut(id) else { return };
+            tab.keep_awake = !tab.keep_awake;
+            tab.keep_awake
+        };
+        self.render();
+        self.schedule_session();
+        self.flash_toast(if kept { "Tab will stay awake" } else { "Tab can sleep when idle" });
+    }
+
+    pub fn add_keep_awake_host(&self, raw: &str) -> Result<String, &'static str> {
+        let Some(host) = crate::tab_actions::normalize_host_rule(raw) else {
+            return Err("Enter a valid hostname (e.g. docs.rs) without wildcards or paths");
+        };
+        let mut prefs = self.prefs.borrow_mut();
+        if prefs.keep_awake_hosts.iter().any(|h| h == &host) {
+            return Err("Site is already kept awake");
+        }
+        if prefs.keep_awake_hosts.len() >= crate::tab_actions::MAX_KEEP_AWAKE_HOSTS {
+            return Err("Keep-awake site limit reached (64)");
+        }
+        prefs.keep_awake_hosts.push(host.clone());
+        prefs.save();
+        Ok(host)
+    }
+
+    pub fn remove_keep_awake_host(&self, host: &str) -> bool {
+        let mut prefs = self.prefs.borrow_mut();
+        let before = prefs.keep_awake_hosts.len();
+        prefs.keep_awake_hosts.retain(|h| h != host);
+        if prefs.keep_awake_hosts.len() != before {
+            prefs.save();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn toggle_site_keep_awake(&self, url: &str) {
+        let host = crate::shield::host_of(url);
+        if host.is_empty() {
+            return;
+        }
+        let already = self.prefs.borrow().keep_awake_hosts.iter().any(|h| h == &host);
+        if already {
+            if self.remove_keep_awake_host(&host) {
+                self.flash_toast(&format!("Removed {host} from keep-awake sites"));
+            }
+        } else {
+            match self.add_keep_awake_host(&host) {
+                Ok(h) => self.flash_toast(&format!("Keeping {h} awake")),
+                Err(msg) => self.flash_error(msg),
+            }
+        }
+    }
+
+    fn set_clipboard_text(&self, text: &str) {
+        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        clipboard.set_text(text);
+        clipboard.store();
+    }
+
+    pub fn copy_tab_url(&self, id: TabId) {
+        let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
+        if url.trim().is_empty() {
+            self.flash_toast("Tab has no address to copy");
+            return;
+        }
+        self.set_clipboard_text(&crate::tab_actions::strip_url_credentials(&url));
+        self.flash_toast("Tab address copied");
+    }
+
+    pub fn copy_tab_clean_url(&self, id: TabId) {
+        let url = self.state.borrow().tab(id).map(|t| t.url.clone()).unwrap_or_default();
+        if !crate::tab_actions::is_web_url(&url) {
+            return;
+        }
+        self.set_clipboard_text(&crate::tab_actions::strip_tracking_params(&url));
+        self.flash_toast("Clean address copied");
+    }
+
+    pub fn copy_tab_title_and_url(&self, id: TabId) {
+        let (title, url) = self
+            .state
+            .borrow()
+            .tab(id)
+            .map(|t| (t.title.clone(), t.url.clone()))
+            .unwrap_or_default();
+        if url.trim().is_empty() {
+            self.flash_toast("Tab has no address to copy");
+            return;
+        }
+        self.set_clipboard_text(&crate::tab_actions::format_title_and_url(&title, &url));
+        self.flash_toast("Copied title and address");
+    }
+
+    pub fn copy_tab_markdown(&self, id: TabId) {
+        let (title, url) = self
+            .state
+            .borrow()
+            .tab(id)
+            .map(|t| (t.title.clone(), t.url.clone()))
+            .unwrap_or_default();
+        if url.trim().is_empty() {
+            self.flash_toast("Tab has no address to copy");
+            return;
+        }
+        self.set_clipboard_text(&crate::tab_actions::format_markdown_link(&title, &url));
+        self.flash_toast("Copied Markdown link");
+    }
+
+    pub fn copy_space_urls(&self) {
+        let (pages, skipped_private) = {
+            let state = self.state.borrow();
+            crate::tab_actions::space_regular_web_pages(&state.tabs, state.active_space_id())
+        };
+        if pages.is_empty() {
+            self.flash_toast("No regular web addresses in this space");
+            return;
+        }
+        let text = pages.iter().map(|(_, u)| u.as_str()).collect::<Vec<_>>().join("\n");
+        self.set_clipboard_text(&text);
+        if skipped_private > 0 {
+            self.flash_toast(&format!(
+                "Copied {} addresses (omitted {} private)",
+                pages.len(),
+                skipped_private
+            ));
+        } else {
+            self.flash_toast(&format!("Copied {} addresses", pages.len()));
+        }
+    }
+
+    pub fn bookmark_space_pages(&self) {
+        let (pages, skipped_private) = {
+            let state = self.state.borrow();
+            crate::tab_actions::space_regular_web_pages(&state.tabs, state.active_space_id())
+        };
+        if pages.is_empty() {
+            self.flash_toast("No regular web pages in this space to bookmark");
+            return;
+        }
+        let (added, duplicates, turned_bar_on) = {
+            let mut state = self.state.borrow_mut();
+            let was_empty = state.bookmarks.is_empty();
+            let mut existing: std::collections::HashSet<String> = state
+                .bookmarks
+                .iter()
+                .map(|b| crate::tab_actions::duplicate_url_key(&b.url))
+                .collect();
+            let mut added = 0usize;
+            let mut duplicates = 0usize;
+            for (title, url) in pages.into_iter().rev() {
+                let key = crate::tab_actions::duplicate_url_key(&url);
+                if existing.insert(key) {
+                    state.bookmarks.insert(0, crate::store::Bookmark { url, title, folder: String::new() });
+                    added += 1;
+                } else {
+                    duplicates += 1;
+                }
+            }
+            if added > 0 {
+                crate::panels::clear_bookmark_undo();
+                Records::save_bookmarks(&state.bookmarks);
+            }
+            (added, duplicates, was_empty && added > 0)
+        };
+        if turned_bar_on {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.show_bookmarks_bar = true;
+            prefs.save();
+        }
+        self.render_bmarks();
+        self.refresh_helm();
+        if self.panels.borrow().open.clone() == Some(PanelKind::Bookmarks) {
+            self.open_panel(PanelKind::Bookmarks);
+        }
+        let mut parts = Vec::new();
+        parts.push(format!("Bookmarked {added} {}", if added == 1 { "page" } else { "pages" }));
+        if duplicates > 0 {
+            parts.push(format!("{duplicates} already saved"));
+        }
+        if skipped_private > 0 {
+            parts.push(format!("{skipped_private} private skipped"));
+        }
+        self.flash_toast(&parts.join(" · "));
+    }
+
+    pub fn restore_closed_tab_by_id(&self, closed_id: u64) {
+        if self.state.borrow().tabs.len() >= TAB_LIMIT {
+            self.flash_error("That is as many tabs as this browser will hold");
+            return;
+        }
+        let restored = {
+            let mut guard = self.state.borrow_mut();
+            let Some(stack_idx) = guard.closed_tabs.iter().position(|c| c.id == closed_id) else {
+                drop(guard);
+                self.flash_toast("That tab was already restored");
+                return;
+            };
+            let closed = guard.closed_tabs.remove(stack_idx);
+            let state = &mut *guard;
+            restore_closed_tab(&mut state.tabs, &mut state.next_id, closed)
+        };
+        self.select(restored);
+        self.update_row_title(restored);
+        self.schedule_session();
+    }
+
+    pub fn restore_closed_batch_by_id(&self, batch_id: u64) {
+        let restored_ids = {
+            let mut guard = self.state.borrow_mut();
+            let Some(batch_idx) = guard.closed_batches.iter().position(|b| b.id == batch_id) else {
+                drop(guard);
+                self.flash_toast("That batch was already restored");
+                return;
+            };
+            let fits = crate::tab_actions::batch_restore_fits(
+                &guard.closed_batches[batch_idx],
+                guard.tabs.len(),
+                TAB_LIMIT,
+            );
+            let wanted = guard.closed_batches[batch_idx].tabs.len();
+            if fits < wanted {
+                drop(guard);
+                self.flash_error(&format!(
+                    "Close {} tab(s) before restoring this batch — nothing was restored",
+                    wanted - fits
+                ));
+                return;
+            }
+            let batch = guard.closed_batches.remove(batch_idx);
+            let state = &mut *guard;
+            let mut ids = Vec::new();
+            for closed in batch.tabs {
+                let id = restore_closed_tab(&mut state.tabs, &mut state.next_id, closed);
+                ids.push(id);
+            }
+            let batches = state.closed_batches.clone();
+            state.closed_tabs = crate::tab_actions::retain_unbatched_closed_tabs(
+                std::mem::take(&mut state.closed_tabs),
+                &batches,
+                CLOSED_TAB_LIMIT,
+            );
+            ids
+        };
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        if let Some(&first) = restored_ids.first() {
+            self.select(first);
+        } else {
+            self.render();
+        }
+        self.save_session();
+        self.flash_toast(&format!("Restored {} tabs", restored_ids.len()));
+    }
+
+    // ---- named sessions & address list export/import (T31-T37, T48-T50) -
+
+    pub fn save_named_session(
+        &self,
+        raw_name: &str,
+    ) -> Result<(crate::tab_actions::NamedSession, usize), &'static str> {
+        let (saved, skipped, snapshot) = {
+            let mut state = self.state.borrow_mut();
+            let space_id = state.spaces.active_space.clone();
+            let tabs_meta: Vec<Tab> = state.tabs.iter().map(Tab::clone_meta).collect();
+            let (saved, skipped) = state.named_sessions.save_from_space(
+                raw_name,
+                &tabs_meta,
+                &space_id,
+                crate::store::now_secs(),
+            )?;
+            (saved, skipped, state.named_sessions.clone())
+        };
+        Records::save_named_sessions(&snapshot);
+        Ok((saved, skipped))
+    }
+
+    pub fn prompt_save_named_session(&self) {
+        let default_name = self.state.borrow().spaces.active().name.clone();
+        let weak = self.weak();
+        let entry_slot: Rc<RefCell<Option<gtk::Entry>>> = Rc::new(RefCell::new(None));
+        let build_slot = entry_slot.clone();
+        let action_slot = entry_slot.clone();
+        self.show_action_dialog(
+            "Save Named Session",
+            &[("Cancel", gtk::ResponseType::Cancel), ("Save Session", gtk::ResponseType::Accept)],
+            move |dialog| {
+                let content = dialog.content_area();
+                content.set_spacing(8);
+                content.set_margin_start(14);
+                content.set_margin_end(14);
+                content.set_margin_top(12);
+                content.set_margin_bottom(10);
+                let hint = gtk::Label::new(Some(
+                    "Saves regular web pages in the current space. Private tabs are never saved.",
+                ));
+                hint.set_xalign(0.0);
+                hint.set_line_wrap(true);
+                let entry = gtk::Entry::new();
+                entry.set_max_length(crate::tab_actions::MAX_SESSION_NAME_LEN as i32);
+                entry.set_text(&default_name);
+                entry.set_placeholder_text(Some("Session name"));
+                entry.set_activates_default(true);
+                if let Some(a) = entry.accessible() {
+                    gtk::atk::prelude::AtkObjectExt::set_name(&a, "Session name");
+                }
+                content.add(&hint);
+                content.add(&entry);
+                *build_slot.borrow_mut() = Some(entry);
+            },
+            move |response| {
+                if response != gtk::ResponseType::Accept {
+                    return;
+                }
+                let Some(app) = weak.upgrade() else { return };
+                let raw = action_slot.borrow().as_ref().map(|e| e.text().to_string()).unwrap_or_default();
+                match app.save_named_session(&raw) {
+                    Ok((saved, skipped)) => {
+                        if skipped > 0 {
+                            app.flash_toast(&format!(
+                                "Saved \"{}\" ({} tabs, {} private excluded)",
+                                saved.name,
+                                saved.tabs.len(),
+                                skipped
+                            ));
+                        } else {
+                            app.flash_toast(&format!("Saved \"{}\" ({} tabs)", saved.name, saved.tabs.len()));
+                        }
+                    }
+                    Err(msg) => app.flash_error(msg),
+                }
+            },
+        );
+    }
+
+    pub fn open_named_session_alongside(&self, id: &str) -> Result<usize, String> {
+        let (first_id, opened) = {
+            let mut state = self.state.borrow_mut();
+            let session = state
+                .named_sessions
+                .check_open_alongside(id, state.tabs.len(), TAB_LIMIT)?;
+            let space_id = state.spaces.active_space.clone();
+            let mut first = None;
+            let count = session.tabs.len();
+            for item in session.tabs {
+                let tid = state.next_id;
+                state.next_id += 1;
+                let mut tab = Tab::new(tid);
+                tab.space_id = space_id.clone();
+                tab.url = item.url;
+                tab.title = item.title;
+                tab.pinned = item.pinned;
+                tab.asleep = true;
+                if first.is_none() {
+                    first = Some(tid);
+                }
+                state.tabs.push(tab);
+            }
+            (first, count)
+        };
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        if let Some(fid) = first_id {
+            self.select(fid);
+        } else {
+            self.render();
+        }
+        self.save_session();
+        Ok(opened)
+    }
+
+    pub fn replace_space_with_named_session(&self, id: &str) -> Result<usize, String> {
+        let (session, space_id, space_name, pinned_count) = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id();
+            let (session, replaced) =
+                state
+                    .named_sessions
+                    .check_replace_space(id, &state.tabs, space_id, TAB_LIMIT)?;
+            let pinned = state
+                .tabs
+                .iter()
+                .filter(|tab| replaced.contains(&tab.id) && tab.pinned)
+                .count();
+            (session, space_id.to_string(), state.spaces.active().name.clone(), pinned)
+        };
+        let headline = format!(
+            "Replace regular tabs in \"{}\" with \"{}\" ({} {})?",
+            space_name,
+            session.name,
+            session.tabs.len(),
+            if session.tabs.len() == 1 { "tab" } else { "tabs" }
+        );
+        let details = if pinned_count > 0 {
+            format!("This also replaces {pinned_count} pinned tab(s). Private tabs and tabs in other spaces remain untouched. Closed regular pages can be restored from Recently Closed.")
+        } else {
+            "Private tabs and tabs in other spaces remain untouched. Closed regular pages can be restored from Recently Closed.".to_string()
+        };
+        let weak = self.weak();
+        let session_id = id.to_string();
+        self.show_confirmation("Replace Space from Session", &headline, &details, "Replace Space", move || {
+            if let Some(app) = weak.upgrade() {
+                match app.apply_space_session_replacement(&session_id, &space_id) {
+                    Ok(opened) => app.flash_toast(&format!("Replaced space with {opened} tabs")),
+                    Err(error) => app.flash_error(&error),
+                }
+            }
+        });
+        Ok(0)
+    }
+
+    fn apply_space_session_replacement(&self, id: &str, expected_space: &str) -> Result<usize, String> {
+        let (session, replaced_ids) = {
+            let state = self.state.borrow();
+            if state.active_space_id() != expected_space {
+                return Err("The active space changed while confirmation was open".into());
+            }
+            let (session, ids) = state
+                .named_sessions
+                .check_replace_space(id, &state.tabs, expected_space, TAB_LIMIT)?;
+            (session, ids)
+        };
+        let (batch_tabs, space_id) = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id().to_string();
+            let mut batch = Vec::new();
+            for (idx, tab) in state.tabs.iter().enumerate() {
+                if replaced_ids.contains(&tab.id) && !tab.private && !tab.url.trim().is_empty() {
+                    batch.push(ClosedTab {
+                        id: next_closed_id(),
+                        space_id: tab.space_id.clone(),
+                        url: crate::tab_actions::strip_url_credentials(&tab.url),
+                        title: tab.title.clone(),
+                        pinned: tab.pinned,
+                        index: idx,
+                        ordinal: state.tabs[..idx]
+                            .iter()
+                            .filter(|before| before.space_id == tab.space_id && before.pinned == tab.pinned)
+                            .count(),
+                    });
+                }
+            }
+            (batch, space_id)
+        };
+        let make_batch = batch_tabs.len() >= 2;
+        if make_batch {
+            let mut state = self.state.borrow_mut();
+            crate::tab_actions::push_closed_batch(
+                &mut state.closed_batches,
+                &space_id,
+                &format!("Before \"{}\"", session.name),
+                batch_tabs,
+            );
+            let batches = state.closed_batches.clone();
+            state.closed_tabs = crate::tab_actions::retain_unbatched_closed_tabs(
+                std::mem::take(&mut state.closed_tabs),
+                &batches,
+                CLOSED_TAB_LIMIT,
+            );
+        }
+        BATCH_CLOSE_SUPPRESS.with(|s| s.set(make_batch));
+        for tid in replaced_ids.into_iter().rev() {
+            self.close_tab_force(tid);
+        }
+        BATCH_CLOSE_SUPPRESS.with(|s| s.set(false));
+        let (first_id, opened) = {
+            let mut state = self.state.borrow_mut();
+            if let Some(pos) = state.tabs.iter().position(|tab| {
+                tab.space_id == space_id && !tab.private && !tab.pinned && tab.url.trim().is_empty()
+            }) {
+                if state.tabs.iter().filter(|tab| tab.space_id == space_id && !tab.private).count() == 1 {
+                    state.tabs.remove(pos);
+                }
+            }
+            let opened = session.tabs.len();
+            let mut first = None;
+            for item in session.tabs {
+                let tid = state.next_id;
+                state.next_id += 1;
+                let mut tab = Tab::new(tid);
+                tab.space_id = space_id.clone();
+                tab.url = item.url;
+                tab.title = item.title;
+                tab.pinned = item.pinned;
+                tab.asleep = true;
+                if first.is_none() {
+                    first = Some(tid);
+                }
+                state.tabs.push(tab);
+            }
+            (first, opened)
+        };
+        self.pin_signature.replace(None);
+        self.top_pin_signature.replace(None);
+        if let Some(fid) = first_id {
+            self.select(fid);
+        } else {
+            self.render();
+        }
+        self.save_session();
+        Ok(opened)
+    }
+
+    pub fn rename_named_session(&self, id: &str, raw_name: &str) -> Result<String, &'static str> {
+        let (name, snapshot) = {
+            let mut state = self.state.borrow_mut();
+            let name = state.named_sessions.rename(id, raw_name)?;
+            (name, state.named_sessions.clone())
+        };
+        Records::save_named_sessions(&snapshot);
+        Ok(name)
+    }
+
+    pub fn delete_named_session(&self, id: &str) -> Result<String, &'static str> {
+        let target_name = {
+            let state = self.state.borrow();
+            state
+                .named_sessions
+                .get(id)
+                .map(|s| s.name.clone())
+                .ok_or("Saved session not found")?
+        };
+        let weak = self.weak();
+        let session_id = id.to_string();
+        self.show_confirmation(
+            "Delete Saved Session",
+            &format!("Delete saved session \"{target_name}\"?"),
+            "Open tabs will not be closed. You can undo this removal until Rill closes.",
+            "Delete Session",
+            move || {
+                let Some(app) = weak.upgrade() else { return };
+                let result = {
+                    let mut state = app.state.borrow_mut();
+                    state.named_sessions.delete(&session_id).map(|(idx, removed)| {
+                        let name = removed.name.clone();
+                        state.last_deleted_session = Some((idx, removed));
+                        (name, state.named_sessions.clone())
+                    })
+                };
+                match result {
+                    Ok((name, snapshot)) => {
+                        Records::save_named_sessions(&snapshot);
+                        app.flash_toast(&format!("Deleted saved session \"{name}\""));
+                        app.open_panel_filtered(PanelKind::Settings, "Named sessions");
+                    }
+                    Err(error) => app.flash_error(error),
+                }
+            },
+        );
+        Err("Pending")
+    }
+
+    pub fn undo_delete_named_session(&self) -> Option<String> {
+        let (restored_name, snapshot) = {
+            let mut state = self.state.borrow_mut();
+            let (idx, session) = state.last_deleted_session.take()?;
+            let name = session.name.clone();
+            if !state.named_sessions.restore_deleted(idx, session) {
+                return None;
+            }
+            (name, state.named_sessions.clone())
+        };
+        Records::save_named_sessions(&snapshot);
+        Some(restored_name)
+    }
+
+    pub fn export_space_urls_to_file(&self) {
+        let (pages, skipped_private, space_name) = {
+            let state = self.state.borrow();
+            let (pages, skipped) =
+                crate::tab_actions::space_regular_web_pages(&state.tabs, state.active_space_id());
+            (pages, skipped, state.spaces.active().name.clone())
+        };
+        if pages.is_empty() {
+            self.flash_toast("No regular web pages in this space to export");
+            return;
+        }
+        let suggested = crate::tab_actions::sanitize_offline_filename(
+            &format!("rill-{space_name}-tabs"),
+            "",
+            "txt",
+        );
+        let payload = format!(
+            "{}\n",
+            pages.iter().map(|(_, u)| u.as_str()).collect::<Vec<_>>().join("\n")
+        );
+        let dialog = gtk::FileChooserNative::new(
+            Some("Export Space Addresses"),
+            Some(&self.ui.window),
+            gtk::FileChooserAction::Save,
+            Some("Export"),
+            Some("Cancel"),
+        );
+        dialog.set_do_overwrite_confirmation(true);
+        dialog.set_current_name(&suggested);
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Text files (*.txt)"));
+        filter.add_pattern("*.txt");
+        dialog.add_filter(filter);
+        let weak = self.weak();
+        let count = pages.len();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                if let (Some(app), Some(path)) = (weak.upgrade(), dialog.filename()) {
+                    match crate::files::write_atomic_export(&path, payload.as_bytes()) {
+                        Ok(()) => {
+                            if skipped_private > 0 {
+                                app.flash_toast(&format!(
+                                    "Exported {count} addresses ({skipped_private} private excluded)"
+                                ));
+                            } else {
+                                app.flash_toast(&format!("Exported {count} addresses"));
+                            }
+                        }
+                        Err(_) => app.flash_error("Could not write address list file"),
+                    }
+                }
+            }
+            dialog.destroy();
+            FILE_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+        });
+        FILE_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+        dialog.show();
+    }
+
+    pub fn open_address_list_preview(&self, dialog_title: &str, raw: &str) {
+        let (existing_urls, available) = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id();
+            let existing = state
+                .tabs
+                .iter()
+                .filter(|t| t.space_id == space_id && !t.private)
+                .map(|t| t.url.clone())
+                .collect::<Vec<_>>();
+            (existing, TAB_LIMIT.saturating_sub(state.tabs.len()))
+        };
+        let plan = crate::tab_actions::parse_address_list(raw, &existing_urls, available);
+        if plan.urls.is_empty() {
+            let reason = if available == 0 {
+                "Tab limit reached (40 tabs)"
+            } else if plan.skipped_duplicates > 0 && plan.skipped_invalid == 0 {
+                "All listed addresses are already open in this space"
+            } else {
+                "No valid http:// or https:// addresses found"
+            };
+            self.flash_toast(reason);
+            return;
+        }
+        let title = dialog_title.to_string();
+        let previewed = plan.clone();
+        let previewed_build = previewed.clone();
+        let expected_urls = previewed.urls.clone();
+        let weak = self.weak();
+        let raw_for_recheck = raw.to_string();
+        let label = format!("Open {} Tabs", plan.urls.len());
+        self.show_action_dialog(
+            &title,
+            &[("Cancel", gtk::ResponseType::Cancel), (&label, gtk::ResponseType::Accept)],
+            move |dialog| {
+                dialog.set_default_size(520, 340);
+                let content = dialog.content_area();
+                content.set_spacing(8);
+                content.set_margin_start(14);
+                content.set_margin_end(14);
+                content.set_margin_top(12);
+                content.set_margin_bottom(10);
+
+                let mut summary_parts = vec![format!(
+                    "Ready to open {} {}",
+                    previewed_build.urls.len(),
+                    if previewed_build.urls.len() == 1 { "address" } else { "addresses" }
+                )];
+                if previewed_build.skipped_duplicates > 0 {
+                    summary_parts.push(format!("{} duplicates skipped", previewed_build.skipped_duplicates));
+                }
+                if previewed_build.skipped_invalid > 0 {
+                    summary_parts.push(format!("{} invalid/unsafe lines ignored", previewed_build.skipped_invalid));
+                }
+                if previewed_build.truncated_by_limit > 0 {
+                    summary_parts.push(format!("{} omitted by 40-tab limit", previewed_build.truncated_by_limit));
+                }
+                let summary = gtk::Label::new(Some(&summary_parts.join(" · ")));
+                summary.set_xalign(0.0);
+                summary.set_line_wrap(true);
+                crate::ui::class(&summary, "setting");
+                content.pack_start(&summary, false, false, 0);
+
+                let scroller = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+                scroller.set_vexpand(true);
+                scroller.set_min_content_height(180);
+                let preview_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                for url in &previewed_build.urls {
+                    let lbl = gtk::Label::new(Some(url));
+                    lbl.set_xalign(0.0);
+                    lbl.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                    crate::ui::class(&lbl, "settingdesc");
+                    preview_box.pack_start(&lbl, false, false, 0);
+                }
+                scroller.add(&preview_box);
+                content.pack_start(&scroller, true, true, 0);
+            },
+            move |response| {
+                if response != gtk::ResponseType::Accept {
+                    return;
+                }
+                let Some(app) = weak.upgrade() else { return };
+                let (existing_urls, available) = {
+                    let state = app.state.borrow();
+                    let space_id = state.active_space_id();
+                    (
+                        state
+                            .tabs
+                            .iter()
+                            .filter(|t| t.space_id == space_id && !t.private)
+                            .map(|t| t.url.clone())
+                            .collect::<Vec<_>>(),
+                        TAB_LIMIT.saturating_sub(state.tabs.len()),
+                    )
+                };
+                let fresh = crate::tab_actions::parse_address_list(&raw_for_recheck, &existing_urls, available);
+                if fresh.urls != expected_urls {
+                    app.flash_error("The open tabs changed while the list was previewed; review the list again");
+                    return;
+                }
+                let (first_id, opened) = {
+                    let mut state = app.state.borrow_mut();
+                    let space_id = state.active_space_id().to_string();
+                    let placement = app.prefs.borrow().new_tab_placement;
+                    let mut anchor = state.active;
+                    let mut first = None;
+                    let mut count = 0usize;
+                    for url in &fresh.urls {
+                        if state.tabs.len() >= TAB_LIMIT {
+                            break;
+                        }
+                        let tid = state.next_id;
+                        state.next_id += 1;
+                        let mut tab = Tab::new(tid);
+                        tab.space_id = space_id.clone();
+                        tab.url = url.clone();
+                        tab.asleep = true;
+                        let at = crate::tab_actions::new_tab_insert_index(
+                            &state.tabs,
+                            anchor,
+                            &space_id,
+                            placement,
+                        );
+                        state.tabs.insert(at, tab);
+                        anchor = tid;
+                        if first.is_none() {
+                            first = Some(tid);
+                        }
+                        count += 1;
+                    }
+                    (first, count)
+                };
+                app.pin_signature.replace(None);
+                app.top_pin_signature.replace(None);
+                if let Some(fid) = first_id {
+                    app.select(fid);
+                } else {
+                    app.render();
+                }
+                app.save_session();
+                app.flash_toast(&format!("Opened {opened} {}", if opened == 1 { "tab" } else { "tabs" }));
+            },
+        );
+    }
+
+    pub fn import_address_list_from_file(&self) {
+        let dialog = gtk::FileChooserNative::new(
+            Some("Import Address List"),
+            Some(&self.ui.window),
+            gtk::FileChooserAction::Open,
+            Some("Preview"),
+            Some("Cancel"),
+        );
+        dialog.set_select_multiple(false);
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Text address lists (*.txt)"));
+        filter.add_pattern("*.txt");
+        filter.add_pattern("*.list");
+        dialog.add_filter(filter);
+        let weak = self.weak();
+        dialog.connect_response(move |dialog, response| {
+            let chosen_path = if response == gtk::ResponseType::Accept {
+                dialog.filename()
+            } else {
+                None
+            };
+            dialog.destroy();
+            FILE_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+            if let (Some(app), Some(path)) = (weak.upgrade(), chosen_path) {
+                let read_result = std::fs::File::open(&path).and_then(|file| {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    file.take((crate::tab_actions::MAX_IMPORT_LIST_BYTES + 1) as u64)
+                        .read_to_end(&mut bytes)?;
+                    let capped = if bytes.len() > crate::tab_actions::MAX_IMPORT_LIST_BYTES {
+                        &bytes[..crate::tab_actions::MAX_IMPORT_LIST_BYTES]
+                    } else {
+                        &bytes[..]
+                    };
+                    Ok(String::from_utf8_lossy(capped).into_owned())
+                });
+                match read_result {
+                    Ok(raw) => {
+                        let app_weak = app.weak();
+                        glib::idle_add_local_once(move || {
+                            if let Some(app) = app_weak.upgrade() {
+                                app.open_address_list_preview("Import Address List", &raw);
+                            }
+                        });
+                    }
+                    Err(_) => app.flash_error("Could not read address list file"),
+                }
+            }
+        });
+        FILE_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+        dialog.show();
+    }
+
+    pub fn open_clipboard_urls_with_review(&self) {
+        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        let Some(text) = clipboard.wait_for_text() else {
+            self.flash_toast("Clipboard does not contain text");
+            return;
+        };
+        self.open_address_list_preview("Open Clipboard Addresses", text.as_str());
+    }
+
+    pub fn save_page_offline(&self) {
+        let active = self.active_id();
+        if self.view(active).is_none() {
+            self.flash_toast("No web page to save offline");
+            return;
+        }
+        let (title, url) = self
+            .state
+            .borrow()
+            .tab(active)
+            .map(|t| (t.title.clone(), t.url.clone()))
+            .unwrap_or_default();
+        if !crate::tab_actions::is_web_url(&url) {
+            self.flash_toast("Only web pages can be saved offline");
+            return;
+        }
+        let suggested = crate::tab_actions::sanitize_offline_filename(&title, &url, "mhtml");
+        let dialog = gtk::FileChooserNative::new(
+            Some("Save Page for Offline Reading"),
+            Some(&self.ui.window),
+            gtk::FileChooserAction::Save,
+            Some("Save"),
+            Some("Cancel"),
+        );
+        dialog.set_do_overwrite_confirmation(true);
+        dialog.set_current_name(&suggested);
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Web Archive (*.mhtml)"));
+        filter.add_pattern("*.mhtml");
+        dialog.add_filter(filter);
+        let weak = self.weak();
+        let expected_tab = active;
+        let expected_url = url.clone();
+        dialog.connect_response(move |dialog, response| {
+            let chosen_path = if response == gtk::ResponseType::Accept {
+                dialog.filename()
+            } else {
+                None
+            };
+            dialog.destroy();
+            FILE_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+            if let (Some(app), Some(path)) = (weak.upgrade(), chosen_path) {
+                let still_matches = app
+                    .state
+                    .borrow()
+                    .tab(expected_tab)
+                    .is_some_and(|t| t.url == expected_url);
+                let Some(view) = still_matches.then(|| app.view(expected_tab)).flatten() else {
+                    app.flash_error("That page changed or closed before saving");
+                    return;
+                };
+                let gio_file = gtk::gio::File::for_path(&path);
+                let app_weak = app.weak();
+                let saved_path = path.clone();
+                let check_url = crate::tab_actions::strip_url_credentials(&expected_url);
+                view.save_to_file(
+                    &gio_file,
+                    webkit2gtk::SaveMode::Mhtml,
+                    gtk::gio::Cancellable::NONE,
+                    move |res| {
+                        if let Some(app) = app_weak.upgrade() {
+                            match res {
+                                Ok(()) => {
+                                    let ok = std::fs::File::open(&saved_path)
+                                        .and_then(|f| {
+                                            use std::io::Read;
+                                            let mut head = Vec::new();
+                                            f.take(8192).read_to_end(&mut head)?;
+                                            Ok(crate::tab_actions::valid_mhtml(&head, &check_url))
+                                        })
+                                        .unwrap_or(false);
+                                    if ok {
+                                        app.flash_toast("Saved page for offline reading");
+                                    } else {
+                                        let _ = std::fs::remove_file(&saved_path);
+                                        app.flash_error("Offline archive was empty or invalid");
+                                    }
+                                }
+                                Err(err) => app.flash_error(&format!("Could not save offline page: {err}")),
+                            }
+                        }
+                    },
+                );
+            }
+        });
+        FILE_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+        dialog.show();
+    }
+
+    pub fn export_reader_text(&self) {
+        if !self.reading.get() {
+            self.flash_toast("Open Reading Mode before exporting reading text");
+            return;
+        }
+        let Some(app) = self.weak().upgrade() else { return };
+        let active = self.active_id();
+        let Some(view) = self.view(active) else { return };
+        let (title, url) = self
+            .state
+            .borrow()
+            .tab(active)
+            .map(|t| (t.title.clone(), t.url.clone()))
+            .unwrap_or_default();
+        let suggested = crate::tab_actions::sanitize_offline_filename(&title, &url, "txt");
+        crate::reader::export_text(&app, &view, suggested);
+    }
+
+    fn build_recently_closed_submenu(&self) -> gtk::Menu {
+        let submenu = gtk::Menu::new();
+        prepare_popup_menu(&submenu);
+
+        let (recent_tabs, recent_batches, can_reopen) = {
+            let state = self.state.borrow();
+            let space_id = state.active_space_id();
+            let tabs: Vec<(u64, String, String)> = state
+                .closed_tabs
+                .iter()
+                .rev()
+                .filter(|c| c.space_id == space_id)
+                .take(10)
+                .map(|c| (c.id, c.title.clone(), crate::tab_actions::strip_url_credentials(&c.url)))
+                .collect();
+            let batches: Vec<(u64, String, usize)> = state
+                .closed_batches
+                .iter()
+                .rev()
+                .filter(|b| b.space_id == space_id)
+                .take(5)
+                .map(|b| (b.id, b.label.clone(), b.tabs.len()))
+                .collect();
+            let open_urls: Vec<&str> = state
+                .tabs
+                .iter()
+                .filter(|t| t.space_id == space_id)
+                .map(|t| t.url.as_str())
+                .collect();
+            let has_history_fallback = state
+                .history
+                .iter()
+                .any(|entry| !open_urls.contains(&entry.url.as_str()));
+            let can_reopen = !tabs.is_empty() || has_history_fallback;
+            (tabs, batches, can_reopen)
+        };
+
+        let reopen_last = gtk::MenuItem::with_label("Reopen Last Closed Tab (Ctrl+Shift+T)");
+        reopen_last.set_sensitive(can_reopen);
+        {
+            let weak = self.weak();
+            reopen_last.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.reopen_closed();
+                }
+            });
+        }
+        submenu.append(&reopen_last);
+
+        if !recent_tabs.is_empty() {
+            submenu.append(&gtk::SeparatorMenuItem::new());
+            for (closed_id, title, url) in recent_tabs {
+                let host = crate::shield::host_of(&url);
+                let head = if title.trim().is_empty() {
+                    if host.is_empty() { url.clone() } else { host.clone() }
+                } else {
+                    title.trim().chars().take(36).collect()
+                };
+                let caption = if host.is_empty() || head == host {
+                    head
+                } else {
+                    format!("{head} — {host}")
+                };
+                let item = gtk::MenuItem::with_label(&caption);
+                item.set_tooltip_text(Some(&url));
+                let weak = self.weak();
+                item.connect_activate(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        app.restore_closed_tab_by_id(closed_id);
+                    }
+                });
+                submenu.append(&item);
+            }
+        }
+
+        if !recent_batches.is_empty() {
+            submenu.append(&gtk::SeparatorMenuItem::new());
+            for (batch_id, label, count) in recent_batches {
+                let item = gtk::MenuItem::with_label(&format!("Restore batch: {label} ({count} tabs)"));
+                let weak = self.weak();
+                item.connect_activate(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        app.restore_closed_batch_by_id(batch_id);
+                    }
+                });
+                submenu.append(&item);
+            }
+        }
+
+        if submenu.children().len() == 1 {
+            submenu.append(&gtk::SeparatorMenuItem::new());
+            let empty = gtk::MenuItem::with_label("No recently closed tabs in this space");
+            empty.set_sensitive(false);
+            submenu.append(&empty);
+        }
+
+        submenu.show_all();
+        submenu
+    }
+
+    pub(crate) fn retain_popup_menu(menu: &gtk::Menu) {
+        OPEN_MENUS.with(|slot| slot.borrow_mut().push(menu.clone()));
+        let release = |menu: &gtk::Menu| {
+            OPEN_MENUS.with(|slot| slot.borrow_mut().retain(|kept| kept != menu));
+        };
+        menu.connect_deactivate(move |menu| release(menu));
+        menu.connect_selection_done(move |menu| {
+            OPEN_MENUS.with(|slot| slot.borrow_mut().retain(|kept| kept != menu));
+        });
+    }
+
+    pub fn open_recently_closed_menu(&self) {
+        let menu = self.build_recently_closed_submenu();
+        Self::retain_popup_menu(&menu);
+        menu.popup_at_widget(
+            &self.ui.more,
+            gtk::gdk::Gravity::SouthEast,
+            gtk::gdk::Gravity::NorthEast,
+            None,
+        );
+    }
+
+    pub fn open_sessions_menu(&self) {
+        let menu = gtk::Menu::new();
+        prepare_popup_menu(&menu);
+
+        let save_item = gtk::MenuItem::with_label("Save Current Space as Session\u{2026}");
+        {
+            let weak = self.weak();
+            save_item.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.prompt_save_named_session();
+                }
+            });
+        }
+        menu.append(&save_item);
+
+        let sessions: Vec<(String, String, usize)> = self
+            .state
+            .borrow()
+            .named_sessions
+            .sessions
+            .iter()
+            .take(8)
+            .map(|s| (s.id.clone(), s.name.clone(), s.tabs.len()))
+            .collect();
+        if !sessions.is_empty() {
+            menu.append(&gtk::SeparatorMenuItem::new());
+            for (sid, name, count) in sessions {
+                let item = gtk::MenuItem::with_label(&format!("Open \"{name}\" ({count} tabs)"));
+                let weak = self.weak();
+                item.connect_activate(move |_| {
+                    if let Some(app) = weak.upgrade() {
+                        match app.open_named_session_alongside(&sid) {
+                            Ok(n) => app.flash_toast(&format!("Opened {n} tabs from \"{name}\"")),
+                            Err(msg) => app.flash_error(&msg),
+                        }
+                    }
+                });
+                menu.append(&item);
+            }
+        }
+
+        menu.append(&gtk::SeparatorMenuItem::new());
+        let export_item = gtk::MenuItem::with_label("Export Space Addresses\u{2026}");
+        {
+            let weak = self.weak();
+            export_item.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.export_space_urls_to_file();
+                }
+            });
+        }
+        menu.append(&export_item);
+
+        let import_item = gtk::MenuItem::with_label("Import Address List\u{2026}");
+        {
+            let weak = self.weak();
+            import_item.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.import_address_list_from_file();
+                }
+            });
+        }
+        menu.append(&import_item);
+
+        let clip_item = gtk::MenuItem::with_label("Open Clipboard Addresses\u{2026}");
+        {
+            let weak = self.weak();
+            clip_item.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_clipboard_urls_with_review();
+                }
+            });
+        }
+        menu.append(&clip_item);
+
+        menu.append(&gtk::SeparatorMenuItem::new());
+        let sleep_bg = gtk::MenuItem::with_label("Sleep Background Tabs Now");
+        {
+            let weak = self.weak();
+            sleep_bg.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.sleep_background_tabs_now();
+                }
+            });
+        }
+        menu.append(&sleep_bg);
+
+        let manage = gtk::MenuItem::with_label("Manage Sessions in Settings\u{2026}");
+        {
+            let weak = self.weak();
+            manage.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.open_panel_filtered(PanelKind::Settings, "Named sessions");
+                }
+            });
+        }
+        menu.append(&manage);
+
+        menu.show_all();
+        Self::retain_popup_menu(&menu);
+        menu.popup_at_widget(
+            &self.ui.more,
+            gtk::gdk::Gravity::SouthEast,
+            gtk::gdk::Gravity::NorthEast,
+            None,
+        );
     }
 
     pub fn tab_menu(&self, id: TabId, event: &gtk::gdk::Event) {
         let menu = gtk::Menu::new();
         prepare_popup_menu(&menu);
-        let (pinned, tab_space, has_others, has_right, can_left, can_right, other_spaces) = {
+        let (
+            pinned,
+            url,
+            muted,
+            keep_awake,
+            asleep,
+            loading,
+            is_active,
+            has_others,
+            has_left,
+            has_right,
+            has_dups,
+            has_same_site,
+            can_left,
+            can_right,
+            other_spaces,
+            has_loading_in_space,
+            has_unpinned_multi,
+            protect_pins,
+            site_kept_awake,
+            host,
+        ) = {
             let state = self.state.borrow();
             let Some(tab) = state.tab(id) else { return };
             let pinned = tab.pinned;
+            let url = tab.url.clone();
+            let muted = tab.muted;
+            let keep_awake = tab.keep_awake;
+            let asleep = tab.asleep;
+            let loading = tab.loading;
+            let is_active = state.active == id;
             let tab_space = tab.space_id.clone();
             let has_others = state
                 .tabs
                 .iter()
                 .any(|t| t.space_id == tab_space && t.id != id && !t.pinned);
+            let has_left = !crate::tab_actions::tabs_to_left(&state.tabs, id).is_empty();
             let has_right = if pinned {
                 false
             } else {
@@ -7075,6 +9472,8 @@ impl App {
                     })
                     .unwrap_or(false)
             };
+            let has_dups = !crate::tab_actions::duplicate_tabs_to_close(&state.tabs, id).is_empty();
+            let has_same_site = !crate::tab_actions::other_site_tabs_to_close(&state.tabs, id).is_empty();
             let partition: Vec<TabId> = state
                 .tabs
                 .iter()
@@ -7091,33 +9490,42 @@ impl App {
                 .filter(|s| s.id != tab_space)
                 .cloned()
                 .collect();
-            (pinned, tab_space, has_others, has_right, can_left, can_right, other_spaces)
-        };
-        let _ = tab_space;
-        let view = self.view(id);
-        let muted = view.as_ref().is_some_and(|v| v.is_muted());
-        let pin_label = if pinned { "Unpin Tab" } else { "Pin Tab" };
-        let mute_label = if muted { "Unmute Tab" } else { "Mute Tab" };
-        let items: Vec<(&str, bool, MenuItem)> = vec![
-            ("Reload Tab", true, Box::new(move |app: &App| app.reload_tab(id))),
+            let has_loading_in_space = !crate::tab_actions::space_stop_targets(&state.tabs, &tab_space).is_empty();
+            let has_unpinned_multi = state
+                .tabs
+                .iter()
+                .filter(|t| t.space_id == tab_space && !t.pinned)
+                .count()
+                >= 2;
+            let prefs = self.prefs.borrow();
+            let protect_pins = prefs.protect_pinned_tabs;
+            let host = crate::shield::host_of(&url);
+            let site_kept_awake = !host.is_empty() && prefs.keep_awake_hosts.iter().any(|h| h == &host);
             (
-                mute_label,
-                view.is_some(),
-                Box::new(move |app: &App| {
-                    if let Some(view) = app.view(id) {
-                        view.set_is_muted(!view.is_muted());
-                    }
-                }),
-            ),
-            (pin_label, true, Box::new(move |app: &App| app.toggle_pin(id))),
-            ("Duplicate Tab", true, Box::new(move |app: &App| app.duplicate(id))),
-            ("Move Tab Left", can_left, Box::new(move |app: &App| { let _ = app.move_tab_by(id, -1); })),
-            ("Move Tab Right", can_right, Box::new(move |app: &App| { let _ = app.move_tab_by(id, 1); })),
-            ("Close Tab", true, Box::new(move |app: &App| app.close_tab(id))),
-            ("Close Other Tabs", has_others, Box::new(move |app: &App| app.close_other_tabs(id))),
-            ("Close Tabs to the Right", has_right, Box::new(move |app: &App| app.close_tabs_below(id))),
-        ];
-        for (label, sensitive, action) in items {
+                pinned,
+                url,
+                muted,
+                keep_awake,
+                asleep,
+                loading,
+                is_active,
+                has_others,
+                has_left,
+                has_right,
+                has_dups,
+                has_same_site,
+                can_left,
+                can_right,
+                other_spaces,
+                has_loading_in_space,
+                has_unpinned_multi,
+                protect_pins,
+                site_kept_awake,
+                host,
+            )
+        };
+
+        let add_item = |target: &gtk::Menu, label: &str, sensitive: bool, action: MenuItem| {
             let item = gtk::MenuItem::with_label(label);
             item.set_sensitive(sensitive);
             let weak = self.weak();
@@ -7126,28 +9534,178 @@ impl App {
                     action(&app);
                 }
             });
-            menu.append(&item);
+            target.append(&item);
+        };
+
+        let view = self.view(id);
+        let live_muted = muted || view.as_ref().is_some_and(|v| v.is_muted());
+        let has_url = !url.trim().is_empty();
+        let is_web = crate::tab_actions::is_web_url(&url);
+
+        add_item(&menu, "Reload Tab", true, Box::new(move |app: &App| app.reload_tab(id)));
+        add_item(
+            &menu,
+            if live_muted { "Unmute Tab" } else { "Mute Tab" },
+            true,
+            Box::new(move |app: &App| app.toggle_tab_mute(id)),
+        );
+        add_item(
+            &menu,
+            if pinned { "Unpin Tab" } else { "Pin Tab" },
+            true,
+            Box::new(move |app: &App| app.toggle_pin(id)),
+        );
+        add_item(&menu, "Duplicate Tab", true, Box::new(move |app: &App| app.duplicate(id)));
+
+        menu.append(&gtk::SeparatorMenuItem::new());
+
+        // Submenu: Audio & Sleep (T08-T13)
+        let audio_sleep_item = gtk::MenuItem::with_label("Audio & Sleep");
+        let audio_sleep = gtk::Menu::new();
+        prepare_popup_menu(&audio_sleep);
+        add_item(
+            &audio_sleep,
+            "Mute Other Tabs in Space",
+            has_others || pinned,
+            Box::new(move |app: &App| app.mute_other_tabs(id)),
+        );
+        add_item(
+            &audio_sleep,
+            "Unmute All Tabs in Space",
+            true,
+            Box::new(|app: &App| app.unmute_space_tabs()),
+        );
+        audio_sleep.append(&gtk::SeparatorMenuItem::new());
+        add_item(
+            &audio_sleep,
+            "Put Tab to Sleep",
+            !is_active && !asleep && !loading && has_url && !keep_awake && !site_kept_awake,
+            Box::new(move |app: &App| app.sleep_tab_now(id)),
+        );
+        add_item(
+            &audio_sleep,
+            "Sleep Background Tabs Now",
+            true,
+            Box::new(|app: &App| app.sleep_background_tabs_now()),
+        );
+        audio_sleep.append(&gtk::SeparatorMenuItem::new());
+        add_item(
+            &audio_sleep,
+            if keep_awake { "Allow Tab to Sleep" } else { "Keep Tab Awake" },
+            true,
+            Box::new(move |app: &App| app.toggle_tab_keep_awake(id)),
+        );
+        if is_web && !host.is_empty() {
+            let site_label = if site_kept_awake {
+                format!("Stop Keeping {host} Awake")
+            } else {
+                format!("Keep {host} Awake")
+            };
+            let url_for_site = url.clone();
+            add_item(
+                &audio_sleep,
+                &site_label,
+                true,
+                Box::new(move |app: &App| app.toggle_site_keep_awake(&url_for_site)),
+            );
+        }
+        audio_sleep_item.set_submenu(Some(&audio_sleep));
+        menu.append(&audio_sleep_item);
+
+        // Submenu: Organize & Space (T04-T07, T18, T21, T22)
+        let organize_item = gtk::MenuItem::with_label("Organize & Space");
+        let organize = gtk::Menu::new();
+        prepare_popup_menu(&organize);
+        add_item(&organize, "Move Tab Left", can_left, Box::new(move |app: &App| { let _ = app.move_tab_by(id, -1); }));
+        add_item(&organize, "Move Tab Right", can_right, Box::new(move |app: &App| { let _ = app.move_tab_by(id, 1); }));
+        add_item(&organize, "Move to Beginning", can_left, Box::new(move |app: &App| app.move_tab_to_edge(id, true)));
+        add_item(&organize, "Move to End", can_right, Box::new(move |app: &App| app.move_tab_to_edge(id, false)));
+        organize.append(&gtk::SeparatorMenuItem::new());
+        add_item(&organize, "Sort Unpinned Tabs by Title", has_unpinned_multi, Box::new(|app: &App| app.sort_space_tabs_by_title()));
+        add_item(&organize, "Group Unpinned Tabs by Site", has_unpinned_multi, Box::new(|app: &App| app.group_space_tabs_by_site()));
+        organize.append(&gtk::SeparatorMenuItem::new());
+        add_item(&organize, "Reload Tabs in Space", true, Box::new(|app: &App| app.reload_space_tabs()));
+        add_item(&organize, "Stop Loads in Space", has_loading_in_space, Box::new(|app: &App| app.stop_space_loads()));
+        add_item(&organize, "Bookmark Space Pages", true, Box::new(|app: &App| app.bookmark_space_pages()));
+        organize_item.set_submenu(Some(&organize));
+        menu.append(&organize_item);
+
+        // Submenu: Copy (T14-T17, T45)
+        let copy_item = gtk::MenuItem::with_label("Copy");
+        let copy_sub = gtk::Menu::new();
+        prepare_popup_menu(&copy_sub);
+        add_item(&copy_sub, "Copy Tab Address", has_url, Box::new(move |app: &App| app.copy_tab_url(id)));
+        if is_web && crate::tab_actions::has_tracking_params(&url) {
+            add_item(&copy_sub, "Copy Clean Address (Strip Tracking)", true, Box::new(move |app: &App| app.copy_tab_clean_url(id)));
+        }
+        add_item(&copy_sub, "Copy Title & Address", has_url, Box::new(move |app: &App| app.copy_tab_title_and_url(id)));
+        add_item(&copy_sub, "Copy Markdown Link", has_url, Box::new(move |app: &App| app.copy_tab_markdown(id)));
+        copy_sub.append(&gtk::SeparatorMenuItem::new());
+        add_item(&copy_sub, "Copy All Addresses in Space", true, Box::new(|app: &App| app.copy_space_urls()));
+        copy_item.set_submenu(Some(&copy_sub));
+        menu.append(&copy_item);
+
+        // Submenu: Move Tab to Space (incl. T26 Move to New Space)
+        let move_item = gtk::MenuItem::with_label("Move Tab to Space");
+        let move_sub = gtk::Menu::new();
+        prepare_popup_menu(&move_sub);
+        for target in &other_spaces {
+            let entry = gtk::MenuItem::with_label(&target.name);
+            let weak = self.weak();
+            let target_id = target.id.clone();
+            entry.connect_activate(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.move_tab_to_space(id, &target_id);
+                }
+            });
+            move_sub.append(&entry);
         }
         if !other_spaces.is_empty() {
-            menu.append(&gtk::SeparatorMenuItem::new());
-            let move_item = gtk::MenuItem::with_label("Move Tab to Space");
-            let submenu = gtk::Menu::new();
-            prepare_popup_menu(&submenu);
-            for target in other_spaces {
-                let entry = gtk::MenuItem::with_label(&target.name);
-                let weak = self.weak();
-                let target_id = target.id.clone();
-                entry.connect_activate(move |_| {
-                    if let Some(app) = weak.upgrade() {
-                        app.move_tab_to_space(id, &target_id);
-                    }
-                });
-                submenu.append(&entry);
-            }
-            move_item.set_submenu(Some(&submenu));
-            menu.append(&move_item);
+            move_sub.append(&gtk::SeparatorMenuItem::new());
         }
+        add_item(&move_sub, "New Space\u{2026}", true, Box::new(move |app: &App| app.prompt_move_tab_to_new_space(id)));
+        move_item.set_submenu(Some(&move_sub));
+        menu.append(&move_item);
+
+        // Submenu: Recently Closed (T19, T20)
+        let closed_item = gtk::MenuItem::with_label("Recently Closed");
+        let closed_sub = self.build_recently_closed_submenu();
+        closed_item.set_submenu(Some(&closed_sub));
+        menu.append(&closed_item);
+
+        menu.append(&gtk::SeparatorMenuItem::new());
+
+        // Close actions (T01, T02, T03, T43, T44)
+        if pinned && protect_pins {
+            add_item(
+                &menu,
+                "Unpin & Close Tab",
+                true,
+                Box::new(move |app: &App| {
+                    if let Some(tab) = app.state.borrow_mut().tab_mut(id) {
+                        tab.pinned = false;
+                    }
+                    app.close_tab_force(id);
+                }),
+            );
+        } else {
+            add_item(&menu, "Close Tab", true, Box::new(move |app: &App| app.close_tab(id)));
+        }
+
+        let close_more_item = gtk::MenuItem::with_label("Close More");
+        let close_more = gtk::Menu::new();
+        prepare_popup_menu(&close_more);
+        add_item(&close_more, "Close Other Tabs", has_others, Box::new(move |app: &App| app.close_other_tabs(id)));
+        add_item(&close_more, "Close Tabs to the Left", has_left, Box::new(move |app: &App| app.close_tabs_left(id)));
+        add_item(&close_more, "Close Tabs to the Right", has_right, Box::new(move |app: &App| app.close_tabs_below(id)));
+        close_more.append(&gtk::SeparatorMenuItem::new());
+        add_item(&close_more, "Close Duplicate Tabs", has_dups, Box::new(move |app: &App| app.close_duplicate_tabs(id)));
+        add_item(&close_more, "Close Other Tabs from This Site", has_same_site, Box::new(move |app: &App| app.close_same_site_tabs(id)));
+        close_more_item.set_submenu(Some(&close_more));
+        menu.append(&close_more_item);
+
         menu.show_all();
+        Self::retain_popup_menu(&menu);
         if let Some(button) = event.downcast_ref::<gtk::gdk::EventButton>() {
             menu.popup_easy(button.button(), button.time());
         }
@@ -7253,6 +9811,7 @@ impl App {
         }
         menu.append(&reset);
         menu.show_all();
+        Self::retain_popup_menu(&menu);
         menu.popup_easy(event.button(), event.time());
     }
 
@@ -7332,12 +9891,28 @@ impl App {
             box_.pack_start(&btn, false, true, 0);
         };
 
-        // Group 1: Tabs
+        // Group 1: Tabs & Sessions
         add_row(&container, "New Tab", "Ctrl+T", true, Box::new(|app: &App| {
             app.new_tab(None, false, false);
         }));
         add_row(&container, "New Private Tab", "Ctrl+Shift+N", true, Box::new(|app: &App| {
             app.new_tab(None, true, false);
+        }));
+        add_row(&container, "Recently Closed\u{2026}", "", true, Box::new(|app: &App| {
+            let weak = app.weak();
+            glib::idle_add_local_once(move || {
+                if let Some(app) = weak.upgrade() {
+                    app.open_recently_closed_menu();
+                }
+            });
+        }));
+        add_row(&container, "Sessions & Address Lists\u{2026}", "", true, Box::new(|app: &App| {
+            let weak = app.weak();
+            glib::idle_add_local_once(move || {
+                if let Some(app) = weak.upgrade() {
+                    app.open_sessions_menu();
+                }
+            });
         }));
 
         let show_back_in_menu = !prefs.show_toolbar || !prefs.show_back_button || !self.ui.back.is_visible();
@@ -7385,10 +9960,11 @@ impl App {
             gtk::atk::prelude::AtkObjectExt::set_name(&a, "Zoom Out");
         }
 
+        let default_zoom_pct = (prefs.default_zoom * 100.0).round() as i32;
         let zoom_reset = gtk::Button::with_label(&format!("{}%", self.current_zoom_percent()));
         crate::ui::class(&zoom_reset, "menu-zoom-reset");
         zoom_reset.set_widget_name("Reset Zoom");
-        zoom_reset.set_tooltip_text(Some("Reset zoom to 100% (Ctrl 0)"));
+        zoom_reset.set_tooltip_text(Some(&format!("Reset zoom to {default_zoom_pct}% (Ctrl 0)")));
         zoom_reset.set_sensitive(has_view);
         if let Some(a) = zoom_reset.accessible() {
             gtk::atk::prelude::AtkObjectExt::set_name(&a, "Reset Zoom");
@@ -7469,6 +10045,22 @@ impl App {
             !url.is_empty(),
             Box::new(|app: &App| app.reader()),
         );
+        if self.reading.get() {
+            add_row(
+                &container,
+                "Export Reading Text\u{2026}",
+                "",
+                has_view,
+                Box::new(|app: &App| app.export_reader_text()),
+            );
+        }
+        add_row(
+            &container,
+            "Save Page Offline\u{2026}",
+            "",
+            is_http && has_view,
+            Box::new(|app: &App| app.save_page_offline()),
+        );
         add_row(
             &container,
             blocker_label,
@@ -7521,7 +10113,14 @@ impl App {
         add_row(&container, "Close Window", "Alt+F4", true, Box::new(|app: &App| app.ui.window.close()));
 
         container.show_all();
-        popover.add(&container);
+        let (_, win_h) = self.ui.window.size();
+        let scroller = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroller.set_propagate_natural_height(true);
+        scroller.set_max_content_height((win_h - 96).clamp(280, 620));
+        scroller.add(&container);
+        scroller.show_all();
+        popover.add(&scroller);
         let weak = self.weak();
         popover.connect_closed(move |pop| {
             if let Some(app) = weak.upgrade() {
@@ -8988,12 +11587,14 @@ pub(crate) fn session_records_from_state(state: &State) -> Vec<TabRecord> {
                 state.space_active_tabs.get(&t.space_id) == Some(&t.id)
             };
             TabRecord {
-                url: t.url.clone(),
+                url: crate::tab_actions::strip_url_credentials(&t.url),
                 title: t.title.clone(),
                 pinned: t.pinned,
                 active: t.id == active,
                 space_id: t.space_id.clone(),
                 space_active,
+                muted: t.muted,
+                keep_awake: t.keep_awake,
             }
         })
         .collect()
@@ -9336,11 +11937,13 @@ mod state_logic_tests {
         let mut tabs = vec![Tab::new(1), Tab::new(2)];
         let mut next_id = 3;
         let closed = ClosedTab {
+            id: next_closed_id(),
             space_id: crate::spaces::default_space_id(),
             url: "https://restored.example/".into(),
             title: "Restored".into(),
             pinned: true,
             index: 99,
+            ordinal: 1,
         };
         let id = restore_closed_tab(&mut tabs, &mut next_id, closed);
         assert_eq!(id, 3);
@@ -9355,11 +11958,13 @@ mod state_logic_tests {
             &mut tabs,
             &mut next_id,
             ClosedTab {
+                id: next_closed_id(),
                 space_id: "space-2".into(),
                 url: "https://first.example/".into(),
                 title: "First".into(),
                 pinned: false,
                 index: 1,
+                ordinal: 1,
             },
         );
         assert_eq!(tabs[1].id, id2);
@@ -9493,6 +12098,10 @@ mod state_logic_tests {
             hide_origin: None,
             blocked: BTreeMap::new(),
             closed_tabs: Vec::new(),
+            closed_batches: Vec::new(),
+            activation_seq: 1,
+            named_sessions: crate::tab_actions::NamedSessionStore::default(),
+            last_deleted_session: None,
         };
 
         let recs = session_records_from_state(&state);
@@ -9506,6 +12115,51 @@ mod state_logic_tests {
         assert!(recs[2].pinned && !recs[2].space_active);
         assert_eq!(recs[3].space_id, "space-1");
         assert!(recs[3].url.is_empty() && !recs[3].pinned && recs[3].active && recs[3].space_active);
+    }
+
+    #[test]
+    fn repair_regressions_pin_flags_and_credential_stripping() {
+        let (tip, name) = App::pin_words_with_flags("Docs", true, true, true);
+        assert!(tip.contains("Docs") && tip.contains("kept awake") && tip.contains("muted"));
+        assert!(name.contains("active") && name.contains("kept awake") && name.contains("muted"));
+
+        let mut cred_tab = Tab::new(1);
+        cred_tab.url = "https://alice:hunter2@docs.example/private".into();
+        cred_tab.title = "Docs".into();
+        cred_tab.muted = true;
+        let mut stack = Vec::new();
+        push_closed_tab(&mut stack, &cred_tab, 0);
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].url, "https://docs.example/private");
+        assert_ne!(stack[0].id, 0);
+
+        let spaces = crate::spaces::SpaceStore::default();
+        let mut space_active_tabs = BTreeMap::new();
+        space_active_tabs.insert(crate::spaces::default_space_id(), 1);
+        let state = State {
+            spaces,
+            space_active_tabs,
+            tabs: vec![cred_tab],
+            errors: BTreeMap::new(),
+            active: 1,
+            next_id: 2,
+            history: Vec::new(),
+            bookmarks: Vec::new(),
+            hidden: BTreeMap::new(),
+            downloads: Vec::new(),
+            hide_mode: false,
+            hide_origin: None,
+            blocked: BTreeMap::new(),
+            closed_tabs: Vec::new(),
+            closed_batches: Vec::new(),
+            activation_seq: 1,
+            named_sessions: crate::tab_actions::NamedSessionStore::default(),
+            last_deleted_session: None,
+        };
+        let recs = session_records_from_state(&state);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].url, "https://docs.example/private");
+        assert!(recs[0].muted);
     }
 }
 

@@ -1,179 +1,130 @@
-# Packaging & AppImage
+# Packaging & Native Linux Distribution Formats
 
-The x86_64 AppImage packages **Rill** (internal executable name `search`), WebKitGTK 4.1, GTK 3, the WebKit process
-helpers, GStreamer (including `libgstautodetect.so` and `libgstaudiofx.so`),
-fonts, licenses, and the required desktop resources. It is not a launcher for a
-browser already on your system, and it does not use Chromium.
+Rill (internal executable name `search`, user-facing alias `rill`) ships native Linux x86_64 packaging recipes and portable AppImage tooling designed around **honest ABI compatibility**:
 
-Rill 1.1.0 publishes `Rill-1.1.0-x86_64.AppImage` with its `.sha256` sidecar. Historic `1.0.1` and `1.0.2` AppImages
-(`build/Search-1.0.2-x86_64.AppImage`) and the earlier F39 local candidate
-(`build/Search-redesign-x86_64.AppImage`) remain frozen historical artifacts
-and must not be overwritten.
+- **Never bundle host glibc/loader or graphics drivers** (`libc.so.6`, `ld-linux-x86-64.so.2`, `libm.so.6`, `libdrm.so.2`, `libGL*`/`libEGL*`, Mesa DRI, `libsystemd`/`libelogind`) into portable artifacts.
+- **Build portable release binaries on an older supported glibc floor** (Debian 12 `bookworm`, glibc 2.36, WebKitGTK 4.1 >= 2.40) so binaries run honestly across Debian 12+, Ubuntu 24.04+, Linux Mint 22+, Pop!_OS 24.04+, Fedora 38+, openSUSE Leap 15.6 / Tumbleweed, and Arch-family systems.
+- **Preserve legacy profile identity** across all package formats: the executable remains `search` (with a `rill` symlink), `StartupWMClass=search`, `Icon=search`, and user data remains in `$XDG_CONFIG_HOME/search`, `$XDG_DATA_HOME/search`, and `$XDG_CACHE_HOME/search`. Uninstalling any package never deletes user profile directories.
+- **Never overwrite frozen historical release artifacts** (`build/Search-1.0.1-x86_64.AppImage`, `build/Search-1.0.2-x86_64.AppImage`, `build/Search-redesign-x86_64.AppImage`, and `build/Rill-1.1.0-x86_64.AppImage`).
 
-## Running the AppImage
+## Package Formats & Installed Layout
 
-```sh
-sha256sum -c Rill-1.1.0-x86_64.AppImage.sha256
-chmod +x Rill-1.1.0-x86_64.AppImage
-./Rill-1.1.0-x86_64.AppImage
-```
+All native packages install the same standard FreeDesktop layout:
 
-Open a web address directly with `--url`:
+| Path | Purpose |
+| --- | --- |
+| `/usr/bin/search` | Native Rill browser binary |
+| `/usr/bin/rill` | Symlink to `search` |
+| `/usr/share/applications/Search.desktop` | Desktop launcher (`Name=Rill`, `Icon=search`, `StartupWMClass=search`, `Exec=/usr/bin/rill --url %u`) |
+| `/usr/share/icons/hicolor/512x512/apps/search.png` | 512×512 PNG application icon |
+| `/usr/share/icons/hicolor/scalable/apps/search.svg` | Scalable SVG application icon |
+| `/usr/share/metainfo/io.github.indar_beurre.Search.metainfo.xml` | AppStream metadata (`id=io.github.indar_beurre.Search`) |
+| `/usr/share/doc/rill/copyright` or `/usr/share/licenses/rill/LICENSE` | MIT license |
 
-```sh
-./Rill-1.1.0-x86_64.AppImage --url https://example.com
-```
+### 1. Debian / Ubuntu (`.deb`)
 
-Settings, tabs, history and bookmarks use the normal XDG user folders (`search`). Launching
-an AppImage or local build does not reset or overwrite your existing profile.
+- **Recipe & builder:** `packaging/debian/` (`control.in`, `copyright`, `postinst`, `postrm`) and `tools/package-deb.sh`.
+- **Artifact naming:** `rill_<version>-1_amd64.deb` + `.sha256` + `.abi.json`.
+- **Supported targets:** Debian 12 (`bookworm`), Debian 13 (`trixie`), Ubuntu 24.04 LTS (`noble`) and newer, Linux Mint 22+, Kali, Pop!_OS 24.04+. Runtime `Depends` use `t64` alternatives (`libgtk-3-0 | libgtk-3-0t64`, `libglib2.0-0 | libglib2.0-0t64`, `libatk1.0-0 | libatk1.0-0t64`) so one Debian 12-built `.deb` installs cleanly on both pre-`t64` and post-`t64` systems.
+- **Build (inside Debian 12 / glibc 2.36 environment):**
+  ```sh
+  tools/package-deb.sh
+  ```
+- **Install & uninstall:**
+  ```sh
+  sha256sum -c rill_1.1.0-1_amd64.deb.sha256
+  sudo apt install ./rill_1.1.0-1_amd64.deb
+  # Uninstall (keeps ~/.config/search and ~/.local/share/search):
+  sudo apt remove rill
+  ```
 
-For a desktop-menu entry, install the supplied metadata from `packaging/`:
+### 2. Fedora / openSUSE / RPM (`.rpm`)
 
-```sh
-install -Dm644 packaging/Search.desktop ~/.local/share/applications/Search.desktop
-install -Dm644 packaging/search.png ~/.local/share/icons/hicolor/512x512/apps/search.png
-```
+- **Recipe & builder:** `packaging/rpm/rill.spec` and `tools/package-rpm.sh`.
+- **Artifact naming:** `rill-<version>-1.<dist>.x86_64.rpm` + `.sha256` + `.abi.json`.
+- **Dependency model:** Uses RPM's automatic ELF SONAME dependency generator (`libwebkit2gtk-4.1.so.0()(64bit)`, `libgtk-3.so.0()(64bit)`, `libsoup-3.0.so.0()(64bit)`, `libsqlite3.so.0()(64bit)`) plus distro-aware GStreamer base/good plugin dependencies (`gstreamer1-plugins-*` on Fedora, `gstreamer-plugins-*` on openSUSE).
+- **Compatibility note:** RHEL 9 / Rocky 9 / AlmaLinux 9 ship `webkit2gtk-4.0` (libsoup 2) rather than `webkit2gtk-4.1` (libsoup 3), so native `.rpm` requires Fedora 38+, openSUSE Leap 15.6 / Tumbleweed, or EL10+.
+- **Build (inside a Fedora / openSUSE host with `rpm-build`):**
+  ```sh
+  tools/package-rpm.sh
+  ```
+- **Install & uninstall:**
+  ```sh
+  sha256sum -c rill-1.1.0-1.*.x86_64.rpm.sha256
+  sudo dnf install ./rill-1.1.0-1.*.x86_64.rpm
+  # Uninstall (keeps ~/.config/search and ~/.local/share/search):
+  sudo dnf remove rill
+  ```
 
-The desktop entry sets `Name=Rill`, `StartupWMClass=search`, and `Exec=search --url %u`; change `search` to the absolute path of
-your binary or AppImage if you do not put it on your `PATH`.
+### 3. Portable Native Tarball (`.tar.gz`)
 
-## Architecture and compatibility
+- **Recipe & builder:** `packaging/tarball/` (`install.sh`, `uninstall.sh`, `README.txt.in`) and `tools/package-tarball.sh`.
+- **Artifact naming:** `Rill-<version>-linux-x86_64.tar.gz` + `.sha256` + `.abi.json`.
+- **Contents:** `bin/search`, `bin/rill -> search`, desktop/icon/metainfo files, `LICENSE`, `README.txt`, `BUILD_INFO.txt` (exact glibc floor and `DT_NEEDED`), and prefix-aware `install.sh` / `uninstall.sh`.
+- **Build (inside Debian 12 / glibc 2.36 environment):**
+  ```sh
+  tools/package-tarball.sh
+  ```
+- **Install & uninstall (per-user `~/.local` or system `/usr/local`):**
+  ```sh
+  sha256sum -c Rill-1.1.0-linux-x86_64.tar.gz.sha256
+  tar -xzf Rill-1.1.0-linux-x86_64.tar.gz
+  cd Rill-1.1.0-linux-x86_64
+  ./install.sh                    # installs to ~/.local (no root needed)
+  ./uninstall.sh                  # removes only installed package files
+  ```
 
-- CPU: **x86_64 / AMD64** (the 64-bit x86 family). There is no 32-bit i686 build.
-- Display: Wayland or X11 with a running desktop session.
-- Current build host: x86_64 Artix Linux with glibc 2.44, WebKitGTK 2.54.2
-  (helpers discovered dynamically via `pkg-config --variable=libdir webkit2gtk-4.1`,
-  resolving to `/usr/lib/webkit2gtk-4.1` on this host), and GStreamer 1.28.8.
-- Released `1.0.2` baseline: built on x86_64 CachyOS with glibc 2.44 and
-  WebKitGTK 2.54.2.
-- The AppImage uses the host's glibc loader (glibc 2.44 floor for binaries built
-  on this host), so older distributions need an artifact built against their
-  older glibc instead. Build on an older supported distribution for wider
-  compatibility; do not mix this host's newer libraries into an older glibc
-  loader.
-- No installation or root access is required. AppImage mounting normally uses
-  FUSE; `--appimage-extract-and-run` is available on hosts without FUSE.
-- Hardware and kernel graphics drivers are supplied by the host. Mesa userspace
-  drivers are included where available.
+### 4. Arch Linux / Artix / CachyOS / EndeavourOS (`PKGBUILD`)
 
-## Preflight and rebuild
+- **Recipe & builder:** `packaging/arch/PKGBUILD`, `packaging/arch/.SRCINFO`, and `tools/package-arch.sh`.
+- **Artifact naming:** `rill-<version>-1-x86_64.pkg.tar.zst` + `.sha256` + `.abi.json`.
+- **Runtime dependencies:** `gtk3`, `webkit2gtk-4.1`, `libsoup3`, `sqlite`, `gst-plugins-base`, `gst-plugins-good`, `hicolor-icon-theme` (optional: `gst-libav`, `gst-plugins-bad`, `gst-plugins-ugly`, `ttf-liberation`).
+- **Build locally (isolated `makepkg`, does not modify the host):**
+  ```sh
+  tools/package-arch.sh
+  ```
+- **Install & uninstall on Arch-family systems:**
+  ```sh
+  sha256sum -c rill-1.1.0-1-x86_64.pkg.tar.zst.sha256
+  sudo pacman -U ./rill-1.1.0-1-x86_64.pkg.tar.zst
+  # Uninstall (keeps ~/.config/search and ~/.local/share/search):
+  sudo pacman -R rill
+  ```
 
-Run preflight first to verify host libraries, GStreamer audio plugins, fonts,
-and mandatory licenses without modifying `build/AppDir` or building an image:
+### 5. Portable AppImage (`.AppImage`)
 
-```sh
-tools/appimage.sh --preflight
-```
+- **Builder & entrypoint:** `tools/appimage.sh` and `packaging/AppRun`.
+- **What it bundles:** Rill binary, WebKitGTK 4.1 + `WebKitWebProcess` / `WebKitNetworkProcess`, `librill_appimage_preload.so` (built from `packaging/rill_appimage_preload.c` to intercept GLib `posix_spawn`/`posix_spawnp` and redirect compiled-in distro WebKit helper paths such as `/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/*` to `$WEBKIT_EXEC_PATH` across Debian, Fedora, and Arch layouts), GTK 3, GIO/GSettings schemas, GStreamer plugins (`libgstautodetect.so`, `libgstaudiofx.so`, `gst-plugin-scanner`), fonts (DejaVu Sans, Liberation Serif + mandatory SIL OFL 1.1 license, optional Adwaita fonts), and desktop/metainfo resources.
+- **What it explicitly excludes (`VM-001` regression guard):** `libc.so.*`, `ld-linux*.so*`, `libm.so.*`, `libpthread.so.*`, `libdl.so.*`, `librt.so.*`, `libresolv.so.*`, `libnss_*.so*`, `libgcc_s.so.*`, `libstdc++.so.*`, `libdrm*`, `libGL*`, `libEGL*`, `libgbm*`, `libvulkan*`, `libwayland-*`, `libX11*`, `libxcb*`, `libdbus-1*`, `libelogind*`, `libudev*`, and `/usr/lib/dri/*.so`. `libasound.so.2` is deliberately bundled so minimal Ubuntu/Arch hosts without `alsa-lib` can launch the browser. Note: `libsystemd.so.0` and `libselinux.so.1` remain bundled when built on Debian 12 so WebKitGTK loads cleanly on non-systemd / non-SELinux distributions (Artix, Devuan, Arch, Void). A post-stage audit fails the build if any forbidden host-ABI library enters `AppDir/usr/lib` or if any ELF exceeds `MAX_GLIBC`.
+- **Extraction paths with whitespace:** `AppRun` creates a per-run, space-free alias directory under `${TMPDIR:-/tmp}` for the preload shims when the AppDir path contains whitespace. `ld.so` cannot parse whitespace-containing `LD_PRELOAD` entries, so the alias preserves WebKit helper redirection without changing `$HOME` profile identity.
+- **Preflight & build (on Debian 12 for glibc 2.36 portability):**
+  ```sh
+  MAX_GLIBC=2.36 tools/appimage.sh --preflight
+  MAX_GLIBC=2.36 APPIMAGE_OUT="$PWD/build/Rill-1.1.0-x86_64-glibc2.36-candidate.AppImage" tools/appimage.sh
+  ```
+- **Run:**
+  ```sh
+  sha256sum -c Rill-<version>-x86_64*.AppImage.sha256
+  chmod +x Rill-<version>-x86_64*.AppImage
+  ./Rill-<version>-x86_64*.AppImage
+  # On hosts without FUSE:
+  ./Rill-<version>-x86_64*.AppImage --appimage-extract-and-run
+  ```
 
-Build the local redesign candidate:
+## Offline Package & ABI Verification
 
-```sh
-APPIMAGE_OUT="$PWD/build/Rill-1.1.0-x86_64.AppImage" tools/appimage.sh
-```
-
-`tools/appimage.sh` defaults `APPIMAGE_OUT` to
-`build/Search-redesign-x86_64.AppImage` and refuses to overwrite an existing
-historic `Search-1.0.1-*.AppImage` or `Search-1.0.2-*.AppImage` unless
-`ALLOW_OVERWRITE_HISTORIC=1` is set explicitly. The script downloads the
-official AppImage tooling and `patchelf` when not already cached in
-`build/tools/`, builds the release binary, writes the selected `APPIMAGE_OUT`,
-and writes a SHA-256 sidecar at `<output>.sha256`. It only supports an x86_64
-build host at present.
-
-### Reproducible dependency overrides
-
-When the build host lacks system-installed `gst-plugins-good` or
-`ttf-liberation`, `tools/appimage.sh` resolves compatible user-local caches
-automatically (and fails cleanly if any required plugin, font face, or license
-is missing or has unresolved shared libraries):
-
-- `WEBKIT_HELPER_DIR`: overrides the WebKitGTK 4.1 helper directory (default:
-  discovered from `pkg-config` for `webkit2gtk-4.1` (`libdir`/`libexecdir`/`prefix`) and standard
-  distro paths; verified for `WebKitWebProcess` and `WebKitNetworkProcess`).
-- `GST_EXTRA_PLUGIN_DIR`: fallback directory for `libgstautodetect.so` and
-  `libgstaudiofx.so` matching the host GStreamer ABI (default:
-  `$HOME/.cache/search-gst-autodetect/root/usr/lib/gstreamer-1.0`).
-- `GST_EXTRA_LICENSE`: LGPL-2.1-or-later license text copied to
-  `usr/share/licenses/search/gst-plugins-good-LGPL-2.1-or-later.txt` when
-  available.
-- `LIBERATION_FONT_DIR`: directory containing all four `LiberationSerif-*.ttf`
-  faces (`Regular`, `Bold`, `Italic`, `BoldItalic`; default checks system font
-  directories and `$HOME/.cache/search-packaging/ttf-liberation/usr/share/fonts/liberation`).
-- `LIBERATION_LICENSE`: mandatory SIL Open Font License 1.1 text copied to
-  `usr/share/licenses/search/LiberationSerif-LICENSE` (default checks system
-  license paths and `$HOME/.cache/search-packaging/ttf-liberation/usr/share/licenses/ttf-liberation/LICENSE`).
-- `DEJAVU_FONT_DIR` / `ADWAITA_FONT_DIR`: optional overrides for DejaVu Sans
-  and Adwaita font directories.
-
-## Fonts and licenses
-
-The packager bundles DejaVu Sans, Adwaita fonts, and **Liberation Serif**
-(all four faces for serif fallback and web rendering; browser chrome uses clean
-sans-serif `Inter` / `Adwaita Sans` / `Noto Sans` / `Cantarell`). Liberation
-Serif is licensed under the **SIL Open Font License 1.1**, separately from
-Rill's MIT license.
-
-`tools/appimage.sh` requires all four `LiberationSerif-*.ttf` faces and the
-corresponding OFL license file to be present, copying the license to
-`usr/share/licenses/search/LiberationSerif-LICENSE` inside the AppDir (and
-refusing to package if either the font faces or license file are missing). It
-also bundles `DejaVu-LICENSE`, `AdwaitaFonts-LICENSE`, and
-`gst-plugins-good-LGPL-2.1-or-later.txt` under `usr/share/licenses/search/`
-when present. After extraction, the expected Liberation Serif license path is
-`squashfs-root/usr/share/licenses/search/LiberationSerif-LICENSE`.
-
-## Verify the exact packaged browser
+Run the offline inspection suite to validate all recipes, shell scripts, desktop/AppStream metadata, uninstall profile safety, historic 1.1.0 preservation, checksums, and built packages:
 
 ```sh
-sha256sum -c build/Search-redesign-x86_64.AppImage.sha256
-SEARCH_TEST_BACKEND=x11 SEARCH_UI_OUTPUT=/tmp/search-appimage-ui \
-  SEARCH_BINARY="$PWD/build/Search-redesign-x86_64.AppImage" python3 tools/test_ui.py
-SEARCH_TEST_BACKEND=x11 \
-  SEARCH_BINARY="$PWD/build/Search-redesign-x86_64.AppImage" python3 tools/stress.py
+python3 tools/package_test.py --artifacts-dir /path/to/artifacts --max-glibc 2.36
 ```
 
-Use `SEARCH_TEST_BACKEND=x11` (under X11 or `Xvfb`) for deterministic
-programmatic window-resize verification, especially on tiled Wayland desktops
-that may override requested widths; pass `SEARCH_UI_OUTPUT=<dir>` to keep
-`build/redesign/` untouched. When `SEARCH_TEST_BACKEND` is unset, both
-`tools/test_ui.py` and `tools/stress.py` preserve Wayland if `WAYLAND_DISPLAY`
-is set and choose X11 automatically when only `DISPLAY` is set. Native Wayland
-runs remain useful for interactive compositor smoke checks, and X11/`Xvfb`
-verification is separate from measured native Wayland or hardware-compositor
-motion performance.
+## Historic 1.1.0 Portability Root Cause (`VM-001`)
 
-Design F39 verification against the exact packaged artifact
-`build/Search-redesign-x86_64.AppImage` (125.9 MiB, SHA-256
-`d5b00497b2a87d6f1941081a2f2d73fcd3835e92130b447e3fca2586c11214bb`):
-- `sha256sum -c build/Search-redesign-x86_64.AppImage.sha256`: **OK** (historic
-  `build/Search-1.0.2-x86_64.AppImage` untouched at `7393bab26511…`).
-- Embedded `usr/bin/search` SHA-256: `c5cc0d19b7fad79d0882a283f8f5329616e67f70d3973e73a8a6fea4ea6569da` (derived from release
-  binary `c2974efd71a0660e631806a05727b0be51d0815e58b3b0179420c007c665f624`, differing only by `patchelf --set-rpath '$ORIGIN/../lib'`, zero missing libs).
-- Extracted AppDir verified to contain all four `LiberationSerif-*.ttf` faces,
-  mandatory `LiberationSerif-LICENSE` (SIL OFL 1.1), `DejaVu-LICENSE`,
-  `AdwaitaFonts-LICENSE`, `libgstautodetect.so` + `libgstaudiofx.so` +
-  `gst-plugins-good-LGPL-2.1-or-later.txt`, and WebKitGTK 4.1 helpers under
-  `usr/lib/webkit2gtk-4.1/`.
-- Native FUSE execution (`SEARCH_BINARY="$PWD/build/Search-redesign-x86_64.AppImage"`):
-  full `tools/test_ui.py` **PASSED** (0 GTK warnings/criticals/allocations),
-  **3 consecutive** `tools/stress.py --quick` runs **151/151 passed**
-  (`build/stress-report-f39-appimage-quick-{1,2,3}.json`, Run #1 with auto-X11
-  and `SEARCH_TEST_BACKEND` unset: one idle tab at **213.9 / 196.2 / 213.6 MB**
-  warm PSS, **216.1 / 198.4 / 215.9 MB** cold PSS, **94.1 / 76.5 / 93.8 MB** own,
-  **413.1 / 395.5 / 413.0 MB** RSS, **3** processes across idle, History,
-  Bookmarks, and Settings open/close with zero `glycin`/`bwrap`),
-  and live HTTPS (`example.com`, Wikipedia Reader, `expired.badssl.com` TLS +
-  `errorfocus`), live non-`SEARCH_BENCH` folded controls, and local
-  WebAudio/`<audio>` + live `https://github.com/` smoke all stayed crash-free
-  with exit 0 and 0 bad stderr lines.
+The frozen `build/Rill-1.1.0-x86_64.AppImage` (SHA-256 `4fa30c48454b8ada52d23e9317cb40537f1ad25be1355a64c5fd88328bb655e2`, preserved untouched) was built on an Artix Linux host (glibc 2.44) before `tools/appimage.sh` had a host-ABI excludelist. On Debian 12 (glibc 2.36), executing it fails immediately with exit 127:
 
-The released `1.0.2` artifact historically passed all 117 stress checks on its
-original host. The full Design F39 source-build stress run
-(`docs/benchmarks/stress-report-f39.json`: **151/151 checks passed**)
-measured one idle tab at **182.9 MB** warm total PSS
-(185.3 MB cold), **94.5 MB** own anonymous PSS,
-and **441.9 MB** RSS across **3** processes.
-The original ~100 MB total-PSS target remains unmet (230 MB WebKitGTK floor is
-a separate baseline). See [docs/TESTING.md](../docs/TESTING.md) and
-[docs/design-f39-evidence.md](../docs/design-f39-evidence.md) (historical F38
-preserved at [docs/design-f38-evidence.md](../docs/design-f38-evidence.md)).
+```text
+symbol lookup error: .../usr/lib/libc.so.6: undefined symbol: __pointer_chk_guard, version GLIBC_PRIVATE
+```
+
+Because `collect()` copied host `libc.so.6` and `ld-linux-x86-64.so.2` into `AppDir/usr/lib` while the host kernel used Debian's older `/lib64/ld-linux-x86-64.so.2`, and because every bundled Artix library required `GLIBC_2.39`–`GLIBC_2.44`, the 1.1.0 AppImage cannot run on glibc < 2.44 distributions. Rebuilding on Debian 12 (glibc 2.36) with the fixed `tools/appimage.sh` excludelist + `MAX_GLIBC=2.36` gate resolves both defects.

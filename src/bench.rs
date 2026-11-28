@@ -1094,7 +1094,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                             ("http://127.0.0.1:8765/long", "The Long Read"),
                         ] {
                             if !state.bookmarks.iter().any(|b| b.url == url) {
-                                state.bookmarks.push(crate::store::Bookmark { url: url.to_string(), title: title.to_string() });
+                                state.bookmarks.push(crate::store::Bookmark { url: url.to_string(), title: title.to_string(), folder: String::new() });
                             }
                         }
                     }
@@ -1109,6 +1109,7 @@ fn dispatch(app: &AppRef, command: &str, argument: &str) -> String {
                                 state.downloads.push(crate::app::DownloadRec {
                                     id: 0, name: name.to_string(), path: format!("/home/user/Downloads/{name}"),
                                     done, failed, got, total, private: false,
+                                source_url: String::new(), missing: false,
                                 });
                             }
                         }

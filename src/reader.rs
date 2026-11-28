@@ -138,6 +138,108 @@ pub fn enter(app: &AppRef, view: &webkit2gtk::WebView) {
     });
 }
 
+/// JS snippet run inside `READER_WORLD` to extract paragraph-preserving plain
+/// text from the active reader article (T50).
+const EXPORT_TEXT_SCRIPT: &str = r#"(function () {
+  const root = document.getElementById('__search_reader');
+  if (!root) return '';
+  const BLOCK_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,figcaption';
+  const blocks = [];
+  const push = (s, preserveWhitespace) => {
+    const normalized = (s || '').replace(/\r\n/g, '\n');
+    const cleaned = preserveWhitespace
+      ? normalized.replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '')
+      : normalized.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    if (cleaned) blocks.push(cleaned);
+  };
+  for (const child of root.children) {
+    if (child.id === '__search_reader_bar') continue;
+    const tag = (child.tagName || '').toUpperCase();
+    if (tag === 'H1' || child.classList.contains('byline') || child.classList.contains('search-reader-origin')) {
+      push(child.innerText || child.textContent, false);
+    } else {
+      const nodes = child.querySelectorAll(BLOCK_SELECTOR);
+      if (nodes.length > 0) {
+        for (const node of nodes) {
+          const ancestor = node.parentElement ? node.parentElement.closest(BLOCK_SELECTOR) : null;
+          if (ancestor && child.contains(ancestor)) continue;
+          const nodeTag = (node.tagName || '').toUpperCase();
+          const txt = node.innerText || node.textContent || '';
+          if (nodeTag === 'PRE') {
+            push(txt, true);
+          } else if (nodeTag === 'LI') {
+            const trimmed = txt.trim();
+            if (trimmed) push('- ' + trimmed, false);
+          } else {
+            push(txt, false);
+          }
+        }
+      } else {
+        push(child.innerText || child.textContent, false);
+      }
+    }
+  }
+  return blocks.join('\n\n');
+})();"#;
+
+thread_local! {
+    static READER_EXPORT_CHOOSERS: std::cell::RefCell<Vec<gtk::FileChooserNative>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// T50: Extract the active reading-mode article as plain text with paragraph
+/// breaks and save it atomically to a user-chosen destination.
+pub fn export_text(app: &AppRef, view: &webkit2gtk::WebView, suggested_name: String) {
+    let weak = app.weak();
+    crate::js::run_in_world(view, READER_WORLD, EXPORT_TEXT_SCRIPT, move |result| {
+        let Some(app) = weak.upgrade() else { return };
+        let text = match result {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => {
+                app.flash_error("No reading-mode text available to export");
+                return;
+            }
+            Err(err) => {
+                app.flash_error(&brief_error(&err));
+                return;
+            }
+        };
+        use gtk::prelude::{FileChooserExt, NativeDialogExt};
+        let dialog = gtk::FileChooserNative::new(
+            Some("Export Reading-Mode Text"),
+            Some(&app.ui.window),
+            gtk::FileChooserAction::Save,
+            Some("Export"),
+            Some("Cancel"),
+        );
+        dialog.set_do_overwrite_confirmation(true);
+        dialog.set_current_name(&suggested_name);
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Plain text (*.txt)"));
+        filter.add_pattern("*.txt");
+        dialog.add_filter(filter);
+        let app_weak = app.weak();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                if let (Some(app), Some(path)) = (app_weak.upgrade(), dialog.filename()) {
+                    let mut out = text.clone();
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    match crate::files::write_atomic_export(&path, out.as_bytes()) {
+                        Ok(()) => app.flash_toast("Exported reading-mode text"),
+                        Err(_) => app.flash_error("Could not write reading-mode text file"),
+                    }
+                }
+            }
+            dialog.destroy();
+            READER_EXPORT_CHOOSERS.with(|c| c.borrow_mut().retain(|kept| kept != dialog));
+        });
+        READER_EXPORT_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+        dialog.show();
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +357,14 @@ mod tests {
 
         // An error with no lines we can trust still says what failed.
         assert_eq!(brief_error(" \n  "), "Reading mode failed: the page script failed");
+    }
+
+    #[test]
+    fn export_text_script_skips_nested_blocks_and_preserves_pre() {
+        assert!(EXPORT_TEXT_SCRIPT.contains("node.parentElement.closest(BLOCK_SELECTOR)"));
+        assert!(EXPORT_TEXT_SCRIPT.contains("child.contains(ancestor)"));
+        assert!(EXPORT_TEXT_SCRIPT.contains("nodeTag === 'PRE'"));
+        assert!(EXPORT_TEXT_SCRIPT.contains("preserveWhitespace"));
     }
 }
 

@@ -1,0 +1,56 @@
+# Maintainer: Rill contributors <https://github.com/INDAR-Beurre/Rill>
+pkgname=rill
+pkgver=1.2.0
+pkgrel=1
+pkgdesc='A small, quiet native WebKit browser for Linux'
+arch=('x86_64')
+url='https://github.com/INDAR-Beurre/Rill'
+license=('MIT')
+depends=(
+  'gtk3'
+  'webkit2gtk-4.1'
+  'libsoup3'
+  'sqlite'
+  'gst-plugins-base'
+  'gst-plugins-good'
+  'hicolor-icon-theme'
+)
+makedepends=(
+  'cargo'
+  'pkgconf'
+)
+optdepends=(
+  'gst-libav: H.264 and VP9 video playback'
+  'gst-plugins-bad: additional GStreamer media codecs'
+  'gst-plugins-ugly: additional GStreamer media codecs'
+  'ttf-liberation: Liberation Serif fallback font'
+)
+provides=('search')
+conflicts=('search')
+# Replace SKIP with the release tag tarball SHA-256 via `updpkgsums` when publishing a tag.
+source=("$pkgname-$pkgver.tar.gz::https://github.com/INDAR-Beurre/Rill/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "Rill-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "${CARCH}-unknown-linux-gnu"
+}
+
+build() {
+  cd "Rill-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --bin search
+}
+
+package() {
+  cd "Rill-$pkgver"
+  install -Dm755 target/release/search "$pkgdir/usr/bin/search"
+  ln -sfn search "$pkgdir/usr/bin/rill"
+  install -Dm644 packaging/Search.desktop "$pkgdir/usr/share/applications/Search.desktop"
+  install -Dm644 packaging/search.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/search.png"
+  install -Dm644 packaging/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/search.svg"
+  install -Dm644 packaging/search.metainfo.xml "$pkgdir/usr/share/metainfo/io.github.indar_beurre.Search.metainfo.xml"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

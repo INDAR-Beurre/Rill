@@ -269,7 +269,7 @@ fn collect_bookmarks(node: &serde_json::Value, out: &mut Vec<Bookmark>) {
         let url = node.get("url").and_then(|u| u.as_str());
         let name = node.get("name").and_then(|n| n.as_str()).unwrap_or("");
         if let Some(url) = url {
-            out.push(Bookmark { url: url.to_string(), title: name.to_string() });
+            out.push(Bookmark { url: url.to_string(), title: name.to_string(), folder: String::new() });
         }
     } else if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
         for child in children {
@@ -350,7 +350,7 @@ fn firefox_db(db: &Path) -> Option<(Vec<Bookmark>, Vec<HistoryEntry>)> {
              JOIN moz_places p ON p.id = b.fk WHERE b.type = 1",
         )?;
         let bookmarks = marks
-            .query_map([], |r| Ok(Bookmark { url: r.get(0)?, title: r.get(1)? }))?
+            .query_map([], |r| Ok(Bookmark { url: r.get(0)?, title: r.get(1)?, folder: String::new() }))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut visits = conn.prepare(
             "SELECT p.url, COALESCE(p.title, ''), v.visit_date FROM moz_historyvisits v \
@@ -701,12 +701,12 @@ mod tests {
 
     #[test]
     fn bookmarks_are_not_duplicated() {
-        let mut kept = vec![Bookmark { url: "https://a.test/".into(), title: "mine".into() }];
+        let mut kept = vec![Bookmark { url: "https://a.test/".into(), title: "mine".into(), folder: String::new() }];
         merge_bookmarks(
             &mut kept,
             vec![
-                Bookmark { url: "https://a.test/".into(), title: "theirs".into() },
-                Bookmark { url: "https://b.test/".into(), title: "b".into() },
+                Bookmark { url: "https://a.test/".into(), title: "theirs".into(), folder: String::new() },
+                Bookmark { url: "https://b.test/".into(), title: "b".into(), folder: String::new() },
             ],
         );
         assert_eq!(kept.len(), 2);
@@ -881,7 +881,7 @@ mod tests {
     fn an_empty_home_changes_nothing() {
         let home = scratch("empty");
         assert!(installed(&home).is_empty());
-        let mut marks = vec![Bookmark { url: "https://a.test/".into(), title: "A".into() }];
+        let mut marks = vec![Bookmark { url: "https://a.test/".into(), title: "A".into(), folder: String::new() }];
         let mut hist = vec![history("https://a.test/", 5)];
         assert_eq!(apply(&home, Browser::Chromium, &mut marks, &mut hist), None);
         assert_eq!(marks.len(), 1);
@@ -895,7 +895,7 @@ mod tests {
         let mut visits = Vec::new();
         let haul = || {
             (
-                vec![Bookmark { url: "https://a.example/".into(), title: "A".into() }],
+                vec![Bookmark { url: "https://a.example/".into(), title: "A".into(), folder: String::new() }],
                 vec![history("https://a.example/", 5), history("https://b.example/", 6)],
             )
         };

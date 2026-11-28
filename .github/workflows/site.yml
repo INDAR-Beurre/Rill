@@ -1,0 +1,90 @@
+name: Build Rill Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/site.yml'
+  pull_request:
+    paths:
+      - 'site/**'
+      - '.github/workflows/site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check JS syntax
+        run: node --check site/release-core.mjs && node --check site/app.js
+
+      - name: Run site release-resolution tests
+        run: node --test site/tests/release-core.test.mjs
+
+      - name: Verify all site assets and relative references
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+
+            const html = fs.readFileSync("site/index.html", "utf8");
+            const appJs = fs.readFileSync("site/app.js", "utf8");
+            const css = fs.readFileSync("site/styles.css", "utf8");
+
+            const refs = new Set();
+            for (const m of html.matchAll(/(?:src|href|data-light|data-dark)="(assets\/[^"]+|styles\.css|app\.js)"/g)) {
+              refs.add(m[1]);
+            }
+            for (const m of appJs.matchAll(/["'\''](assets\/[^"'\'']+)["'\'']/g)) {
+              refs.add(m[1]);
+            }
+            for (const m of css.matchAll(/url\(["'\'']?((?:assets\/)[^"'\'')]+)["'\'']?\)/g)) {
+              refs.add(m[1]);
+            }
+
+            if (refs.size === 0) {
+              throw new Error("No asset references discovered.");
+            }
+            for (const rel of refs) {
+              const full = path.join("site", rel);
+              if (!fs.existsSync(full)) {
+                throw new Error("Missing referenced asset: " + full);
+              }
+            }
+            console.log("Verified", refs.size, "site asset and script/style references.");
+          '
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload static site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

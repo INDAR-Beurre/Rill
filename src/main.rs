@@ -52,6 +52,7 @@ mod shield_assets;
 mod store;
 mod suggest;
 mod startpage;
+mod tab_actions;
 mod ui;
 mod web;
 

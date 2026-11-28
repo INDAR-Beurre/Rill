@@ -116,6 +116,28 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> bool {
     }
 }
 
+/// Atomically write arbitrary UTF-8 or binary bytes to a user-chosen export
+/// path through a sibling temp file + fsync + rename (T34, T49).
+pub fn write_atomic_export(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = temp_path(path);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// The newest snapshot number written to each file through
 /// `write_json_ordered`. The same lock covers the write itself, so only one
 /// ordered writer works at a time, and a file never goes back to older data.

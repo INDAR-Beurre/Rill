@@ -64,6 +64,10 @@ pub enum Intent {
     MoveTabLeft,
     /// Ctrl Shift Page Down: move the active tab one slot right.
     MoveTabRight,
+    /// Alt Page Down: switch to the next Space.
+    NextSpace,
+    /// Alt Page Up: switch to the previous Space.
+    PreviousSpace,
 }
 
 pub struct Key {
@@ -180,6 +184,8 @@ impl Key {
                 "left" => return Intent::Back,
                 "right" => return Intent::Forward,
                 "home" => return Intent::Home,
+                "page_down" => return Intent::NextSpace,
+                "page_up" => return Intent::PreviousSpace,
                 _ => {}
             }
         }
@@ -227,6 +233,8 @@ pub const SHEET: &[(&str, &str, &str, &str, bool, bool, bool)] = &[
     ("duplicatetab", "Ctrl Shift K", "Duplicate this tab", "k", true, true, false),
     ("movetableft", "Ctrl Shift Page Up", "Move tab left", "page_up", true, true, false),
     ("movetabright", "Ctrl Shift Page Down", "Move tab right", "page_down", true, true, false),
+    ("nextspace", "Alt Page Down", "Next space", "page_down", false, false, true),
+    ("previousspace", "Alt Page Up", "Previous space", "page_up", false, false, true),
     ("foldcolumn", "Ctrl S", "Show or hide the tab sidebar", "s", true, false, false),
     ("toolbar", "Ctrl Shift S", "Show or hide the top controls", "s", true, true, false),
     ("back", "Alt Left", "Back", "left", false, false, true),
@@ -370,6 +378,8 @@ pub fn apply(app: &AppRef, intent: Intent) {
         Intent::SiteCard => crate::sitecard::open(app),
         Intent::MoveTabLeft => app.move_active_tab(-1),
         Intent::MoveTabRight => app.move_active_tab(1),
+        Intent::NextSpace => app.cycle_space(1),
+        Intent::PreviousSpace => app.cycle_space(-1),
     }
 }
 
@@ -598,7 +608,9 @@ mod sheet_tests {
             | Intent::FoldColumn
             | Intent::ToggleToolbar
             | Intent::MoveTabLeft
-            | Intent::MoveTabRight => true,
+            | Intent::MoveTabRight
+            | Intent::NextSpace
+            | Intent::PreviousSpace => true,
         }
     }
 
@@ -657,6 +669,8 @@ mod sheet_tests {
             Intent::ToggleToolbar,
             Intent::MoveTabLeft,
             Intent::MoveTabRight,
+            Intent::NextSpace,
+            Intent::PreviousSpace,
         ];
         for wanted in all {
             if !must_be_advertised(wanted) {
@@ -796,6 +810,9 @@ mod tests {
         assert_eq!(key("Left", false, false, true).intent(), Intent::Back);
         assert_eq!(key("Right", false, false, true).intent(), Intent::Forward);
         assert_eq!(key("Left", false, false, false).intent(), Intent::Nothing);
+        assert_eq!(key("Page_Down", false, false, true).intent(), Intent::NextSpace);
+        assert_eq!(key("Page_Up", false, false, true).intent(), Intent::PreviousSpace);
+        assert_eq!(key("Page_Down", true, false, true).intent(), Intent::Nothing);
     }
 
     #[test]
